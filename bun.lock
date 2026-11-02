@@ -11,12 +11,18 @@
     },
     "packages/cli": {
       "name": "@af/cli",
+      "dependencies": {
+        "@af/core": "workspace:*",
+      },
     },
     "packages/core": {
       "name": "@af/core",
     },
     "packages/server": {
       "name": "@af/server",
+      "dependencies": {
+        "@af/core": "workspace:*",
+      },
     },
   },
   "packages": {
