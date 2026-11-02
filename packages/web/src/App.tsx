@@ -23,6 +23,7 @@ export function App() {
   const [shell, setShell] = useState<{ paneId: string; workspaceId?: string }>();
   const [shellWs, setShellWs] = useState<string>();
   const [creating, setCreating] = useState(false);
+  const [createOn, setCreateOn] = useState<string>();
 
   // the shell drawer's workspace is not listed in the tree
   useEffect(() => {
@@ -140,7 +141,7 @@ export function App() {
         onSelectWs={selectWs}
         onSelectPane={selectPane}
         onSelectRun={(id) => (setPastRun(id), setCreating(false))}
-        onNew={() => setCreating(true)}
+        onNew={(machine) => (setCreateOn(machine), setCreating(true))}
         onAttention={onAttention}
       />
 
@@ -172,7 +173,12 @@ export function App() {
         )}
         <div className="tab-body">
           {creating || (!herdr?.workspaces.length && connected) ? (
-            <NewDialog machines={(herdr?.machines ?? []).filter((m) => m.local || m.state === "online").map((m) => ({ id: m.id, label: m.label }))} onDone={(wsId) => (setCreating(false), wsId && selectWs(wsId))} />
+            <NewDialog
+              key={createOn ?? "-"}
+              start={createOn}
+              machines={(herdr?.machines ?? []).filter((m) => m.local || m.state === "online").map((m) => ({ id: m.id, label: m.label }))}
+              onDone={(wsId) => (setCreating(false), wsId && selectWs(wsId))}
+            />
           ) : pastRun ? (
             <div className="welcome">This run's workspace is closed. Its graph and messages are on the right.</div>
           ) : !herdr ? (
@@ -263,9 +269,10 @@ export function App() {
   );
 }
 
-function NewDialog({ onDone, machines }: { onDone: (workspaceId?: string) => void; machines: { id: string; label: string }[] }) {
-  const [mode, setMode] = useState<"run" | "workspace">("run");
-  const [machine, setMachine] = useState("local");
+function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string) => void; machines: { id: string; label: string }[]; start?: string }) {
+  // "+" on a remote machine opens straight into "new workspace" there; runs are local for now
+  const [mode, setMode] = useState<"run" | "workspace">(start ? "workspace" : "run");
+  const [machine, setMachine] = useState(start ?? "local");
   const [cwd, setCwd] = useState("");
   const [label, setLabel] = useState("");
   const [kind, setKind] = useState<AgentKind>("claude");
@@ -277,7 +284,7 @@ function NewDialog({ onDone, machines }: { onDone: (workspaceId?: string) => voi
     const p =
       mode === "run"
         ? api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined }).then((meta) => meta.herdrWorkspace as string)
-        : api("POST", "/workspace/new", { cwd, machine, label: label || cwd.split("/").filter(Boolean).at(-1) }).then((r) => r.workspaceId as string);
+        : api("POST", "/workspace/new", { cwd: cwd || undefined, machine, label }).then((r) => r.workspaceId as string);
     p.then(onDone, (err) => alert(err.message)).finally(() => setBusy(false));
   };
   return (
@@ -295,7 +302,7 @@ function NewDialog({ onDone, machines }: { onDone: (workspaceId?: string) => voi
         <p>{mode === "run" ? "A lead agent starts in the directory. Tell it what you want; it builds a graph of workers." : "A plain Herdr workspace with a shell. Split it into terminals, agents and files."}</p>
         <div className="field">
           <label>Directory{mode === "run" ? " (a git repository gives each node its own worktree)" : ""}</label>
-          <input className="text" required placeholder="/path/to/project" value={cwd} onChange={(e) => setCwd(e.target.value)} />
+          <input className="text" required={mode === "run"} placeholder={mode === "run" ? "/path/to/project" : "~ (home) if empty; ~/x works on remote machines"} value={cwd} onChange={(e) => setCwd(e.target.value)} />
         </div>
         {mode === "workspace" && machines.length > 1 && (
           <div className="field">

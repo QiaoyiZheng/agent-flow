@@ -36,10 +36,12 @@ export function Sidebar({
   onSelectWs: (id: string) => void;
   onSelectPane: (workspaceId: string, tabId: string, paneId: string) => void;
   onSelectRun: (runId: string) => void;
-  onNew: () => void;
+  onNew: (machine?: string) => void;
   onAttention: (a: Attention) => void;
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [menu, setMenu] = useState<string>();
+  const [adding, setAdding] = useState(false);
   const attention = run ? Object.values(run.attention).sort((a, b) => b.at.localeCompare(a.at)) : [];
   const runOf = new Map(runs.filter((r) => r.workspace).map((r) => [r.workspace!, r]));
   const liveWs = new Set(herdr?.workspaces.map((w) => w.id));
@@ -80,10 +82,16 @@ export function Sidebar({
       <div className="tree">
         <div className="section-title" style={{ padding: "10px 14px 6px" }}>
           <span>Machines</span>
-          <button className="tab-add" style={{ margin: 0, padding: "0 6px" }} onClick={onNew} title="New run or workspace">
-            +
-          </button>
+          <span style={{ display: "flex", gap: 2 }}>
+            <button className="tab-add" style={{ margin: 0, padding: "0 6px" }} onClick={() => setAdding((v) => !v)} title="Add an SSH machine">
+              + machine
+            </button>
+            <button className="tab-add" style={{ margin: 0, padding: "0 6px" }} onClick={() => onNew()} title="New run or workspace">
+              + new
+            </button>
+          </span>
         </div>
+        {adding && <AddMachine onDone={() => setAdding(false)} />}
         {herdr?.machines.map((m) => {
           // remote machines start collapsed and connect when expanded
           const open = !(collapsed[m.id] ?? !m.local);
@@ -99,6 +107,27 @@ export function Sidebar({
                 {!m.local && <span className={`dot m-${m.state}`} />}
                 <span className="name">{m.label}</span>
                 {!m.local && <span className="meta">{m.state === "online" ? workspaces.length || "" : m.state === "connecting" ? "connecting…" : m.state === "error" ? "error" : ""}</span>}
+                <span className="row-actions" onClick={(e) => e.stopPropagation()}>
+                  {(m.local || m.state === "online") && (
+                    <button title={`New workspace on ${m.label}`} onClick={() => onNew(m.id)}>
+                      +
+                    </button>
+                  )}
+                  {!m.local && (
+                    <RowMenu id={`m:${m.id}`} open={menu} setOpen={setMenu}>
+                      {m.state !== "online" && <div className="item" onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch((e) => alert(e.message))}>Connect</div>}
+                      <div
+                        className="item danger"
+                        onClick={() => {
+                          if (confirm(`Remove ${m.label} (${m.target}) from the machine list?\n\nIt is removed from Herdr's list too. Its Herdr server and the agents running there keep running; add it again to get back to them.`))
+                            api("POST", "/machine/remove", { machine: m.id }).catch((e) => alert(e.message));
+                        }}
+                      >
+                        Remove machine…
+                      </div>
+                    </RowMenu>
+                  )}
+                </span>
               </div>
               {open && !m.local && m.state === "error" && (
                 <div className="tree-note err">
@@ -131,6 +160,20 @@ export function Sidebar({
                         <span className="name">{w.label}</span>
                         {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
                         {r && r.attention > 0 ? <span className="count">{r.attention}</span> : <span className="meta">{agents.length || ""}</span>}
+                        <span className="row-actions" onClick={(e) => e.stopPropagation()}>
+                          <RowMenu id={`w:${w.id}`} open={menu} setOpen={setMenu}>
+                            <div
+                              className="item danger"
+                              onClick={() => {
+                                const what = [agents.length ? `${agents.length} agent${agents.length > 1 ? "s" : ""}` : "", `${panes.length} pane${panes.length > 1 ? "s" : ""}`].filter(Boolean).join(", ");
+                                if (confirm(`Close workspace "${w.label}" on ${m.label}?\n\nThis stops everything running in it (${what})${r ? `, and stops run ${r.id}` : ""}.`))
+                                  api("POST", "/workspace/close", { workspace: w.id }).catch((e) => alert(e.message));
+                              }}
+                            >
+                              Close workspace…
+                            </div>
+                          </RowMenu>
+                        </span>
                       </div>
                       {wsOpen &&
                         agents.map((p) => (
@@ -165,5 +208,73 @@ export function Sidebar({
         )}
       </div>
     </aside>
+  );
+}
+
+function RowMenu({ id, open, setOpen, children }: { id: string; open?: string; setOpen: (id?: string) => void; children: React.ReactNode }) {
+  const on = open === id;
+  return (
+    <span className="menu-wrap">
+      <button title="More" onClick={() => setOpen(on ? undefined : id)}>
+        ⋯
+      </button>
+      {on && (
+        <div className="menu" onMouseLeave={() => setOpen(undefined)} onClick={() => setOpen(undefined)}>
+          {children}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function AddMachine({ onDone }: { onDone: () => void }) {
+  const [target, setTarget] = useState("");
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(undefined);
+    api("POST", "/machine/add", { target, label: label || undefined })
+      .then(onDone)
+      .catch((err) => setError(err.message))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <form className="add-machine" onSubmit={submit}>
+      <input className="text" autoFocus placeholder="SSH target: myhost or user@host" value={target} onChange={(e) => setTarget(e.target.value)} />
+      <input className="text" placeholder="Name (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
+      <div style={{ display: "flex", gap: 6 }}>
+        <button className="btn primary" disabled={busy || !target.trim()}>
+          {busy ? "Adding…" : "Add"}
+        </button>
+        <button type="button" className="btn" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+      <div className="hint">Saved in Herdr's machine list. SSH must work without a password prompt.</div>
+      {error && (
+        <div className="hint err">
+          {error}
+          {/approv|install|interactive|confirm/i.test(error) && (
+            <>
+              {" "}
+              <button
+                type="button"
+                className="c-more"
+                onClick={() =>
+                  api("POST", "/machine/setup-in-shell", { target, label: label || undefined })
+                    .then(() => alert("The setup command is waiting in the persistent shell (ctrl+` to open it). Answer its questions there."))
+                    .catch((e2) => alert(e2.message))
+                }
+              >
+                Run the setup in the persistent shell
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </form>
   );
 }

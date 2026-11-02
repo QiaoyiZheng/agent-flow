@@ -157,9 +157,17 @@ export class FakeBackend implements TerminalBackend {
   async processArgv(): Promise<string[][]> {
     return [];
   }
-  saved: { label: string; target: string; session: string }[] = [];
+  saved: { id: string; label: string; target: string; session: string }[] = [];
+  addFails?: string;
   async savedMachines() {
     return this.saved;
+  }
+  async addMachine(target: string, label?: string, session?: string) {
+    if (this.addFails) throw new Error(this.addFails);
+    this.saved.push({ id: `prof${this.saved.length + 1}`, label: label ?? target.replace(/^.*@/, ""), target, session: session ?? "default" });
+  }
+  async removeMachine(id: string) {
+    this.saved = this.saved.filter((m) => m.id !== id);
   }
   watchLifecycle(onEvent: () => void) {
     this.lifecycle.add(onEvent);

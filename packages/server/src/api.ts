@@ -80,6 +80,28 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           return json(await w.newWorkspace(body.label || "workspace", body.cwd, body.machine || "local"));
         case "POST /machine/connect":
           return json(await w.connect(String(body.machine ?? "")));
+        case "POST /machine/add":
+          return json(await w.addMachine(String(body.target ?? ""), body.label, body.session));
+        case "POST /machine/remove":
+          await w.removeMachine(String(body.machine ?? ""));
+          return json({ ok: true });
+        case "POST /machine/setup-in-shell": {
+          // Herdr asks before installing on a new machine; that needs a real terminal: type the command in the persistent shell
+          const target = String(body.target ?? "").trim();
+          if (!target || /\s/.test(target) || target.startsWith("-")) throw new AfError("bad_target", "give an SSH target such as myhost or user@host");
+          const q = (x: string) => `'${x.replace(/'/g, `'\\''`)}'`;
+          const cmd = ["herdr", "machine", "add", q(target), ...(body.label ? ["--label", q(String(body.label))] : []), ...(body.session ? ["--remote-session", q(String(body.session))] : [])].join(" ");
+          const shell = await o.shell();
+          await backend.runInPane(shell.paneId, cmd);
+          return json({ ok: true, command: cmd, pane: shell.paneId });
+        }
+        case "POST /workspace/close": {
+          const id = String(body.workspace ?? "");
+          const run = o.runByWorkspace(id);
+          if (run && !o.getRun(run).stopped) o.stopRun({ run });
+          await w.closeWorkspace(id);
+          return json({ ok: true, stoppedRun: run });
+        }
         case "POST /layout/ratio":
           await w.setRatio(body.tab, body.path, Number(body.ratio));
           return json({ ok: true });

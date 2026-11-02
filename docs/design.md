@@ -298,6 +298,8 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - **id 带机器前缀**：远程的 workspace / tab / pane id 写成 `<机器>~<原 id>`，如 `allinai2plus~w6:p3`；本地 id 不变。所有操作按前缀路由到那台机器。`af ls`、`af read`、`af split` 等对远程 id 一样可用；`af connect <机器>` 手动连接。
 - **按需连接**：远程机器默认不连；在侧栏展开、或 `af connect` 时才连。断线后按 5 s、10 s、20 s……最长 60 s 重试；断线期间那台机器的 pane 从模型里去掉，侧栏显示原因（需要密码、主机不可达、主机密钥变了、远程没有运行 Herdr……），并有"retry"。
 - 需要免密 SSH（BatchMode）。实测 allinai2plus、ds03 可以；其余机器未测。
+- **增删机器**（用户要求）：侧栏"+ machine"填 SSH 目标（和可选名字）→ `herdr machine add`，写进 Herdr 自己的机器列表（Herdr TUI 里也会出现），随后自动连接。远程没装 Herdr、需要确认安装时，Herdr 要交互确认：表单给出"在常驻终端里运行 setup"按钮，把 `herdr machine add …` 打进常驻终端，由用户回答。机器"⋯"菜单里"Remove machine…"→ `herdr machine remove`；那台机器上的 Herdr server 和 agent 继续运行，再加回来就能接上。每 15 秒同步一次 Herdr 的机器列表，在 Herdr TUI 里增删的机器也会跟着变；机器的 id 按 Herdr profile 固定。
+- **增删 workspace**（用户要求）：每台机器行上的"+"新建 workspace（远程机器支持 `~` 路径，目录在那台机器上检查）；workspace"⋯"菜单里"Close workspace…"关闭并停止其中所有进程（如果是 run 的 workspace，同时停止该 run），确认框里写明会停掉几个 agent、几个 pane。
 - 远程 agent 的渲染视图：对话记录在远程读，按 session 精确匹配（实测 3 个远程 agent 都命中）；轮询 1.5 秒一次；打开时只读最后 8 MB。
 - 远程 agent 粘贴图片：附件写到**远程机器**上，提示词里给的是远程路径，agent 能直接读。
 - 暂不支持：在远程 pane 旁边开查看器（查看器是本地进程）；在远程机器上跑 run 的 worker。

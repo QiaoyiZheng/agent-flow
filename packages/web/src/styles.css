@@ -538,3 +538,15 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .split-part > .pane.focused::after { content: none; }
 .split-part > .pane .pane-head { background: #181a1f; border-bottom-color: #2c3038; }
 .split-part > .pane.focused .pane-head { background: #1f2129; box-shadow: none; }
+
+/* ---------- row actions in the tree ---------- */
+.tree-row .row-actions { display: none; align-items: center; gap: 1px; margin-left: 4px; flex: none; }
+.tree-row:hover .row-actions, .tree-row .row-actions:has(.menu) { display: inline-flex; }
+.tree-row:hover .meta, .tree-row:hover .count { display: none; }
+.row-actions button { border: 0; background: none; color: var(--text-3); cursor: pointer; width: 20px; height: 20px; border-radius: 4px; font-size: 13px; line-height: 1; padding: 0; }
+.row-actions button:hover { background: var(--bg-3); color: var(--text); }
+.row-actions .menu { right: 0; top: 22px; min-width: 190px; font-weight: 400; }
+.menu .item.danger { color: var(--s-rejected); }
+.add-machine { margin: 0 12px 8px; padding: 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); display: flex; flex-direction: column; gap: 6px; }
+.add-machine .hint { font-size: 11px; color: var(--text-3); }
+.add-machine .hint.err { color: var(--s-rejected); }

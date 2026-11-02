@@ -24,6 +24,8 @@ export interface WorkspacesOptions {
   paneEnv: () => Record<string, string>;
   /** Builds the connection and Herdr backend for a saved remote machine. */
   remote?: (spec: { key: string; label: string; target: string; session: string }, onChange: () => void) => { remote: RemoteLike; backend: () => TerminalBackend };
+  /** How often Herdr's saved machine list is re-read (it can change in the Herdr TUI too). */
+  machinesPollMs?: number;
   now?: () => string;
   /** How often remote machines are polled (local: every refresh). */
   remotePollMs?: number;
@@ -31,6 +33,8 @@ export interface WorkspacesOptions {
 
 interface Machine {
   meta: HMachine;
+  /** Herdr's profile id, for remote machines. */
+  profileId?: string;
   backend?: TerminalBackend;
   remote?: RemoteLike;
   makeBackend?: () => TerminalBackend;
@@ -76,24 +80,75 @@ export class Workspaces {
   }
 
   async start(pollMs = 1500) {
-    const taken = new Set(["local"]);
-    for (const s of await this.opts.backend.savedMachines()) {
+    await this.reloadMachines();
+    this.watch(this.machines.get("local")!);
+    await this.refresh();
+    this.timer = setInterval(() => void this.refresh(), pollMs);
+    this.machinesTimer = setInterval(() => void this.reloadMachines().catch(() => {}), this.opts.machinesPollMs ?? 15_000);
+  }
+
+  private machinesTimer?: ReturnType<typeof setInterval>;
+
+  /** Sync with Herdr's saved machine list: add new profiles, drop removed ones. Keys stay stable per profile. */
+  async reloadMachines() {
+    const saved = await this.opts.backend.savedMachines();
+    const ids = new Set(saved.map((s) => s.id));
+    let changed = false;
+    for (const [key, m] of this.machines)
+      if (!m.meta.local && !ids.has(m.profileId!)) {
+        m.stopWatch?.();
+        m.remote?.close();
+        this.machines.delete(key);
+        changed = true;
+      }
+    const known = new Set([...this.machines.values()].map((m) => m.profileId));
+    const taken = new Set(this.machines.keys());
+    for (const s of saved) {
+      if (known.has(s.id)) continue;
       const key = machineKey(s.label, taken);
       const m = this.newMachine({ id: key, label: s.label, target: s.target, local: false, state: "offline", session: s.session });
+      m.profileId = s.id;
       if (this.opts.remote) {
-        const r = this.opts.remote({ key, ...s }, () => this.remoteChanged(key));
+        const r = this.opts.remote({ key, label: s.label, target: s.target, session: s.session }, () => this.remoteChanged(key));
         m.remote = r.remote;
         m.makeBackend = r.backend;
       } else m.meta.error = "remote machines are not enabled";
       this.machines.set(key, m);
+      changed = true;
     }
-    this.watch(this.machines.get("local")!);
+    if (changed) this.publish(true);
+  }
+
+  /** Save a new SSH machine in Herdr (so the Herdr TUI has it too) and connect to it. */
+  async addMachine(target: string, label?: string, session?: string): Promise<HMachine> {
+    const t = target.trim();
+    if (!t || /\s/.test(t) || t.startsWith("-")) throw new AfError("bad_target", "give an SSH target such as myhost, user@host or ssh://user@host:2222");
+    const before = new Set([...this.machines.values()].map((m) => m.profileId));
+    try {
+      await this.opts.backend.addMachine(t, label?.trim() || undefined, session?.trim() || undefined);
+    } catch (e) {
+      throw new AfError("machine_add_failed", (e as Error).message, 422);
+    }
+    await this.reloadMachines();
+    const added = [...this.machines.values()].find((m) => !m.meta.local && !before.has(m.profileId));
+    if (!added) throw new AfError("machine_add_failed", "Herdr saved nothing new; is the machine already in the list?", 409);
+    await this.connect(added.meta.id);
+    return added.meta;
+  }
+
+  /** Remove a machine from Herdr's list. Its remote Herdr server and sessions keep running. */
+  async removeMachine(key: string) {
+    const m = this.machines.get(key);
+    if (!m) throw new AfError("unknown_machine", `no machine ${key}`, 404);
+    if (m.meta.local) throw new AfError("local_machine", "the local machine cannot be removed");
+    await this.opts.backend.removeMachine(m.profileId!);
+    await this.reloadMachines();
     await this.refresh();
-    this.timer = setInterval(() => void this.refresh(), pollMs);
   }
 
   stop() {
     clearInterval(this.timer);
+    clearInterval(this.machinesTimer);
     clearTimeout(this.debounce);
     for (const m of this.machines.values()) {
       m.stopWatch?.();
@@ -289,14 +344,36 @@ export class Workspaces {
     return { paneId: r.prefix(res.paneId), tabId: r.prefix(res.tabId) };
   }
 
-  async newWorkspace(label: string, cwd: string, machine = "local") {
+  async newWorkspace(label: string, cwd: string | undefined, machine = "local") {
     const m = this.machines.get(machine);
     if (!m?.backend) throw new AfError("machine_offline", `${machine} is not connected`, 503);
-    if (m.meta.local && !existsSync(cwd)) throw new AfError("bad_cwd", `${cwd} does not exist`);
-    const r = await m.backend.createWorkspace(label, cwd);
+    let dir = cwd?.trim() || (m.meta.local ? (process.env.HOME ?? "/") : (m.remote?.home ?? "~"));
+    if (m.meta.local && !existsSync(dir)) throw new AfError("bad_cwd", `${dir} does not exist`);
+    if (!m.meta.local) {
+      if (dir === "~" || dir.startsWith("~/")) dir = `${m.remote?.home ?? ""}${dir.slice(1)}`;
+      const r = await m.remote!.exec(`test -d ${sq(dir)} && echo ok`);
+      if (r.out.toString().trim() !== "ok") throw new AfError("bad_cwd", `${dir} does not exist on ${m.meta.label}`);
+    }
+    const r = await m.backend.createWorkspace(label.trim() || basename(dir) || "workspace", dir);
     await this.changed(machine);
     const p = (x: string) => (machine === "local" ? x : `${machine}${MACHINE_SEP}${x}`);
     return { workspaceId: p(r.workspaceId), tabId: p(r.tabId), paneId: p(r.paneId) };
+  }
+
+  /** Close a workspace and stop everything running in it. */
+  async closeWorkspace(workspaceId: string) {
+    if (!this.model.workspaces.some((w) => w.id === workspaceId)) throw new AfError("unknown_workspace", `no Herdr workspace ${workspaceId}`, 404);
+    const r = this.route(workspaceId);
+    try {
+      await r.backend.closeWorkspace(r.raw);
+    } catch (e) {
+      // a repo workspace with linked worktree workspaces must be closed as a group
+      if (!/group/i.test((e as Error).message)) throw new AfError("close_failed", (e as Error).message);
+      await r.backend.closeWorkspace(r.raw, true);
+    }
+    for (const id of Object.keys(this.views)) if (!this.model.panes.some((p) => p.id === id && p.workspaceId !== workspaceId)) delete this.views[id];
+    this.saveViews();
+    await this.changed(r.m.meta.id);
   }
 
   async closeTab(tabId: string) {

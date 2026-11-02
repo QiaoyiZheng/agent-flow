@@ -120,7 +120,7 @@ describe("workspaces: remote machines", () => {
   test("remote ids are prefixed, operations route to the right machine, offline machines refuse clearly", async () => {
     const home = tmp("af-ws-remote-");
     const local = new FakeBackend();
-    local.saved = [{ label: "ds03", target: "ds03", session: "default" }, { label: "Build box", target: "me@build", session: "default" }];
+    local.saved = [{ id: "p1", label: "ds03", target: "ds03", session: "default" }, { id: "p2", label: "Build box", target: "me@build", session: "default" }];
     const remoteBackend = new FakeBackend();
     const execs: string[] = [];
     const remotes = new Map<string, { state: any; error?: string; home?: string; onChange: () => void }>();
@@ -197,6 +197,92 @@ describe("workspaces: remote machines", () => {
     await w.refresh();
     expect(w.model.panes.filter((p) => p.machine === "ds03")).toEqual([]);
     expect(w.model.machines.find((m) => m.id === "ds03")).toMatchObject({ state: "error", error: "connection lost" });
+    w.stop();
+  });
+});
+
+describe("workspaces: adding and removing machines and workspaces", () => {
+  function make() {
+    const home = tmp("af-ws-add-");
+    const local = new FakeBackend();
+    const remoteBackend = new FakeBackend();
+    const execs: string[] = [];
+    const w = new Workspaces({
+      home,
+      backend: local,
+      paneEnv: () => ({}),
+      remotePollMs: 0,
+      remote: (spec, onChange) => {
+        const r = {
+          state: "offline" as any,
+          error: undefined as string | undefined,
+          home: "/home/u",
+          async connect() {
+            r.state = "online";
+            onChange();
+          },
+          close() {},
+          async exec(cmd: string) {
+            execs.push(cmd);
+            return { code: 0, out: Buffer.from(cmd.includes("/nope") ? "" : "ok\n"), err: "" };
+          },
+        };
+        return { remote: r, backend: () => remoteBackend };
+      },
+    });
+    return { home, local, remoteBackend, w, execs };
+  }
+
+  test("add a machine: saved in Herdr, appears, connects; remove: gone; bad input is refused", async () => {
+    const { local, w } = make();
+    await w.start(60_000);
+    const m = await w.addMachine("me@gpu-box", "GPU box");
+    expect(m).toMatchObject({ id: "gpu-box", label: "GPU box", target: "me@gpu-box", state: "online" });
+    expect(local.saved.map((x) => x.target)).toEqual(["me@gpu-box"]);
+    expect(w.model.machines.map((x) => x.id)).toEqual(["local", "gpu-box"]);
+    await expect(w.addMachine("has space")).rejects.toThrow(/SSH target/);
+    await expect(w.addMachine("-oProxyCommand=x")).rejects.toThrow(/SSH target/);
+    local.addFails = "remote Herdr needs approval to install; run herdr machine add in a terminal";
+    await expect(w.addMachine("other")).rejects.toThrow(/approval to install/);
+
+    await w.removeMachine("gpu-box");
+    expect(local.saved).toEqual([]);
+    expect(w.model.machines.map((x) => x.id)).toEqual(["local"]);
+    await expect(w.removeMachine("local")).rejects.toThrow(/cannot be removed/);
+  });
+
+  test("machines added or removed in the Herdr TUI show up after a reload, with stable keys", async () => {
+    const { local, w } = make();
+    local.saved = [{ id: "a", label: "ds03", target: "ds03", session: "default" }];
+    await w.start(60_000);
+    local.saved.push({ id: "b", label: "tea0", target: "tea0", session: "default" });
+    await w.reloadMachines();
+    expect(w.model.machines.map((x) => x.id)).toEqual(["local", "ds03", "tea0"]);
+    local.saved = local.saved.filter((x) => x.id !== "a");
+    await w.reloadMachines();
+    expect(w.model.machines.map((x) => x.id)).toEqual(["local", "tea0"]);
+  });
+
+  test("create and close workspaces, locally and on a remote machine", async () => {
+    const { home, local, remoteBackend, w, execs } = make();
+    local.saved = [{ id: "a", label: "ds03", target: "ds03", session: "default" }];
+    await w.start(60_000);
+    const lw = await w.newWorkspace("", home);
+    expect(w.model.workspaces.find((x) => x.id === lw.workspaceId)!.label).toBe(home.split("/").at(-1)!);
+    await expect(w.newWorkspace("x", join(home, "missing"))).rejects.toThrow(/does not exist/);
+
+    await w.connect("ds03");
+    const rw = await w.newWorkspace("paper", "~/paper", "ds03");
+    expect(rw.workspaceId).toStartWith("ds03~");
+    expect(execs.at(-1)).toContain("'/home/u/paper'"); // ~ expanded to the remote home, checked there
+    await expect(w.newWorkspace("x", "/nope", "ds03")).rejects.toThrow(/does not exist on ds03/);
+
+    await w.closeWorkspace(rw.workspaceId);
+    expect(w.model.workspaces.some((x) => x.id === rw.workspaceId)).toBe(false);
+    expect(remoteBackend.workspaces.size).toBe(0);
+    await w.closeWorkspace(lw.workspaceId);
+    expect(w.model.workspaces).toEqual([]);
+    await expect(w.closeWorkspace("w999")).rejects.toThrow(/no Herdr workspace/);
     w.stop();
   });
 });

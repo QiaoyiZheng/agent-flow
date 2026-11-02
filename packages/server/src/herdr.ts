@@ -28,7 +28,7 @@ export interface TerminalBackend {
   readPane(paneId: string, lines: number): Promise<string>;
   paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
-  closeWorkspace(workspaceId: string): Promise<void>;
+  closeWorkspace(workspaceId: string, group?: boolean): Promise<void>;
   /** argv for a streaming terminal session (control or observe), used by the WebSocket bridge. */
   terminalSessionArgv(paneId: string, mode: "control" | "observe", cols: number, rows: number): string[];
 
@@ -42,11 +42,22 @@ export interface TerminalBackend {
   runInPane(paneId: string, command: string): Promise<void>;
   renamePane(paneId: string, label: string): Promise<void>;
   /** Saved remote machines (`herdr machine list`). Only meaningful on the local backend. */
-  savedMachines(): Promise<{ label: string; target: string; session: string }[]>;
+  savedMachines(): Promise<SavedMachine[]>;
+  /** `herdr machine add`, non-interactive: fails (with Herdr's message) if the remote needs approval to install. */
+  addMachine(target: string, label?: string, session?: string): Promise<void>;
+  removeMachine(profileId: string): Promise<void>;
   /** argv of the pane's foreground processes. */
   processArgv(paneId: string): Promise<string[][]>;
   /** Call `onEvent` on any workspace/tab/pane/layout lifecycle event. Returns a stop function. */
   watchLifecycle(onEvent: () => void): () => void;
+}
+
+export interface SavedMachine {
+  /** Herdr's profile id. */
+  id: string;
+  label: string;
+  target: string;
+  session: string;
 }
 
 export interface HerdrSnapshot {
@@ -195,8 +206,9 @@ export class Herdr implements TerminalBackend {
     await this.cli(["tab", "close", tabId]).catch(() => {});
   }
 
-  async closeWorkspace(workspaceId: string) {
-    await this.cli(["workspace", "close", workspaceId]).catch(() => {});
+  /** Close a workspace and everything running in it. `group` also closes its linked worktree workspaces. */
+  async closeWorkspace(workspaceId: string, group = false) {
+    await this.rpc("workspace.close", { workspace_id: workspaceId, close_group: group });
   }
 
   async snapshot(): Promise<HerdrSnapshot> {
@@ -260,10 +272,29 @@ export class Herdr implements TerminalBackend {
     return (r?.process_info?.foreground_processes ?? []).map((p: any) => (Array.isArray(p.argv) ? p.argv : []));
   }
 
+  async addMachine(target: string, label?: string, session?: string) {
+    const p = Bun.spawn([this.bin, "machine", "add", target, ...(label ? ["--label", label] : []), ...(session ? ["--remote-session", session] : [])], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HERDR_SOCKET_PATH: this.socket },
+    });
+    const killer = setTimeout(() => p.kill(), 120_000);
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    await p.exited;
+    clearTimeout(killer);
+    if (p.exitCode !== 0) throw new HerdrError("machine_add_failed", (err.trim() || out.trim() || `herdr machine add exited with ${p.exitCode}`).split("\n").slice(-4).join(" "));
+  }
+
+  async removeMachine(profileId: string) {
+    const p = Bun.spawnSync([this.bin, "machine", "remove", profileId], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HERDR_SOCKET_PATH: this.socket } });
+    if (p.exitCode !== 0) throw new HerdrError("machine_remove_failed", p.stderr.toString().trim() || p.stdout.toString().trim());
+  }
+
   async savedMachines() {
     const p = Bun.spawnSync([this.bin, "machine", "list", "--json"], { stdout: "pipe", stderr: "pipe" });
     try {
-      return (JSON.parse(p.stdout.toString()) as any[]).filter((m) => m.enabled).map((m) => ({ label: String(m.label), target: String(m.target), session: String(m.session ?? "default") }));
+      return (JSON.parse(p.stdout.toString()) as any[]).filter((m) => m.enabled).map((m) => ({ id: String(m.id), label: String(m.label), target: String(m.target), session: String(m.session ?? "default") }));
     } catch {
       return [];
     }
