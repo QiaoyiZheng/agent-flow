@@ -262,6 +262,8 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - 触发：订阅 Herdr 的生命周期事件（workspace / tab / pane / layout，全部可以不带过滤条件订阅；只有 `pane.agent_status_changed` 必须指定 pane），80 ms 防抖；外加每 1.5 秒轮询一次以更新 agent 状态。变化时推给所有网页。
 - 分隔线：`layout.set_split_ratio {tab_id, path, ratio}`，path 是从根往下的布尔数组，`false` = first，`true` = second（实测）。
 - 远程机器：见 10.2.3。
+- 分屏之间是 5 px 的分隔条，当前聚焦的 pane 有蓝色描边（用户要求边界更明显）。
+- 查看器进程在 server 重启时不退出（以前会退出，导致查看器 pane 随之关闭）。
 - 已知副作用：网页打开某个 pane 时，会把它的 PTY 调成网页里的尺寸；如果用户同时在 Herdr TUI 里看着同一个 tab，两边会按"最后操作的一方"来回调尺寸（Herdr 的多客户端规则）。
 
 ### 10.2.2 agent 输出自动渲染（2026-11-02，用户要求：像 Claude app / VS Code 插件那样渲染 markdown 和 LaTeX）
@@ -269,13 +271,14 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - agent pane（claude / codex / omp）默认显示**渲染视图**，pane 头上可以切换"rendered | terminal"，选择按 pane 记在浏览器里。
 - 渲染视图：上面是已经完成的输出，markdown（GFM 表格、列表、引用）+ LaTeX（KaTeX：`$$…$$`、`\[…\]` 为独立公式，`$…$`、`\(…\)` 为行内；"$5 和 $10" 这类不当成公式）+ 代码高亮（Shiki，关闭连字，`<=` 照原样显示）；工具调用是可展开的卡片（命令、输出、编辑的 diff）；agent-flow 的唤醒通知、斜杠命令显示成小字。下面保留一条**实时终端**：用来打字、回答审批、看正在生成的内容。它显示的是终端里最后有内容的那几行（claude 的输入框紧跟在输出后面，不一定在屏幕底部），PTY 尺寸不变；agent 在等审批时自动变高。
 - **数据来源是 agent 自己写的对话记录，不是终端画面**（画面已被折叠、截断）：
-  - claude：`~/.claude/projects/*/<session>.jsonl`。agent-flow 启动的 claude 一律加 `--session-id <uuid>`，所以能精确找到；别人启动的 claude 先看进程参数里的 `--resume` / `--session-id`，再按目录找最新的一个，同目录有多个 claude 时放弃并显示终端。
+  - claude：`~/.claude/projects/*/<session>.jsonl`。agent-flow 启动的 claude 一律加 `--session-id <uuid>` 和 `--settings ~/.agent-flow/claude-settings.json`；后者加一个 SessionStart hook（`af hook claude-session`），claude 启动、`/clear`、恢复会话时都会把 session id 和对话文件路径报给 agent-flow（实测可用，和用户自己的 settings 合并）。别人启动的 claude：先看进程参数里的 `--resume` / `--session-id`；同目录只有一个 claude 就取该目录最新的对话文件；**同目录有多个 claude**（如 rhv93 的 review 和 review3）时，把 pane 屏幕上的提问行（❯）和回答行（●）去掉空白和 markdown 符号后，与各候选文件的最后 2 MB 比对，命中最多且明显领先的那个就是它的（实测 rhv93 三个 claude 全部匹配正确）；比不出来才显示终端。
   - codex：Herdr 记录的 session id → `~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`。
   - omp：Herdr 直接记录的路径。
 - server 每 0.5 秒看一次文件有没有变长，只解析新增的行，通过 WebSocket 推给网页（实测：工具调用写入后约 1 秒内出现在网页上）。不是逐字流式：文件按"一段正文 / 一次工具调用"写入。
 - 这些文件格式没有文档、可能随版本变化：解析器对未知字段一律跳过；找不到或解析不了就显示终端并说明原因。实现：`packages/server/src/transcripts/`，测试：`packages/server/test/transcripts.test.ts`。
 - 查看器里打开的 markdown 文件用同一套渲染（含 LaTeX）。
 - **折叠**（用户要求）：连续的工具调用合成一行"N steps · Bash ×3 · edited calc.js"，默认折叠，点开是各个工具卡片，卡片再点开才显示命令、输出、diff。用户消息超过 4 行折叠，"show more" 展开。
+- **发出去的消息立刻显示**：发送后先在对话末尾显示一个虚线气泡（"sending…" → agent 忙时 "queued — the agent reads it after its current step"），等它出现在 agent 的对话记录里再变成正常消息。claude 在忙时收到的消息不记成普通 user 消息，而是 `queued_command` 类型的 attachment（实测），解析器按用户消息处理并去重。草稿（文字和正在上传的附件）按 pane 保存，切到别处再回来还在；文字还存在浏览器里，刷新也不丢。
 - **我们自己的输入框**（用户要求，代替终端自带的输入行）：Enter 发送、Shift+Enter 换行、中文输入法组字时不误发。可以粘贴图片、拖入文件、点 ＋ 选文件，支持多个。文件先上传到 `~/.agent-flow/attachments/<日期>/<随机>-<名字>`，发送时在提示词最前面加：
   ```
   Read these attached files first:

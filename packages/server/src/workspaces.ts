@@ -48,8 +48,8 @@ const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
 export class Workspaces {
   model: HerdrModel = { machines: [], workspaces: [], tabs: [], panes: [], layouts: {} };
   views: Record<string, ViewRec> = {};
-  /** Session ids of agents started by agent-flow outside runs (claude --session-id), by pane. */
-  sessions: Record<string, string> = {};
+  /** Sessions by pane: given at launch (claude --session-id) or reported by claude's SessionStart hook. */
+  sessions: Record<string, { id: string; path?: string }> = {};
   private machines = new Map<string, Machine>();
   private listeners = new Set<() => void>();
   private refreshing?: Promise<void>;
@@ -65,7 +65,9 @@ export class Workspaces {
     this.now = opts.now ?? (() => new Date().toISOString());
     if (existsSync(this.viewsFile)) this.views = JSON.parse(readFileSync(this.viewsFile, "utf8"));
     const sf = join(opts.home, "sessions.json");
-    if (existsSync(sf)) this.sessions = JSON.parse(readFileSync(sf, "utf8"));
+    if (existsSync(sf))
+      for (const [k, v] of Object.entries(JSON.parse(readFileSync(sf, "utf8")) as Record<string, unknown>))
+        this.sessions[k] = typeof v === "string" ? { id: v } : (v as { id: string; path?: string });
     this.machines.set("local", this.newMachine({ id: "local", label: "Local", target: "local", local: true, state: "online" }, opts.backend));
   }
 
@@ -390,8 +392,8 @@ export class Workspaces {
     return rec;
   }
 
-  rememberSession(paneId: string, session: string) {
-    this.sessions[paneId] = session;
+  rememberSession(paneId: string, id: string, path?: string) {
+    this.sessions[paneId] = { id, path };
     writeFileSync(join(this.opts.home, "sessions.json"), JSON.stringify(this.sessions, null, 2));
   }
 

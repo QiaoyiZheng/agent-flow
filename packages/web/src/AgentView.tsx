@@ -13,6 +13,75 @@ import { basename } from "./view";
 type Tool = Extract<ChatBlock, { kind: "tool" }>;
 let seq = 0;
 
+/** Same normalization as the server: compare texts without whitespace or markdown marks. */
+const norm = (t: string) => t.replace(/[\s*_`#>|$\\~•●⏺❯›⎿]+/g, "").toLowerCase();
+
+/** A tiny per-pane store that outlives the component, so drafts and sent messages survive switching panes. */
+function paneStore<T>(initial: (pane: string) => T, persist?: (pane: string, v: T) => void) {
+  const values = new Map<string, T>();
+  const subs = new Map<string, Set<() => void>>();
+  const get = (pane: string) => {
+    if (!values.has(pane)) values.set(pane, initial(pane));
+    return values.get(pane)!;
+  };
+  const update = (pane: string, fn: (v: T) => T) => {
+    const v = fn(get(pane));
+    values.set(pane, v);
+    persist?.(pane, v);
+    subs.get(pane)?.forEach((f) => f());
+  };
+  const use = (pane: string) => {
+    const [, force] = useReducer((x: number) => x + 1, 0);
+    useEffect(() => {
+      const set = subs.get(pane) ?? new Set();
+      subs.set(pane, set);
+      set.add(force);
+      return () => void set.delete(force);
+    }, [pane]);
+    return get(pane);
+  };
+  return { get, update, use };
+}
+
+interface PendingFile {
+  id: number;
+  name: string;
+  preview?: string;
+  path?: string;
+  error?: string;
+}
+interface Draft {
+  text: string;
+  files: PendingFile[];
+}
+const drafts = paneStore<Draft>(
+  (pane) => ({ text: localStorage.getItem(`af-draft:${pane}`) ?? "", files: [] }),
+  (pane, d) => (d.text ? localStorage.setItem(`af-draft:${pane}`, d.text) : localStorage.removeItem(`af-draft:${pane}`)),
+);
+
+interface Outgoing {
+  id: number;
+  /** What the user typed. */
+  body: string;
+  files: string[];
+  /** The full prompt sent to the agent (with the attachments line). */
+  prompt: string;
+  at: number;
+  state: "sending" | "sent" | "failed";
+  error?: string;
+}
+const outbox = paneStore<Outgoing[]>(() => []);
+let outSeq = 0;
+
+function sendOutgoing(pane: string, o: Outgoing) {
+  outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sending", error: undefined } : x)));
+  api<{ sent: string }>("POST", "/prompt", { pane, text: o.body, attachments: o.files })
+    .then((r) => outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sent", prompt: r.sent, at: Date.now() } : x))))
+    .catch((e) => outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "failed", error: e.message } : x))));
+}
+
+const entryTime = (at: unknown) => (typeof at === "number" ? at : typeof at === "string" ? Date.parse(at) : NaN);
+
 /** Entries plus an index so tool results can find their call. */
 class Log {
   entries: ChatEntry[] = [];
@@ -69,6 +138,38 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
   const [showTerm, setShowTerm] = useState(false);
   const [hl, setHl] = useState(0);
   useEffect(() => onHighlighterReady(() => setHl(1)), []);
+  const out = outbox.use(paneId);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!out.length) return;
+    const t = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [out.length]);
+
+  // a sent message leaves the outbox once the agent's own conversation records it
+  useEffect(() => {
+    const list = outbox.get(paneId);
+    if (!list.some((o) => o.state === "sent")) return;
+    const users = log.current.entries.filter((e) => e.block.kind === "user") as (ChatEntry & { block: { kind: "user"; text: string } })[];
+    const claimed = new Set<string>();
+    const done = new Set<number>();
+    for (const o of list) {
+      if (o.state !== "sent") continue;
+      const key = norm(o.prompt).slice(0, 60);
+      const hit = users.find((e) => {
+        if (claimed.has(e.key)) return false;
+        const t = entryTime(e.at);
+        if (!Number.isNaN(t) && t < o.at - 10 * 60_000) return false;
+        const n = norm(e.block.text);
+        return n.includes(key) || (n.length >= 8 && key.includes(n.slice(0, 60)));
+      });
+      if (hit) {
+        claimed.add(hit.key);
+        done.add(o.id);
+      }
+    }
+    if (done.size) outbox.update(paneId, (l) => l.filter((o) => !done.has(o.id)));
+  }, [version, out]);
 
   useEffect(() => {
     const id = `c${++seq}`;
@@ -102,7 +203,7 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
   useLayoutEffect(() => {
     const el = list.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [version, source, showTerm]);
+  }, [version, source, showTerm, out.length]);
 
   const blocked = status === "blocked";
   const termVisible = blocked || showTerm;
@@ -138,7 +239,11 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
             <Entry key={s.entry.key} block={s.entry.block} hl={hl} />
           ),
         )}
+        {out.map((o) => (
+          <OutgoingMessage key={o.id} o={o} pane={paneId} working={status === "working"} stale={o.state === "sent" && now - o.at > 30_000 && status !== "working"} onTerminal={() => setShowTerm(true)} />
+        ))}
         {source?.how === "folder" && <div className="chat-note">Transcript matched by folder: {source.path}</div>}
+        {source?.how === "screen" && <div className="chat-note">Transcript matched by screen content: {source.path}</div>}
       </div>
       {termVisible && height > 0 && (
         <div className={`live ${blocked ? "blocked" : ""}`}>
@@ -227,6 +332,58 @@ function AttachmentChip({ path, onRemove, preview, busy }: { path: string; onRem
         </button>
       )}
     </span>
+  );
+}
+
+function OutgoingMessage({ o, pane, working, stale, onTerminal }: { o: Outgoing; pane: string; working: boolean; stale: boolean; onTerminal: () => void }) {
+  const label =
+    o.state === "sending"
+      ? "sending…"
+      : o.state === "failed"
+        ? `not sent: ${o.error}`
+        : working
+          ? "queued — the agent reads it after its current step"
+          : stale
+            ? "sent, but the agent has not picked it up yet"
+            : "sent";
+  return (
+    <div className={`c-user pending ${o.state}`}>
+      <span className="c-caret">›</span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        {o.files.length > 0 && (
+          <div className="c-files">
+            {o.files.map((f) => (
+              <AttachmentChip key={f} path={f} />
+            ))}
+          </div>
+        )}
+        {o.body && <div className="c-user-text">{o.body}</div>}
+        <div className="c-pending">
+          <span className={`live-dot ${o.state === "failed" ? "blocked" : "working"}`} />
+          {label}
+          {o.state === "failed" && (
+            <>
+              <button className="c-more" onClick={() => sendOutgoing(pane, o)}>
+                retry
+              </button>
+              <button className="c-more" onClick={() => outbox.update(pane, (l) => l.filter((x) => x.id !== o.id))}>
+                remove
+              </button>
+            </>
+          )}
+          {stale && (
+            <>
+              <button className="c-more" onClick={onTerminal}>
+                show terminal
+              </button>
+              <button className="c-more" onClick={() => outbox.update(pane, (l) => l.filter((x) => x.id !== o.id))}>
+                dismiss
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -324,20 +481,13 @@ function Patch({ text }: { text: string }) {
 
 // ---------------------------------------------------------------------------------------------
 
-interface Pending {
-  id: number;
-  name: string;
-  preview?: string;
-  path?: string;
-  error?: string;
-}
-
 let fileSeq = 0;
 
 function Composer({ paneId, agent, focused, disabled, onSlash }: { paneId: string; agent: string; focused: boolean; disabled: boolean; onSlash: () => void }) {
-  const [text, setText] = useState("");
-  const [files, setFiles] = useState<Pending[]>([]);
-  const [sending, setSending] = useState(false);
+  const draft = drafts.use(paneId);
+  const { text, files } = draft;
+  const setText = (t: string) => drafts.update(paneId, (d) => ({ ...d, text: t }));
+  const setFiles = (fn: (fs: PendingFile[]) => PendingFile[]) => drafts.update(paneId, (d) => ({ ...d, files: fn(d.files) }));
   const [drag, setDrag] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -372,24 +522,17 @@ function Composer({ paneId, agent, focused, disabled, onSlash }: { paneId: strin
 
   const uploading = files.some((f) => !f.path && !f.error);
   const ready = files.filter((f) => f.path);
-  const canSend = !disabled && !sending && !uploading && (text.trim().length > 0 || ready.length > 0);
+  const canSend = !disabled && !uploading && (text.trim().length > 0 || ready.length > 0);
 
   const submit = () => {
     if (!canSend) return;
-    setSending(true);
-    const body = text;
-    api("POST", "/prompt", { pane: paneId, text: body, attachments: ready.map((f) => f.path) })
-      .then(() => {
-        setText("");
-        files.forEach((f) => f.preview && URL.revokeObjectURL(f.preview));
-        setFiles([]);
-        if (body.trim().startsWith("/")) onSlash();
-      })
-      .catch((e) => alert(e.message))
-      .finally(() => {
-        setSending(false);
-        ta.current?.focus();
-      });
+    const body = text.trim();
+    const o: Outgoing = { id: ++outSeq, body, files: ready.map((f) => f.path!), prompt: body, at: Date.now(), state: "sending" };
+    outbox.update(paneId, (l) => [...l, o]);
+    drafts.update(paneId, () => ({ text: "", files: [] }));
+    sendOutgoing(paneId, o);
+    if (body.startsWith("/")) onSlash();
+    ta.current?.focus();
   };
 
   return (
@@ -454,7 +597,7 @@ function Composer({ paneId, agent, focused, disabled, onSlash }: { paneId: strin
           }}
         />
         <button className="composer-send" disabled={!canSend} onClick={submit} title="Send (Enter)">
-          {sending ? "…" : "↑"}
+          ↑
         </button>
       </div>
     </div>

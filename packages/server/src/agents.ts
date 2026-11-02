@@ -11,6 +11,25 @@ export type Role = "lead" | "worker";
 export interface AgentConfig {
   /** Extra flags per kind, appended after the injection flags. From ~/.agent-flow/config.json. */
   args: Partial<Record<AgentKind, string[]>>;
+  /** Settings file with agent-flow's SessionStart hook, passed to claude with --settings. */
+  claudeSettings?: string;
+}
+
+/**
+ * claude settings that add one SessionStart hook: it tells agent-flow which conversation file the agent
+ * writes, at startup and again after /clear or a resume. Merged with the user's own settings by claude.
+ */
+export function writeClaudeSettings(home: string, sock: string, af: string) {
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const file = join(home, "claude-settings.json");
+  const command = `AF_SOCK=${q(sock)} ${q(af)} hook claude-session`;
+  writeFileSync(file, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command, timeout: 10 }] }] } }, null, 2));
+  return file;
+}
+
+/** Flags for claude agents agent-flow starts outside runs. */
+export function claudeExtraArgs(config: AgentConfig, session: string) {
+  return ["--session-id", session, ...(config.claudeSettings ? ["--settings", config.claudeSettings] : [])];
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -34,7 +53,7 @@ export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, co
   switch (kind) {
     case "claude":
       // --session-id: lets agent-flow find the transcript it renders (~/.claude/projects/*/<id>.jsonl)
-      return ["--append-system-prompt-file", protocolFile, ...(session ? ["--session-id", session] : []), ...extra];
+      return ["--append-system-prompt-file", protocolFile, ...(session ? ["--session-id", session] : []), ...(config.claudeSettings ? ["--settings", config.claudeSettings] : []), ...extra];
     case "codex":
       // --no-alt-screen: in the alternate screen Herdr keeps no scrollback, so the UI could not scroll codex back
       return ["-p", writeCodexProfile(role, protocolFile), "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];

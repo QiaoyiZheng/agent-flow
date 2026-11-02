@@ -257,8 +257,19 @@ async function main() {
       });
       return console.log(`showing ${v.target} in pane ${v.paneId}`);
     }
+    case "hook": {
+      // called by claude's SessionStart hook; must never fail or block the agent
+      if (pos[0] !== "claude-session") return;
+      try {
+        const input = await Promise.race([Bun.stdin.text(), Bun.sleep(3000).then(() => "")]);
+        const d = JSON.parse(input || "{}");
+        if (PANE && d.session_id && existsSync(SOCK))
+          await fetch("http://af/session", { method: "POST", unix: SOCK, headers: { "content-type": "application/json" }, body: JSON.stringify({ pane: PANE, id: d.session_id, path: d.transcript_path, source: d.source }) } as RequestInit);
+      } catch {}
+      return;
+    }
     case "viewer":
-      return (await import("./viewer.ts")).runViewer(call, PANE);
+      return (await import("./viewer.ts")).runViewer(SOCK, PANE);
     case "ls": {
       const r = await call("GET", "/ls");
       return out(flags, r, () => formatLs(r));

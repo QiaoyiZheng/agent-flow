@@ -3,7 +3,16 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 
-type Call = (method: "GET" | "POST", path: string, body?: Record<string, unknown>) => Promise<any>;
+/** Ask the server what this pane shows. Never exits: while the server restarts, keep the last view. */
+async function currentTarget(sock: string, pane: string): Promise<string | undefined> {
+  try {
+    const r = await fetch(`http://af/view?pane=${encodeURIComponent(pane)}`, { unix: sock } as RequestInit);
+    if (!r.ok) return undefined;
+    return ((await r.json()) as { target?: string } | null)?.target;
+  } catch {
+    return undefined;
+  }
+}
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
 const MAX_LINES = 3000;
@@ -30,7 +39,7 @@ function render(target: string): string {
   return head + lines.map((l, i) => `\x1b[2m${String(i + 1).padStart(w)}\x1b[0m  ${l}`).join("\r\n") + "\r\n";
 }
 
-export async function runViewer(call: Call, pane: string | undefined) {
+export async function runViewer(sock: string, pane: string | undefined) {
   if (!pane) {
     console.error("af viewer runs inside a Herdr pane (HERDR_PANE_ID is not set)");
     process.exit(2);
@@ -50,10 +59,7 @@ export async function runViewer(call: Call, pane: string | undefined) {
   process.on("SIGTERM", bye);
   let shown = "";
   for (;;) {
-    let target: string | undefined;
-    try {
-      target = (await call("GET", "/view", { pane }))?.target;
-    } catch {}
+    const target = await currentTarget(sock, pane);
     if (target) {
       let stamp = target;
       try {

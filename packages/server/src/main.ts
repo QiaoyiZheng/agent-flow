@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect } from "node:net";
-import { loadConfig } from "./agents.ts";
+import { loadConfig, writeClaudeSettings } from "./agents.ts";
 import { Herdr } from "./herdr.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { serve } from "./api.ts";
@@ -53,7 +53,8 @@ export async function main(argv: string[]) {
     process.exit(1);
   });
   const binDir = installShim(home);
-  const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config: loadConfig(home) });
+  const config = { ...loadConfig(home), claudeSettings: writeClaudeSettings(home, sock, join(binDir, "af")) };
+  const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config });
   const n = o.load();
   o.start(1000);
   const w = new Workspaces({

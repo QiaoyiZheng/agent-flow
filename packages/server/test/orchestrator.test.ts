@@ -59,6 +59,8 @@ describe("orchestrator: a full review loop in a git repo", () => {
 
     // lead started with the lead protocol injected, and gets the user's prompt once idle
     expect(backend.agentPane(hn("lead"))!.agent!.args).toContain("--append-system-prompt-file");
+    const leadArgs = backend.agentPane(hn("lead"))!.agent!.args;
+    expect(leadArgs[leadArgs.indexOf("--session-id") + 1]).toBe(o.getRun(run).agents.lead!.session!); // so its transcript is found exactly
     expect(backend.envs.get("lead")).toMatchObject({ AF_RUN: run, AF_AGENT: "lead" });
     const tabsOfRun = [...backend.tabs.values()].filter((t) => t.workspaceId === meta.herdrWorkspace);
     expect(tabsOfRun.map((t) => t.label)).toEqual(["lead"]); // the lead uses the workspace's root pane: no empty shell tab

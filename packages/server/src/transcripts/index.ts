@@ -23,8 +23,8 @@ const RECENT_DAYS = 14;
 export interface TranscriptFS {
   claudeById(id: string): Promise<string | undefined>;
   codexById(id: string): Promise<string | undefined>;
-  /** Newest claude transcript (last two weeks) whose recorded cwd is `cwd`. */
-  claudeByFolder(cwd: string): Promise<string | undefined>;
+  /** Claude transcripts (last two weeks) whose recorded cwd is `cwd`, newest first, at most `limit`. */
+  claudeForFolder(cwd: string, limit: number): Promise<string[]>;
   exists(path: string): Promise<boolean>;
   /** Bytes from `offset` (at most `max`), and the file's current size. undefined if the file is gone. */
   readFrom(path: string, offset: number, max: number): Promise<{ size: number; data: Buffer } | undefined>;
@@ -77,10 +77,10 @@ export class LocalFS implements TranscriptFS {
     return undefined;
   }
 
-  async claudeByFolder(cwd: string) {
-    if (!existsSync(this.roots.claude)) return undefined;
+  async claudeForFolder(cwd: string, limit: number) {
+    if (!existsSync(this.roots.claude)) return [];
     const cutoff = Date.now() - RECENT_DAYS * 86400_000;
-    let best: { path: string; mtime: number } | undefined;
+    const hits: { path: string; mtime: number }[] = [];
     for (const dir of readdirSync(this.roots.claude)) {
       const d = join(this.roots.claude, dir);
       let files: string[];
@@ -92,17 +92,17 @@ export class LocalFS implements TranscriptFS {
       for (const f of files) {
         const path = join(d, f);
         const mtime = statSync(path).mtimeMs;
-        if (mtime < cutoff || (best && mtime <= best.mtime)) continue;
+        if (mtime < cutoff) continue;
         let c = this.cwdCache.get(path);
         if (!c || c.mtime !== mtime) {
           const m = readHead(path).match(/"cwd":"((?:[^"\\]|\\.)*)"/);
           c = { mtime, cwd: m ? JSON.parse(`"${m[1]}"`) : undefined };
           this.cwdCache.set(path, c);
         }
-        if (c.cwd === cwd) best = { path, mtime };
+        if (c.cwd === cwd) hits.push({ path, mtime });
       }
     }
-    return best?.path;
+    return hits.sort((a, b) => b.mtime - a.mtime).slice(0, limit).map((h) => h.path);
   }
 
   async exists(path: string) {
@@ -149,11 +149,12 @@ export class SshFS implements TranscriptFS {
     return this.line(`ls -1 "$HOME"/.codex/sessions/*/*/*/*-${id}.jsonl 2>/dev/null | head -n 1`);
   }
 
-  claudeByFolder(cwd: string) {
+  async claudeForFolder(cwd: string, limit: number) {
     const needle = sq(`"cwd":${JSON.stringify(cwd)}`);
-    return this.line(
-      `find "$HOME/.claude/projects" -name '*.jsonl' -mtime -${RECENT_DAYS} 2>/dev/null | xargs ls -t 2>/dev/null | head -n 80 | while IFS= read -r f; do head -c 20000 "$f" | grep -qF ${needle} && { echo "$f"; break; }; done`,
+    const r = await this.exec(
+      `find "$HOME/.claude/projects" -name '*.jsonl' -mtime -${RECENT_DAYS} 2>/dev/null | xargs ls -t 2>/dev/null | head -n 120 | while IFS= read -r f; do head -c 20000 "$f" | grep -qF ${needle} && echo "$f"; done | head -n ${Math.max(1, Math.floor(limit))}`,
     );
+    return r.out.toString().split("\n").map((l) => l.trim()).filter(Boolean);
   }
 
   async exists(path: string) {
@@ -178,20 +179,76 @@ export interface ResolveInput {
   pane: HPane;
   /** All panes, to tell when several claude agents share one folder. */
   panes: HPane[];
-  /** Session id known to agent-flow for this pane (from launch). */
+  /** Session known to agent-flow for this pane: given at launch, or reported by the agent's SessionStart hook. */
   knownSession?: string;
+  knownPath?: string;
+  /** The pane's recent screen text, to tell apart several claude agents in one folder. */
+  screen?: () => Promise<string>;
   /** argv of the pane's foreground processes, fetched lazily. */
   argv: () => Promise<string[][]>;
 }
 
 const isAgent = (a: string | undefined): a is Agent => a === "claude" || a === "codex" || a === "omp";
 
-export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSession, argv }: ResolveInput): Promise<{ source: ChatSource } | { reason: string }> {
+/** Text compared between a screen and a transcript: no whitespace, markdown marks, or bullets. */
+export const norm = (t: string) => t.replace(/[\s*_`#>|$\\~•●⏺❯›⎿]+/g, "").toLowerCase();
+
+/** Lines the agent drew for prompts and replies ("❯ …", "● …"), normalized, as matching keys. */
+export function screenSnippets(screen: string) {
+  const out = new Set<string>();
+  for (const line of screen.split("\n")) {
+    const m = line.match(/^\s*(?:❯|>|●|⏺)\s*(.+)$/);
+    if (!m) continue;
+    const n = norm(m[1]!);
+    if (n.length >= 10) out.add(n.slice(0, 24));
+  }
+  return [...out];
+}
+
+/** Normalized user text, assistant text and tool lines of a claude transcript's last part. */
+async function transcriptText(fs: TranscriptFS, path: string) {
+  const head = await fs.readFrom(path, 0, 0);
+  if (!head) return "";
+  const from = Math.max(0, head.size - 2 * 1024 * 1024);
+  const r = await fs.readFrom(path, from, 2 * 1024 * 1024);
+  if (!r) return "";
+  const ctx = { n: 0 };
+  const parts: string[] = [];
+  for (const l of r.data.toString("utf8").split("\n")) {
+    try {
+      for (const op of PARSERS.claude(JSON.parse(l), ctx))
+        if (op.op === "add") {
+          const b = op.entry.block;
+          parts.push(b.kind === "tool" ? `${b.name}(${b.summary}` : "text" in b ? b.text : "");
+        }
+    } catch {}
+  }
+  return norm(parts.join("\n"));
+}
+
+/** Of several candidate transcripts, the one whose content the pane's screen shows, if that is clear. */
+export async function matchByScreen(fs: TranscriptFS, candidates: string[], screen: string) {
+  const snippets = screenSnippets(screen);
+  if (!snippets.length || !candidates.length) return undefined;
+  const scored = await Promise.all(
+    candidates.map(async (path) => {
+      const text = await transcriptText(fs, path);
+      return { path, score: snippets.filter((s) => text.includes(s)).length };
+    }),
+  );
+  scored.sort((a, b) => b.score - a.score);
+  const [best, next] = scored;
+  const enough = best!.score >= Math.min(2, snippets.length);
+  return enough && best!.score > (next?.score ?? 0) ? best!.path : undefined;
+}
+
+export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSession, knownPath, screen, argv }: ResolveInput): Promise<{ source: ChatSource } | { reason: string }> {
   const agent = pane.agent;
   if (!isAgent(agent)) return { reason: pane.agent ? `rendering ${pane.agent} output is not supported yet` : "no agent in this pane" };
   const byId = (id: string) => (agent === "claude" ? fs.claudeById(id) : agent === "codex" ? fs.codexById(id) : Promise.resolve(undefined));
   const found = (path: string | undefined, how: ChatSource["how"]) => (path ? { source: { agent, path, how } } : undefined);
 
+  if (knownPath && (await fs.exists(knownPath))) return { source: { agent, path: knownPath, how: "session" } };
   if (knownSession) {
     const r = found(await byId(knownSession), "session");
     if (r) return r;
@@ -211,8 +268,13 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
       }
     }
     const sharing = panes.filter((p) => p.agent === "claude" && p.cwd === pane.cwd && p.machine === pane.machine).length;
-    if (sharing > 1) return { reason: `${sharing} claude agents run in ${pane.cwd}; cannot tell which transcript is this one` };
-    const r = found(await fs.claudeByFolder(pane.cwd), "folder");
+    if (sharing > 1) {
+      const candidates = await fs.claudeForFolder(pane.cwd, 15);
+      const hit = screen ? await matchByScreen(fs, candidates, await screen().catch(() => "")) : undefined;
+      if (hit) return { source: { agent, path: hit, how: "screen" } };
+      return { reason: `${sharing} claude agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
+    }
+    const r = found((await fs.claudeForFolder(pane.cwd, 1))[0], "folder");
     if (r) return r;
     return { reason: "no claude transcript for this folder yet" };
   }

@@ -8,6 +8,7 @@ import { AGENT_KINDS } from "@af/core";
 import { AfError, type Orchestrator } from "./orchestrator.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
+import { claudeExtraArgs } from "./agents.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
 import { ChatBridge } from "./transcripts/bridge.ts";
@@ -95,6 +96,11 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         case "POST /keys":
           await w.sendKeys(body.pane, Array.isArray(body.keys) ? body.keys.map(String) : []);
           return json({ ok: true });
+        case "POST /session": {
+          // from claude's SessionStart hook (af hook claude-session)
+          if (body.pane && body.id) w.rememberSession(String(body.pane), String(body.id), body.path ? String(body.path) : undefined);
+          return json({ ok: true });
+        }
         case "POST /attention/dismiss":
           o.dismiss(caller, body.id);
           return json({ ok: true });
@@ -132,7 +138,8 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
   const session = kind === "claude" ? crypto.randomUUID() : undefined;
   if (session) w.rememberSession(paneId, session);
   const route = w.route(paneId);
-  const r = await route.backend.startAgent(name, kind, route.raw, session ? ["--session-id", session] : kind === "codex" ? ["--no-alt-screen"] : []);
+  const args = session ? (route.local ? claudeExtraArgs(o.opts.config, session) : ["--session-id", session]) : kind === "codex" ? ["--no-alt-screen"] : [];
+  const r = await route.backend.startAgent(name, kind, route.raw, args);
   await w.refresh();
   return { paneId, agent: name, started: r.ok };
 }
@@ -230,7 +237,15 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
       open(ws) {
         const send = (m: ServerPush) => ws.send(JSON.stringify(m));
         ws.data.bridge = new TerminalBridge((p, mode, cols, rows) => w.terminalArgv(p, mode, cols, rows), send);
-        ws.data.chat = new ChatBridge({ fsFor, send, panes: () => w.model.panes, knownSession: (p) => o.sessionForPane(p) ?? w.sessions[p], argv: (p) => w.processArgv(p) });
+        ws.data.chat = new ChatBridge({
+          fsFor,
+          send,
+          panes: () => w.model.panes,
+          // the hook's report wins: it follows /clear and resumes
+          knownSession: (p) => w.sessions[p] ?? (o.sessionForPane(p) ? { id: o.sessionForPane(p) } : undefined),
+          argv: (p) => w.processArgv(p),
+          screen: (p) => w.read(p, 400),
+        });
         send({ type: "hello", runs: o.listRuns() });
         ws.send(herdrPush());
         clients.add(ws);

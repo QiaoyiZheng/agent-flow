@@ -10,8 +10,9 @@ interface Opts {
   fsFor: (paneId: string) => { fs: TranscriptFS; remote: boolean };
   send: (m: ServerPush) => void;
   panes: () => HPane[];
-  knownSession: (paneId: string) => string | undefined;
+  knownSession: (paneId: string) => { id?: string; path?: string } | undefined;
   argv: (paneId: string) => Promise<string[][]>;
+  screen: (paneId: string) => Promise<string>;
 }
 
 interface Open {
@@ -40,7 +41,15 @@ export class ChatBridge {
     const panes = this.opts.panes();
     const pane = panes.find((p) => p.id === o.paneId);
     if (!pane) return this.opts.send({ type: "chat.reset", id, source: null, reason: "pane is gone", ops: [] });
-    const r = await resolveTranscript(fs, { pane, panes, knownSession: this.opts.knownSession(o.paneId), argv: () => this.opts.argv(o.paneId).catch(() => []) });
+    const known = this.opts.knownSession(o.paneId);
+    const r = await resolveTranscript(fs, {
+      pane,
+      panes,
+      knownSession: known?.id,
+      knownPath: known?.path,
+      argv: () => this.opts.argv(o.paneId).catch(() => []),
+      screen: () => this.opts.screen(o.paneId),
+    });
     if (o.closed) return;
     if ("reason" in r) {
       if (!o.tail) this.opts.send({ type: "chat.reset", id, source: null, reason: r.reason, ops: [] });
@@ -60,7 +69,9 @@ export class ChatBridge {
         const where = this.opts.fsFor(o.paneId);
         remote = where.remote;
         // re-resolve now and then: the agent may start a new session (/clear, /new) or write its first file
-        if (!o.tail || Date.now() - o.lastResolve > (remote ? 10_000 : 3_000)) await this.resolve(id, o, where.fs);
+        // (cheap when the session is known; screen matching reads candidate files, so it runs less often)
+        const every = o.tail && o.tail.source.how !== "session" ? 20_000 : remote ? 10_000 : 3_000;
+        if (Date.now() - o.lastResolve > every) await this.resolve(id, o, where.fs);
         if (o.tail && !o.closed) {
           const { ops, reset } = await o.tail.read();
           if (o.closed) break;

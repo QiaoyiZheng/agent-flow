@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, HPane } from "@af/core";
 import { parseClaude, parseCodex, parseOmp } from "../src/transcripts/parse.ts";
-import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, resolveTranscript } from "../src/transcripts/index.ts";
+import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, matchByScreen, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -50,6 +50,22 @@ describe("claude transcript", () => {
       { op: "result", id: "t1", output: "a\nb", error: false },
       { op: "result", id: "t2", output: "failed", error: true },
     ]);
+  });
+});
+
+describe("claude: messages sent while the agent works", () => {
+  test("a queued_command attachment is the user's message; a later plain copy is not shown twice", () => {
+    const q = "第二条：这条是在你忙的时候发的";
+    const ops = run(parseClaude, [
+      { type: "queue-operation", operation: "enqueue", content: q },
+      { type: "attachment", attachment: { type: "queued_command", prompt: q, commandMode: "prompt", origin: { kind: "human" }, timestamp: "t9" }, timestamp: "t9" },
+      { type: "attachment", attachment: { type: "queued_command", prompt: "from a task", commandMode: "prompt", origin: { kind: "task" } } },
+      { type: "attachment", attachment: { type: "hook_success" } },
+      { type: "user", message: { role: "user", content: q } },
+      { type: "user", message: { role: "user", content: q } },
+    ]);
+    expect(blocks(ops)).toEqual([{ kind: "user", text: q }, { kind: "user", text: q }]); // the queued one, then a genuine second send
+    expect(ops[0]).toMatchObject({ op: "add", entry: { at: "t9" } });
   });
 });
 
@@ -137,7 +153,7 @@ describe("finding and following transcripts", () => {
       expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: async () => [["claude", "--resume", id]] })).toMatchObject({ source: { how: "session" } });
       expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: none })).toEqual({ source: { agent: "claude", path: claudeFile, how: "folder" } }); // newest for the folder
       const twin = pane({ id: "w1:p2", agent: "claude" });
-      expect(await resolveTranscript(fs, { pane: c, panes: [c, twin], argv: none })).toEqual({ reason: "2 claude agents run in /proj; cannot tell which transcript is this one" });
+      expect(await resolveTranscript(fs, { pane: c, panes: [c, twin], argv: none })).toEqual({ reason: "2 claude agents run in /proj and the screen does not show which conversation is this one yet" });
       const elsewhere = pane({ id: "ds03~w1:p2", machine: "ds03", agent: "claude" });
       expect(await resolveTranscript(fs, { pane: c, panes: [c, elsewhere], argv: none })).toMatchObject({ source: { how: "folder" } }); // same folder on another machine does not count
       const x = pane({ agent: "codex", session: { kind: "id", value: "abc-123" } });
@@ -168,6 +184,36 @@ describe("finding and following transcripts", () => {
       expect(blocks(r.ops)).toEqual([{ kind: "text", text: "fresh" }]);
     });
   }
+
+  test("several claude agents in one folder: the screen tells which transcript is whose", async () => {
+    const root = tmp();
+    const dir = join(root, ".claude/projects/-proj");
+    mkdirSync(dir, { recursive: true });
+    const conv = (id: string, prompt: string, reply: string) => {
+      const lines = [
+        { type: "user", cwd: "/proj", message: { role: "user", content: prompt } },
+        { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: reply }] } },
+        { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Bash", input: { command: "node test.js" } }] } },
+      ];
+      writeFileSync(join(dir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+      return join(dir, `${id}.jsonl`);
+    };
+    const lead = conv("aaaaaaaa-0000-0000-0000-000000000001", "[agent-flow] New message m16 from agent-flow. Run: af inbox", "**mul** and **div** are both in calc.js, and all tests pass.");
+    const other = conv("aaaaaaaa-0000-0000-0000-000000000002", "explain the Cauchy-Schwarz inequality", "柯西-施瓦茨不等式：在任意内积空间中，两个向量内积的绝对值不超过它们范数的乘积");
+    const fs = new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, "none") });
+    const leadScreen = "❯ [agent-flow] New message m16 from agent-flow. Run: af inbox\n\n● mul and div are both in calc.js, and all tests pass.\n● Bash(node test.js)\n  ⎿  all tests passed\n\n❯ 我";
+    expect(screenSnippets(leadScreen).length).toBe(3); // the half-typed "我" is too short to count
+    expect(await matchByScreen(fs, [lead, other], leadScreen)).toBe(lead);
+    expect(await matchByScreen(fs, [lead, other], "● 柯西-施瓦茨不等式：在任意内积空间中，两个向量内积的绝对值\n❯ explain the Cauchy-Schwarz inequality")).toBe(other);
+    expect(await matchByScreen(fs, [lead, other], "❯ something neither of them said at all")).toBeUndefined();
+
+    const a = pane({ agent: "claude" });
+    const b = pane({ id: "w1:p2", agent: "claude" });
+    expect(await resolveTranscript(fs, { pane: a, panes: [a, b], argv: async () => [], screen: async () => leadScreen })).toEqual({ source: { agent: "claude", path: lead, how: "screen" } });
+    expect(await resolveTranscript(fs, { pane: a, panes: [a, b], argv: async () => [], screen: async () => "" })).toMatchObject({ reason: expect.stringContaining("does not show which conversation") });
+    // a path reported by the SessionStart hook wins over everything
+    expect(await resolveTranscript(fs, { pane: a, panes: [a, b], knownPath: other, argv: async () => [], screen: async () => leadScreen })).toEqual({ source: { agent: "claude", path: other, how: "session" } });
+  });
 
   test("a large transcript opens at its last part, from a whole line", async () => {
     const root = tmp();
