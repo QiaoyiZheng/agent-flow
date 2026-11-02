@@ -14,7 +14,7 @@ const KIND_LABEL: Record<Attention["kind"], string> = {
 };
 
 const statusDot = (s: string) =>
-  s === "working" ? "active" : s === "blocked" ? "needs" : s === "idle" || s === "done" ? "quiet" : s === "exited" ? "stopped" : "";
+  s === "working" ? "active" : s === "blocked" ? "blocked-dot" : s === "idle" || s === "done" ? "quiet" : s === "exited" ? "stopped" : "";
 
 export function Sidebar({
   herdr,

@@ -25,6 +25,8 @@ export interface TerminalBackend {
   prompt(name: string, text: string): Promise<void>;
   /** Send logical keys (esc, enter, up, ctrl+c) to the agent in a pane. */
   sendKeys(target: string, keys: string[]): Promise<void>;
+  /** Type literal text into a pane, without Enter. */
+  sendText(paneId: string, text: string): Promise<void>;
   readPane(paneId: string, lines: number): Promise<string>;
   paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
@@ -186,6 +188,10 @@ export class Herdr implements TerminalBackend {
 
   async sendKeys(target: string, keys: string[]) {
     await this.cli(["agent", "send-keys", target, ...keys]);
+  }
+
+  async sendText(paneId: string, text: string) {
+    await this.cli(["pane", "send-text", paneId, text]);
   }
 
   async readPane(paneId: string, lines: number) {

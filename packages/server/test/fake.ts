@@ -114,8 +114,13 @@ export class FakeBackend implements TerminalBackend {
   async sendKeys(target: string, keys: string[]) {
     this.keys.push({ target, keys });
   }
+  texts: { pane: string; text: string }[] = [];
+  screens = new Map<string, string>();
+  async sendText(pane: string, text: string) {
+    this.texts.push({ pane, text });
+  }
   async readPane(paneId: string) {
-    return `screen of ${paneId}\n`;
+    return this.screens.get(paneId) ?? `screen of ${paneId}\n`;
   }
   async paneExists(paneId: string) {
     return this.panes.has(paneId);

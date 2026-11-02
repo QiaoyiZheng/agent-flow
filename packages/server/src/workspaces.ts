@@ -13,6 +13,7 @@ import type { TerminalBackend } from "./herdr.ts";
 import { AfError } from "./orchestrator.ts";
 import { saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
+import { type Menu, keysToChoose, parseMenu } from "./menu.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec">;
@@ -412,6 +413,31 @@ export class Workspaces {
     const path = res.out.toString().trim();
     if (res.code !== 0 || !path) throw new AfError("upload_failed", `could not store the file on ${r.m.meta.label}: ${res.err}`);
     return { path, name, size: bytes.length, remote: true };
+  }
+
+  /** The option menu an agent is showing (a question, an approval), if any. */
+  async menu(pane: string): Promise<Menu | undefined> {
+    return parseMenu(await this.read(pane, 80));
+  }
+
+  /**
+   * Pick option `index` of the menu on screen, as a user would with the arrow keys and Enter. `label` must
+   * still match, so a menu that changed in the meantime is not answered by mistake. `text` fills in a
+   * free-text option ("Type something.", "No, and tell Claude what to do differently").
+   */
+  async choose(pane: string, index: number, label: string, text?: string) {
+    const menu = await this.menu(pane);
+    if (!menu) throw new AfError("no_menu", "the agent is not showing a menu any more", 409);
+    const opt = menu.options[index];
+    if (!opt || (label && opt.label !== label)) throw new AfError("menu_changed", "the menu changed; look again", 409);
+    const keys = keysToChoose(menu, index);
+    const r = this.route(pane);
+    if (text?.trim() && opt.freeText) {
+      if (keys.length > 1) await r.backend.sendKeys(r.raw, keys.slice(0, -1));
+      await r.backend.sendText(r.raw, text.replace(/[\r\n]+/g, " ").trim());
+      await r.backend.sendKeys(r.raw, ["enter"]);
+    } else await r.backend.sendKeys(r.raw, keys);
+    return { keys, option: opt.label };
   }
 
   async read(pane: string, lines = 120) {

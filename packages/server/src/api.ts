@@ -115,6 +115,10 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           await w.prompt(body.pane, text);
           return json({ ok: true, sent: text });
         }
+        case "GET /pane/menu":
+          return json({ menu: (await w.menu(String(body.pane ?? ""))) ?? null });
+        case "POST /pane/choose":
+          return json(await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined));
         case "POST /keys":
           await w.sendKeys(body.pane, Array.isArray(body.keys) ? body.keys.map(String) : []);
           return json({ ok: true });

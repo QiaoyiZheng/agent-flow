@@ -286,6 +286,7 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
   - …
   ```
   再接用户的话，通过 `herdr agent prompt <pane>` 送达（实测：claude 按路径读到图片并正确回答）。
+- **选项菜单渲染**（用户要求）：agent 弹出选项时（claude 的提问 AskUserQuestion、工具审批、文件夹信任框、codex 审批），server 从屏幕上读出这个菜单（`packages/server/src/menu.ts`：找最靠下的 ❯/› 指针，读同一缩进的选项、更深缩进的说明、上方的问题、下方的按键提示），渲染视图里显示成一张选项卡片：点选项、按 1–9、或 ↑/↓ 加 Enter；"Type something." 这类自由输入选项点开是一个输入框；"Cancel (Esc)"。选择时 server 重新读一次屏幕，确认选项文字没变（防止菜单已经换了），再发方向键和 Enter，和用户亲手按键完全一样。读不出菜单时照旧显示实时终端。实测：claude 的提问，点 "LaTeX"，claude 收到 `"…"="LaTeX"`。
 - 实时终端默认隐藏，只在三种情况出现：agent 等审批或提问（blocked，自动出现，输入框禁用并提示去终端回答）；发送了以 `/` 开头的斜杠命令（可能弹菜单）；用户点状态栏的 "terminal"。agent 工作时状态栏有 "■ Stop"（发 Esc）。
 
 ### 10.2.3 远程机器（2026-11-02）

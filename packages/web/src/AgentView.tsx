@@ -199,14 +199,16 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
     return () => ro.disconnect();
   }, []);
 
+  const blocked = status === "blocked";
+  const menu = useMenu(paneId, blocked);
+
   // keep the newest output in view unless the user scrolled up
   useLayoutEffect(() => {
     const el = list.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [version, source, showTerm, out.length]);
-
-  const blocked = status === "blocked";
-  const termVisible = blocked || showTerm;
+  }, [version, source, showTerm, out.length, !!menu]);
+  // the live terminal is only needed for prompts we cannot draw ourselves
+  const termVisible = (blocked && !menu) || showTerm;
   const stripH = Math.round(Math.min(height * 0.7, Math.max(180, height * (blocked ? 0.55 : 0.4))));
   const segs = useMemo(() => segments(log.current.entries), [version]);
 
@@ -242,6 +244,7 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
         {out.map((o) => (
           <OutgoingMessage key={o.id} o={o} pane={paneId} working={status === "working"} stale={o.state === "sent" && now - o.at > 30_000 && status !== "working"} onTerminal={() => setShowTerm(true)} />
         ))}
+        {menu && blocked && <MenuCard key={menu.options.map((o) => o.label).join("|")} pane={paneId} menu={menu} focused={focused} />}
         {source?.how === "folder" && <div className="chat-note">Transcript matched by folder: {source.path}</div>}
         {source?.how === "screen" && <div className="chat-note">Transcript matched by screen content: {source.path}</div>}
       </div>
@@ -252,20 +255,20 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
       )}
       <div className={`agent-status ${status ?? ""}`}>
         <span className={`live-dot ${status ?? ""}`} />
-        <span>{blocked ? "waiting for your answer in the terminal" : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
+        <span>{blocked ? (menu ? "waiting for your choice" : "waiting for your answer in the terminal") : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
         <span className="spacer" />
         {status === "working" && (
           <button title="Interrupt (Esc)" onClick={() => api("POST", "/keys", { pane: paneId, keys: ["esc"] }).catch((e) => alert(e.message))}>
             ■ Stop
           </button>
         )}
-        {!blocked && (
+        {(!blocked || menu) && (
           <button className={showTerm ? "on" : ""} onClick={() => setShowTerm((v) => !v)} title="Show the agent's live terminal (menus, approvals, output in progress)">
             {showTerm ? "hide terminal" : "terminal"}
           </button>
         )}
       </div>
-      <Composer paneId={paneId} agent={agent} focused={focused && !blocked} disabled={blocked} onSlash={() => setShowTerm(true)} />
+      <Composer paneId={paneId} agent={agent} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : undefined} onSlash={() => setShowTerm(true)} />
     </div>
   );
 }
@@ -483,7 +486,21 @@ function Patch({ text }: { text: string }) {
 
 let fileSeq = 0;
 
-function Composer({ paneId, agent, focused, disabled, onSlash }: { paneId: string; agent: string; focused: boolean; disabled: boolean; onSlash: () => void }) {
+function Composer({
+  paneId,
+  agent,
+  focused,
+  disabled,
+  disabledHint,
+  onSlash,
+}: {
+  paneId: string;
+  agent: string;
+  focused: boolean;
+  disabled: boolean;
+  disabledHint?: string;
+  onSlash: () => void;
+}) {
   const draft = drafts.use(paneId);
   const { text, files } = draft;
   const setText = (t: string) => drafts.update(paneId, (d) => ({ ...d, text: t }));
@@ -580,7 +597,7 @@ function Composer({ paneId, agent, focused, disabled, onSlash }: { paneId: strin
           rows={1}
           value={text}
           disabled={disabled}
-          placeholder={disabled ? "Answer the question in the terminal above" : `Message ${agent} — Enter to send, Shift+Enter for a new line, paste or drop images and files`}
+          placeholder={disabled ? (disabledHint ?? "Answer the question in the terminal above") : `Message ${agent} — Enter to send, Shift+Enter for a new line, paste or drop images and files`}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
             const fl = e.clipboardData.files;
@@ -598,6 +615,150 @@ function Composer({ paneId, agent, focused, disabled, onSlash }: { paneId: strin
         />
         <button className="composer-send" disabled={!canSend} onClick={submit} title="Send (Enter)">
           ↑
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// option menus (questions, approvals) drawn by the agent in its terminal, rendered as buttons
+
+interface MenuOption {
+  index: number;
+  number?: number;
+  label: string;
+  description?: string;
+  selected: boolean;
+  freeText: boolean;
+}
+interface AgentMenu {
+  question: string[];
+  options: MenuOption[];
+  hint?: string;
+  multiSelect: boolean;
+}
+
+/** While the agent is blocked, read the menu on its screen once a second. */
+function useMenu(pane: string, blocked: boolean) {
+  const [menu, setMenu] = useState<AgentMenu | undefined>();
+  useEffect(() => {
+    if (!blocked) {
+      setMenu(undefined);
+      return;
+    }
+    let alive = true;
+    let last = "";
+    const poll = () =>
+      api<{ menu: AgentMenu | null }>("GET", "/pane/menu", { pane })
+        .then((r) => {
+          if (!alive) return;
+          const key = JSON.stringify(r.menu);
+          if (key !== last) {
+            last = key;
+            setMenu(r.menu ?? undefined);
+          }
+        })
+        .catch(() => {});
+    void poll();
+    const t = setInterval(poll, 1000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [pane, blocked]);
+  return menu;
+}
+
+function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focused: boolean }) {
+  const [hi, setHi] = useState(menu.options.find((o) => o.selected)?.index ?? 0);
+  const [typing, setTyping] = useState<number>();
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focused && typing === undefined) box.current?.focus();
+  }, [focused, typing]);
+
+  const choose = (o: MenuOption, withText?: string) => {
+    if (o.freeText && withText === undefined) {
+      setTyping(o.index);
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    api("POST", "/pane/choose", { pane, index: o.index, label: o.label, text: withText })
+      .catch((e) => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+  const cancel = () => api("POST", "/keys", { pane, keys: ["esc"] }).catch((e) => setError(e.message));
+  const [title, ...rest] = menu.question;
+  const titleIsTab = !!title && /^[☐☑☒✔✓□■]/.test(title);
+  const lines = titleIsTab ? rest : menu.question;
+
+  return (
+    <div
+      ref={box}
+      className={`menu-card ${busy ? "busy" : ""}`}
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (typing !== undefined) return;
+        const n = Number(e.key);
+        if (n >= 1 && n <= 9) {
+          const o = menu.options.find((x) => (x.number ?? x.index + 1) === n);
+          if (o) (e.preventDefault(), choose(o));
+        } else if (e.key === "ArrowDown") (e.preventDefault(), setHi((h) => Math.min(menu.options.length - 1, h + 1)));
+        else if (e.key === "ArrowUp") (e.preventDefault(), setHi((h) => Math.max(0, h - 1)));
+        else if (e.key === "Enter") (e.preventDefault(), choose(menu.options[hi]!));
+        else if (e.key === "Escape") (e.preventDefault(), cancel());
+      }}
+    >
+      {titleIsTab && <div className="menu-tab">{title!.replace(/^[☐☑☒✔✓□■]\s*/, "")}</div>}
+      {lines.length > 0 && (
+        <div className="menu-question">
+          {lines.map((l, i) => (
+            <div key={i} className={/^\$ |^[a-z0-9_./-]+ .*[|&;]|^(npm|git|rm|ls|cd|bun|node|python3?|make|cargo|go) /i.test(l) ? "cmd" : ""}>
+              {l}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="menu-options">
+        {menu.options.map((o) =>
+          typing === o.index ? (
+            <form
+              key={o.index}
+              className="menu-option typing"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (text.trim()) choose(o, text);
+              }}
+            >
+              <span className="menu-num">{o.number ?? o.index + 1}</span>
+              <input className="text" autoFocus placeholder={o.label} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Escape" && (e.preventDefault(), setTyping(undefined))} />
+              <button className="btn primary" disabled={!text.trim() || busy}>
+                Send
+              </button>
+            </form>
+          ) : (
+            <button key={o.index} className={`menu-option ${o.index === hi ? "hi" : ""}`} disabled={busy} onClick={() => choose(o)} onMouseEnter={() => setHi(o.index)}>
+              <span className="menu-num">{o.number ?? o.index + 1}</span>
+              <span className="menu-label">
+                {o.label}
+                {o.description && <span className="menu-desc">{o.description}</span>}
+              </span>
+              {o.freeText && <span className="menu-type">type…</span>}
+            </button>
+          ),
+        )}
+      </div>
+      <div className="menu-foot">
+        <span>{menu.multiSelect ? "Toggle options, then choose the submit option" : "Click, or press 1–9 · ↑/↓ and Enter"}</span>
+        <span className="spacer" />
+        {error && <span className="menu-err">{error}</span>}
+        <button className="c-more" onClick={cancel} title="Esc">
+          Cancel (Esc)
         </button>
       </div>
     </div>

@@ -287,6 +287,34 @@ describe("workspaces: adding and removing machines and workspaces", () => {
   });
 });
 
+describe("menus: an agent's question answered from the UI", () => {
+  test("choose sends arrows and Enter; free text is typed in place; a changed menu is refused", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    await w.refresh();
+    const screen = ["Which format?", "", "❯ 1. Markdown", "  2. LaTeX", "  3. Type something.", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n");
+    backend.screens.set(ws.paneId, screen);
+    const m = (await w.menu(ws.paneId))!;
+    expect(m.options.map((o) => o.label)).toEqual(["Markdown", "LaTeX", "Type something."]);
+
+    await w.choose(ws.paneId, 1, "LaTeX");
+    expect(backend.keys.at(-1)).toEqual({ target: ws.paneId, keys: ["down", "enter"] });
+
+    backend.keys = [];
+    await w.choose(ws.paneId, 2, "Type something.", "PDF\nplease");
+    expect(backend.keys).toEqual([
+      { target: ws.paneId, keys: ["down", "down"] },
+      { target: ws.paneId, keys: ["enter"] },
+    ]);
+    expect(backend.texts.at(-1)).toEqual({ pane: ws.paneId, text: "PDF please" });
+
+    await expect(w.choose(ws.paneId, 1, "HTML")).rejects.toThrow(/menu changed/);
+    backend.screens.set(ws.paneId, "all done\n❯ ");
+    expect(await w.menu(ws.paneId)).toBeUndefined();
+    await expect(w.choose(ws.paneId, 0, "Markdown")).rejects.toThrow(/not showing a menu/);
+  });
+});
+
 describe("composer: prompt with attachments, keys", () => {
   test("attachments are saved under home and listed before the message; keys are validated", async () => {
     const { home, backend, w, ws } = await setup();
