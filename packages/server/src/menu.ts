@@ -23,13 +23,18 @@ export interface MenuOption {
 
 export interface Menu {
   question: string[];
+  /** Question lines that are a command or file the agent asks about (claude frames them with ╌ rules). */
+  code?: string[];
   options: MenuOption[];
   hint?: string;
   multiSelect: boolean;
 }
 
 const POINTER = /^(\s*)([❯›▶➤])\s+(\S.*)$/;
-const SEPARATOR = /^\s*[╭╰┌└├]?[─━═╌┄-]{8,}[╮╯┐┘┤]?\s*$/;
+/** A dialog's outer edge (solid rule or box corner). */
+const SEPARATOR = /^\s*[╭╰┌└├]?[─━═-]{8,}[╮╯┐┘┤]?\s*$/;
+/** A rule inside a dialog (claude draws ╌╌╌ around the command it asks about): skipped, not an edge. */
+const INNER_RULE = /^\s*[╌┄┈]{8,}\s*$/;
 const HINT = /\b(enter|esc|escape|navigate|confirm|select|cancel)\b|↑|↓/i;
 const indentOf = (l: string) => l.length - l.replace(/^\s+/, "").length;
 const blank = (l: string) => !l.trim();
@@ -112,8 +117,15 @@ function readAround(lines: string[], p: number, t: number, pointerText: string):
   if (numbered >= 2 && numbered < options.length - 1) return undefined;
 
   const question: string[] = [];
+  const code: string[] = [];
+  let inRule = false;
   for (let k = questionEnd; k >= 0 && question.length < 12; k--) {
     const l = lines[k]!;
+    if (INNER_RULE.test(l)) {
+      inRule = !inRule;
+      continue;
+    }
+    if (inRule && !blank(l)) code.push(l.trim());
     if (SEPARATOR.test(l)) break;
     if (POINTER.test(l)) break;
     if (blank(l)) {
@@ -126,7 +138,7 @@ function readAround(lines: string[], p: number, t: number, pointerText: string):
   // the terminal (the shell prompt, earlier output), not part of the dialog
   if (extra.length) question.splice(0, question.length, ...extra);
   const multiSelect = options.some((o) => /^\[[ x✓✔]\]|^[☐☑☒◻◼]/.test(o.label));
-  return { question, options, hint, multiSelect };
+  return { question, code: code.length ? code : undefined, options, hint, multiSelect };
 }
 
 /** Keys that move the highlight from the selected option to `target` and press Enter. */

@@ -104,6 +104,44 @@ describe("parsing agent menus", () => {
     expect(m.options.map((o) => o.label)).toEqual(["Trust and continue", "Quit"]);
   });
 
+  test("claude's real permission prompt (2.1.316), with the switch-to-auto-mode option", () => {
+    const screen = [
+      "⏺ Bash(echo agent-flow-probe > /tmp/af-perm-probe.txt)",
+      "  ⎿ \u00a0Waiting…",
+      "",
+      "─".repeat(120),
+      " Bash command",
+      ' Tip: auto mode handles these prompts for you — choose "switch to auto mode" below',
+      " Write probe text to a temp file",
+      "╌".repeat(120),
+      " echo agent-flow-probe > /tmp/af-perm-probe.txt",
+      "╌".repeat(120),
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. Yes, and always allow access to /tmp from this project",
+      "   3. Yes, and switch to auto mode · auto mode handles these prompts for you",
+      "   4. No",
+      "",
+      " Esc to cancel · Tab to amend",
+    ].join("\n");
+    const m = parseMenu(screen)!;
+    expect(m.question).toEqual([
+      "Bash command",
+      'Tip: auto mode handles these prompts for you — choose "switch to auto mode" below',
+      "Write probe text to a temp file",
+      "echo agent-flow-probe > /tmp/af-perm-probe.txt",
+      "Do you want to proceed?",
+    ]);
+    expect(m.options.map((o) => o.label)).toEqual([
+      "Yes",
+      "Yes, and always allow access to /tmp from this project",
+      "Yes, and switch to auto mode · auto mode handles these prompts for you",
+      "No",
+    ]);
+    expect(m.hint).toBe("Esc to cancel · Tab to amend");
+    expect(m.code).toEqual(["echo agent-flow-probe > /tmp/af-perm-probe.txt"]);
+  });
+
   test("not a menu: the agent's own input line, a lone pointer, plain output", () => {
     expect(parseMenu(["─".repeat(80), "❯ please fix the tests", "─".repeat(80), "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n"))).toBeUndefined();
     expect(parseMenu("❯ 1. only one option\n\nEnter to select")).toBeUndefined();

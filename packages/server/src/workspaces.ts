@@ -473,7 +473,10 @@ export class Workspaces {
 
   /** The option menu an agent is showing (a question, an approval), if any. */
   async menu(pane: string): Promise<Menu | undefined> {
-    return parseMenu(await this.read(pane, 80));
+    // the visible screen: "recent-unwrapped" joins full-width rows, and dialog rows are padded to full width
+    this.pane(pane);
+    const r = this.route(pane);
+    return parseMenu(await r.backend.readScreen(r.raw));
   }
 
   /**

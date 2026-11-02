@@ -28,6 +28,8 @@ export interface TerminalBackend {
   /** Type literal text into a pane, without Enter. */
   sendText(paneId: string, text: string): Promise<void>;
   readPane(paneId: string, lines: number): Promise<string>;
+  /** The screen exactly as drawn (rows as they are, no unwrapping): for reading dialogs. */
+  readScreen(paneId: string): Promise<string>;
   paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
   closeWorkspace(workspaceId: string, group?: boolean): Promise<void>;
@@ -192,6 +194,13 @@ export class Herdr implements TerminalBackend {
 
   async sendText(paneId: string, text: string) {
     await this.cli(["pane", "send-text", paneId, text]);
+  }
+
+  async readScreen(paneId: string) {
+    const p = Bun.spawn([this.bin, "pane", "read", paneId, "--source", "visible"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HERDR_SOCKET_PATH: this.socket } });
+    const out = await new Response(p.stdout).text();
+    await p.exited;
+    return out;
   }
 
   async readPane(paneId: string, lines: number) {

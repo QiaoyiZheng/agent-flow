@@ -199,8 +199,9 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     return () => ro.disconnect();
   }, []);
 
-  const blocked = status === "blocked";
-  const menu = useMenu(paneId, blocked);
+  const menu = useMenu(paneId, status === "blocked");
+  // a dialog on screen means the agent waits for an answer, whatever Herdr's status says
+  const blocked = status === "blocked" || !!menu;
   // claude and omp can fork at a message; codex forks the whole conversation
   const forkable = source?.agent === "claude" || source?.agent === "omp";
   const [forking, setForking] = useState(false);
@@ -688,19 +689,19 @@ interface MenuOption {
 }
 interface AgentMenu {
   question: string[];
+  code?: string[];
   options: MenuOption[];
   hint?: string;
   multiSelect: boolean;
 }
 
-/** While the agent is blocked, read the menu on its screen once a second. */
+/**
+ * Read the menu on the agent's screen: every second while Herdr says it is blocked, and every 4 seconds
+ * otherwise, because some dialogs are not recognized as blocked (a menu on screen means the agent waits).
+ */
 function useMenu(pane: string, blocked: boolean) {
   const [menu, setMenu] = useState<AgentMenu | undefined>();
   useEffect(() => {
-    if (!blocked) {
-      setMenu(undefined);
-      return;
-    }
     let alive = true;
     let last = "";
     const poll = () =>
@@ -715,7 +716,7 @@ function useMenu(pane: string, blocked: boolean) {
         })
         .catch(() => {});
     void poll();
-    const t = setInterval(poll, 1000);
+    const t = setInterval(poll, blocked ? 1000 : 4000);
     return () => {
       alive = false;
       clearInterval(t);
@@ -772,7 +773,7 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
       {lines.length > 0 && (
         <div className="menu-question">
           {lines.map((l, i) => (
-            <div key={i} className={/^\$ |^[a-z0-9_./-]+ .*[|&;]|^(npm|git|rm|ls|cd|bun|node|python3?|make|cargo|go) /i.test(l) ? "cmd" : ""}>
+            <div key={i} className={menu.code?.includes(l) || /^\$ |^[a-z0-9_./-]+ .*[|&;]|^(npm|git|rm|ls|cd|bun|node|python3?|make|cargo|go) /i.test(l) ? "cmd" : ""}>
               {l}
             </div>
           ))}

@@ -122,6 +122,9 @@ export class FakeBackend implements TerminalBackend {
   async readPane(paneId: string) {
     return this.screens.get(paneId) ?? `screen of ${paneId}\n`;
   }
+  async readScreen(paneId: string) {
+    return this.screens.get(paneId) ?? `screen of ${paneId}\n`;
+  }
   async paneExists(paneId: string) {
     return this.panes.has(paneId);
   }
