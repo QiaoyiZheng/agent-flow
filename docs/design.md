@@ -275,6 +275,15 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - server 每 0.5 秒看一次文件有没有变长，只解析新增的行，通过 WebSocket 推给网页（实测：工具调用写入后约 1 秒内出现在网页上）。不是逐字流式：文件按"一段正文 / 一次工具调用"写入。
 - 这些文件格式没有文档、可能随版本变化：解析器对未知字段一律跳过；找不到或解析不了就显示终端并说明原因。实现：`packages/server/src/transcripts/`，测试：`packages/server/test/transcripts.test.ts`。
 - 查看器里打开的 markdown 文件用同一套渲染（含 LaTeX）。
+- **折叠**（用户要求）：连续的工具调用合成一行"N steps · Bash ×3 · edited calc.js"，默认折叠，点开是各个工具卡片，卡片再点开才显示命令、输出、diff。用户消息超过 4 行折叠，"show more" 展开。
+- **我们自己的输入框**（用户要求，代替终端自带的输入行）：Enter 发送、Shift+Enter 换行、中文输入法组字时不误发。可以粘贴图片、拖入文件、点 ＋ 选文件，支持多个。文件先上传到 `~/.agent-flow/attachments/<日期>/<随机>-<名字>`，发送时在提示词最前面加：
+  ```
+  Read these attached files first:
+  - /…/attachments/2026-11-02/jlp8h7-pasted-081607.png
+  - …
+  ```
+  再接用户的话，通过 `herdr agent prompt <pane>` 送达（实测：claude 按路径读到图片并正确回答）。
+- 实时终端默认隐藏，只在三种情况出现：agent 等审批或提问（blocked，自动出现，输入框禁用并提示去终端回答）；发送了以 `/` 开头的斜杠命令（可能弹菜单）；用户点状态栏的 "terminal"。agent 工作时状态栏有 "■ Stop"（发 Esc）。
 
 ### 10.3 视觉
 

@@ -9,6 +9,7 @@ import { basename, dirname, join } from "node:path";
 import type { HLayout, HerdrModel, ShowRequest, SplitDirection, ViewRec } from "@af/core";
 import type { TerminalBackend } from "./herdr.ts";
 import { AfError } from "./orchestrator.ts";
+import { saveLocal } from "./attachments.ts";
 
 export interface WorkspacesOptions {
   home: string;
@@ -181,6 +182,24 @@ export class Workspaces {
     if (!(ratio > 0.05 && ratio < 0.95)) throw new AfError("bad_ratio", "ratio must be between 0.05 and 0.95");
     await this.opts.backend.setSplitRatio(tabId, path, ratio);
     await this.changed();
+  }
+
+  async prompt(pane: string, text: string) {
+    this.pane(pane);
+    await this.opts.backend.prompt(pane, text);
+  }
+
+  async sendKeys(pane: string, keys: string[]) {
+    this.pane(pane);
+    const ok = keys.every((k) => /^(esc|escape|enter|tab|up|down|left|right|backspace|ctrl\+[a-z])$/.test(k));
+    if (!ok || !keys.length) throw new AfError("bad_keys", "allowed keys: esc, enter, tab, arrows, backspace, ctrl+<letter>");
+    await this.opts.backend.sendKeys(pane, keys);
+  }
+
+  /** Store an attachment where the pane's agent can read it. */
+  async saveAttachment(pane: string, bytes: Uint8Array, name: string) {
+    const path = saveLocal(this.opts.home, bytes, name);
+    return { path, name, size: bytes.length };
   }
 
   async read(pane: string, lines = 120) {

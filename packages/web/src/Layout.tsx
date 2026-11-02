@@ -170,7 +170,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         {view ? (
           isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} />
         ) : renderable && !raw ? (
-          <AgentView paneId={paneId} status={p?.agentStatus} focused={focused} />
+          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} focused={focused} />
         ) : (
           <Terminal paneId={paneId} autoFocus={focused} />
         )}

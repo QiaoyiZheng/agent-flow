@@ -110,6 +110,10 @@ export class FakeBackend implements TerminalBackend {
   async prompt(name: string, text: string) {
     this.prompts.push({ name, text });
   }
+  keys: { target: string; keys: string[] }[] = [];
+  async sendKeys(target: string, keys: string[]) {
+    this.keys.push({ target, keys });
+  }
   async readPane(paneId: string) {
     return `screen of ${paneId}\n`;
   }

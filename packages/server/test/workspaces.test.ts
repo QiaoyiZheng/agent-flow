@@ -116,6 +116,32 @@ describe("workspaces: viewer panes", () => {
   });
 });
 
+describe("composer: prompt with attachments, keys", () => {
+  test("attachments are saved under home and listed before the message; keys are validated", async () => {
+    const { home, backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    await w.refresh();
+    const h = makeHandler(new Orchestrator({ home, backend, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG }), w, backend);
+    const post = async (path: string, body: object) => {
+      const r = await h(new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+      return { status: r.status, body: (await r.json()) as any };
+    };
+    const att = await w.saveAttachment(ws.paneId, new TextEncoder().encode("png-bytes"), "shot.png");
+    expect(att.path).toStartWith(join(home, "attachments"));
+    expect(att.path).toEndWith("-shot.png");
+    const r = await post("/prompt", { pane: ws.paneId, text: "  what is this?  ", attachments: [att.path, "/x/notes.md"] });
+    expect(r.status).toBe(200);
+    expect(backend.prompts.at(-1)).toEqual({ name: ws.paneId, text: `Read these attached files first:\n- ${att.path}\n- /x/notes.md\n\nwhat is this?` });
+    expect((await post("/prompt", { pane: ws.paneId, text: "   " })).status).toBe(400);
+    const plain = await backend.splitPane(ws.paneId, "right", undefined, {});
+    await w.refresh();
+    expect((await post("/prompt", { pane: plain.paneId, text: "hi" })).body.error.code).toBe("no_agent");
+    expect((await post("/keys", { pane: ws.paneId, keys: ["esc"] })).status).toBe(200);
+    expect(backend.keys.at(-1)).toEqual({ target: ws.paneId, keys: ["esc"] });
+    expect((await post("/keys", { pane: ws.paneId, keys: ["rm -rf /"] })).status).toBe(400);
+  });
+});
+
 describe("workspaces: API used by agents", () => {
   test("af read resolves run agents by name; split → agent joins the run when the workspace is a run", async () => {
     const home = tmp("af-api-home-");

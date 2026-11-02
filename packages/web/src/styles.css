@@ -438,3 +438,47 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 
 /* code and terminals: no ligatures, so <= and != read as typed */
 .md code, .md pre, .c-pre, .diff, .xterm, .code, .c-tool-sum { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+
+/* ---------- steps, user messages, composer ---------- */
+.c-steps { margin: 4px 0; }
+.c-steps-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; cursor: pointer; color: var(--text-3); font-size: 12px; min-width: 0; user-select: none; }
+.c-steps-head:hover { background: var(--bg-2); color: var(--text-2); }
+.c-steps-head .c-tool-caret { margin: 0; width: 10px; }
+.c-steps-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-steps-edits { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--text-3); flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-steps-body { margin: 2px 0 6px 14px; padding-left: 8px; border-left: 1px solid var(--line-2); }
+.c-user-text.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.c-more { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 2px 0 0; font-size: 12px; }
+.c-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; height: 30px; padding: 0 8px 0 3px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--bg-1); font-size: 12px; color: var(--text-2); }
+.chip img { width: 24px; height: 24px; object-fit: cover; border-radius: 4px; }
+.chip-ic { width: 24px; text-align: center; color: var(--text-3); font-family: var(--mono); }
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip button { border: 0; background: none; color: var(--text-3); cursor: pointer; padding: 0 0 0 2px; }
+.chip button:hover { color: var(--text); }
+.chip.busy { opacity: 0.6; }
+.chip.busy::after { content: "uploading…"; font-size: 10.5px; color: var(--text-3); }
+.chip-err { color: var(--s-rejected); font-size: 11px; align-self: center; }
+
+.agent-status { flex: none; display: flex; align-items: center; gap: 7px; height: 26px; padding: 0 12px; font-size: 11.5px; color: var(--text-3); border-top: 1px solid var(--line); background: var(--bg-1); }
+.agent-status.blocked { color: var(--s-needs); }
+.agent-status.working { color: var(--text-2); }
+.agent-status .spacer { flex: 1; }
+.agent-status button { border: 1px solid transparent; background: none; color: var(--text-3); cursor: pointer; font-size: 11.5px; padding: 1px 7px; border-radius: 5px; }
+.agent-status button:hover { color: var(--text); border-color: var(--line-2); }
+.agent-status button.on { color: var(--text); background: var(--bg-3); }
+.live { border-top: 1px solid var(--line); }
+
+.composer { flex: none; padding: 8px 12px 12px; background: var(--bg-1); position: relative; }
+.composer.drag::after { content: "Drop to attach"; position: absolute; inset: 4px; border: 1px dashed var(--accent); border-radius: 10px; display: grid; place-items: center; color: var(--accent); background: rgba(124, 131, 247, 0.06); pointer-events: none; }
+.composer-files { margin: 0 0 8px; }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg); padding: 6px 6px 6px 8px; transition: border-color 120ms; }
+.composer-row:focus-within { border-color: var(--accent); }
+.composer.disabled .composer-row { opacity: 0.55; }
+.composer textarea { flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--text); font: 13.5px/1.5 var(--sans); padding: 4px 0; max-height: 220px; }
+.composer textarea::placeholder { color: var(--text-3); }
+.composer-attach, .composer-send { flex: none; width: 28px; height: 28px; border-radius: 7px; border: 0; cursor: pointer; font-size: 15px; line-height: 1; }
+.composer-attach { background: none; color: var(--text-3); }
+.composer-attach:hover { background: var(--bg-hover); color: var(--text); }
+.composer-send { background: var(--accent); color: white; font-weight: 700; }
+.composer-send:disabled { background: var(--bg-3); color: var(--text-3); cursor: default; }

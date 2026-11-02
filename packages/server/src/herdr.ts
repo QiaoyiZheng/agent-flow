@@ -21,8 +21,10 @@ export interface TerminalBackend {
   createTab(workspaceId: string, cwd: string, label: string, env: Record<string, string>): Promise<{ tabId: string; paneId: string }>;
   startAgent(name: string, kind: AgentKind, paneId: string, args: string[]): Promise<StartResult>;
   listAgents(): Promise<HerdrAgentInfo[]>;
-  /** Type `text` into the agent's prompt and submit it. Does not wait for the turn. */
+  /** Type `text` into the agent's prompt and submit it. Does not wait for the turn. `name` may be a pane id. */
   prompt(name: string, text: string): Promise<void>;
+  /** Send logical keys (esc, enter, up, ctrl+c) to the agent in a pane. */
+  sendKeys(target: string, keys: string[]): Promise<void>;
   readPane(paneId: string, lines: number): Promise<string>;
   paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
@@ -86,7 +88,7 @@ export class Herdr implements TerminalBackend {
 
   private async cli(args: string[], timeoutMs = 120_000): Promise<any> {
     const started = performance.now();
-    const p = Bun.spawn([this.bin, ...args], { stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn([this.bin, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HERDR_SOCKET_PATH: this.socket } });
     const killer = setTimeout(() => p.kill(), timeoutMs);
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     await p.exited;
@@ -168,8 +170,12 @@ export class Herdr implements TerminalBackend {
     await this.cli(["agent", "prompt", name, text]);
   }
 
+  async sendKeys(target: string, keys: string[]) {
+    await this.cli(["agent", "send-keys", target, ...keys]);
+  }
+
   async readPane(paneId: string, lines: number) {
-    const p = Bun.spawn([this.bin, "pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)], { stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn([this.bin, "pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HERDR_SOCKET_PATH: this.socket } });
     const out = await new Response(p.stdout).text();
     await p.exited;
     return out;

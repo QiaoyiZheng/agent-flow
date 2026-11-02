@@ -7,6 +7,7 @@ import type { AgentKind, Caller, ClientPush, ServerPush, ShowRequest } from "@af
 import { AGENT_KINDS } from "@af/core";
 import { AfError, type Orchestrator } from "./orchestrator.ts";
 import type { Workspaces } from "./workspaces.ts";
+import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
 import { ChatBridge } from "./transcripts/bridge.ts";
@@ -81,6 +82,17 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           return json({ ok: true });
         case "POST /spawn":
           return json(await o.spawn(caller, body));
+        case "POST /prompt": {
+          const pane = w.model.panes.find((p) => p.id === body.pane);
+          if (!pane?.agent) throw new AfError("no_agent", `pane ${body.pane} has no agent to prompt`);
+          const text = composePrompt(String(body.text ?? ""), Array.isArray(body.attachments) ? body.attachments.map(String) : []);
+          if (!text) throw new AfError("empty", "nothing to send");
+          await w.prompt(body.pane, text);
+          return json({ ok: true, sent: text });
+        }
+        case "POST /keys":
+          await w.sendKeys(body.pane, Array.isArray(body.keys) ? body.keys.map(String) : []);
+          return json({ ok: true });
         case "POST /attention/dismiss":
           o.dismiss(caller, body.id);
           return json({ ok: true });
@@ -180,6 +192,18 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
       if (url.pathname.startsWith("/api/")) {
         if (!sameOrigin || !authed) return fail("forbidden", "bad origin or token", 403);
         if (url.pathname === "/api/file") return serveFile(o, opts.home, url);
+        if (url.pathname === "/api/upload" && req.method === "POST") {
+          try {
+            const len = Number(req.headers.get("content-length") ?? 0);
+            if (len > MAX_ATTACHMENT) return fail("too_large", "attachments are limited to 50 MB", 413);
+            const bytes = new Uint8Array(await req.arrayBuffer());
+            const name = safeName(url.searchParams.get("name") ?? undefined, req.headers.get("content-type") ?? undefined);
+            return Response.json(await w.saveAttachment(url.searchParams.get("pane") ?? "", bytes, name));
+          } catch (e) {
+            if (e instanceof AfError) return fail(e.code, e.message, e.status);
+            return fail("internal", (e as Error).message, 500);
+          }
+        }
         return handler(req);
       }
       // static UI
