@@ -1,0 +1,18 @@
+import { Terminal } from "@xterm/headless";
+const target = process.argv[2];
+const proc = Bun.spawn(["herdr", "terminal", "session", "control", target, "--cols", "100", "--rows", "20"], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+const term = new Terminal({ cols: 100, rows: 20, allowProposedApi: true });
+(async () => { const dec = new TextDecoder(); let buf = ""; for await (const c of proc.stdout) { buf += dec.decode(c, { stream: true }); let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); const r = JSON.parse(line); if (r.type === "terminal.frame") term.write(Buffer.from(r.bytes, "base64")); } } })();
+const send = (o: unknown) => { proc.stdin.write(JSON.stringify(o) + "\n"); proc.stdin.flush(); };
+const view = () => { const b = term.buffer.active; const rows: string[] = []; for (let y = b.viewportY; y < b.viewportY + 20; y++) rows.push(b.getLine(y)?.translateToString(true).trim() ?? ""); return rows; };
+const nums = () => view().filter((l) => /^\d+$/.test(l)).map(Number);
+await Bun.sleep(500);
+send({ type: "terminal.input", text: "clear; seq 1 500\r" }); await Bun.sleep(800);
+console.log("bottom:", nums().slice(0, 2), "...", nums().slice(-2));
+send({ type: "terminal.scroll", direction: "up", lines: 100 }); await Bun.sleep(400);
+console.log("after up 100:", nums().slice(0, 2), "...", nums().slice(-2));
+send({ type: "terminal.scroll", direction: "up", lines: 300 }); await Bun.sleep(400);
+console.log("after up +300:", nums().slice(0, 2), "...", nums().slice(-2));
+send({ type: "terminal.scroll", direction: "down", lines: 1000 }); await Bun.sleep(400);
+console.log("after down 1000:", nums().slice(0, 2), "...", nums().slice(-2));
+send({ type: "terminal.release" }); await Bun.sleep(200); proc.kill(); process.exit(0);

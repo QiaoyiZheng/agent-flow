@@ -1,0 +1,18 @@
+#!/usr/bin/env bun
+// Spike stub of the `af` CLI: talks to the spike server over a Unix socket.
+const sock = process.env.AF_SOCK, agent = process.env.AF_AGENT, run = process.env.AF_RUN;
+const [cmd, ...rest] = process.argv.slice(2);
+if (!sock || !agent) { console.error("af: AF_SOCK / AF_AGENT not set — not running under agent-flow"); process.exit(2); }
+const flags: Record<string, string> = {}; const pos: string[] = [];
+for (let i = 0; i < rest.length; i++) { const a = rest[i]; if (a.startsWith("--")) { const [k, v] = a.slice(2).split("=", 2); flags[k] = v ?? rest[++i]; } else pos.push(a); }
+const call = async (path: string, body?: unknown) => {
+  const r = await fetch(`http://af${path}`, { unix: sock, method: body ? "POST" : "GET", headers: { "content-type": "application/json" }, body: body ? JSON.stringify({ agent, run, ...body }) : undefined } as any);
+  const t = await r.text(); if (!r.ok) { console.error(`af: ${t}`); process.exit(1); } return t;
+};
+switch (cmd) {
+  case "inbox": process.stdout.write(await call(`/inbox?agent=${agent}`)); break;
+  case "done": process.stdout.write(await call("/done", { outcome: flags.outcome, result: flags.result, note: flags.note, argv: rest })); break;
+  case "send": process.stdout.write(await call("/send", { to: pos[0], body: pos.slice(1).join(" ") })); break;
+  case "whoami": console.log(`${agent} in run ${run}`); break;
+  default: console.error("usage: af inbox | af done --outcome X [--result PATH] --note TEXT | af send <agent> <text> | af whoami"); process.exit(2);
+}

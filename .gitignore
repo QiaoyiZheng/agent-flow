@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.agent-flow/
+spikes/*/work/
+spikes/*/results.jsonl
+*.log
+.DS_Store
