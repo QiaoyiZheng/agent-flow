@@ -122,7 +122,9 @@ function readAround(lines: string[], p: number, t: number, pointerText: string):
     }
     question.unshift(l.trim());
   }
-  question.push(...extra);
+  // codex draws its whole dialog at the options' indent: those lines are the question; what is above them is
+  // the terminal (the shell prompt, earlier output), not part of the dialog
+  if (extra.length) question.splice(0, question.length, ...extra);
   const multiSelect = options.some((o) => /^\[[ x✓✔]\]|^[☐☑☒◻◼]/.test(o.label));
   return { question, options, hint, multiSelect };
 }

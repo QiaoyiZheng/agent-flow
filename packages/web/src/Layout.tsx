@@ -3,7 +3,7 @@
 
 import { useRef, useState } from "react";
 import type { AgentKind, HPane, LayoutNode, ViewRec } from "@af/core";
-import { api } from "./store";
+import { api, failed } from "./store";
 import { Terminal } from "./Terminal";
 import { AgentView } from "./AgentView";
 import { FileView, WebView } from "./Viewers";
@@ -48,7 +48,7 @@ function Node({ node, path, tabId, ctx }: { node: LayoutNode; path: boolean[]; t
       window.removeEventListener("mouseup", up);
       document.body.classList.remove(row ? "resizing-x" : "resizing-y");
       api("POST", "/layout/ratio", { tab: tabId, path, ratio: last })
-        .catch((err) => alert(err.message))
+        .catch(failed("That did not work"))
         .finally(() => setDrag(undefined));
     };
     document.body.classList.add(row ? "resizing-x" : "resizing-y");
@@ -81,10 +81,10 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     setRaw(!raw);
   };
   const split = (direction: "right" | "down", extra: Record<string, unknown> = {}) =>
-    api("POST", "/pane/split", { pane: paneId, direction, ...extra }).then((r) => r?.paneId && ctx.onFocus(r.paneId), (e) => alert(e.message));
+    api("POST", "/pane/split", { pane: paneId, direction, ...extra }).then((r) => r?.paneId && ctx.onFocus(r.paneId), failed("That did not work"));
   const show = () => {
     const target = prompt("File path, folder or URL to show next to this pane")?.trim();
-    if (target) api("POST", "/show", { target, of: paneId }).then((r) => ctx.onFocus(r.paneId), (e) => alert(e.message));
+    if (target) api("POST", "/show", { target, of: paneId }).then((r) => ctx.onFocus(r.paneId), failed("That did not work"));
   };
 
   let icon = "$";
@@ -157,7 +157,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
                   onClick={() => {
                     setMenu(false);
                     const target = prompt("Show something else in this viewer", view.target)?.trim();
-                    if (target) api("POST", "/show", { target, in: paneId }).catch((e) => alert(e.message));
+                    if (target) api("POST", "/show", { target, in: paneId }).catch(failed("That did not work"));
                   }}
                 >
                   ↺ change what this viewer shows
@@ -166,7 +166,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
             </div>
           )}
         </span>
-        <button title="Close pane" onClick={() => confirm(`Close pane ${paneId}${p?.agent ? ` (${p.agent} is running in it)` : ""}?`) && api("POST", "/pane/close", { pane: paneId }).catch((e) => alert(e.message))}>
+        <button title="Close pane" onClick={() => confirm(`Close pane ${paneId}${p?.agent ? ` (${p.agent} is running in it)` : ""}?`) && api("POST", "/pane/close", { pane: paneId }).catch(failed("That did not work"))}>
           ✕
         </button>
       </div>
@@ -182,7 +182,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         {view ? (
           isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} />
         ) : renderable && !raw ? (
-          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} focused={focused} />
+          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} focused={focused} onForked={(id) => ctx.onFocus(id)} />
         ) : (
           <Terminal paneId={paneId} autoFocus={focused} />
         )}

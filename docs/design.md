@@ -312,6 +312,16 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - 暂不支持：在远程 pane 旁边开查看器（查看器是本地进程）；在远程机器上跑 run 的 worker。
 - 注意：网页里打开远程 pane 时，那个 pane 的 PTY 会变成网页里的尺寸（和本地同一条 Herdr 多客户端规则）。
 
+### 10.2.4 报错信息、"/" 菜单、fork（2026-11-02，用户要求）
+
+- **报错信息**：server 有一个 notices 列表（`server/src/notices.ts`），推给所有网页。来源：远程机器连不上（带原因，如"Could not resolve hostname"）/ 断线 / 重新连上；本地 Herdr 不响应 / 恢复；终端流异常结束（远程 ssh 退出码 255 视为连接断了，直接触发连接检查，不另报）。网页里所有操作失败（原来是 alert 弹窗）也进同一个列表。显示：右下角 toast（info 5 秒、warn 9 秒、error 15 秒，点一下关掉），底栏"▲/✕ N"未读徽标，点开是完整列表（来源、时间、详情、清空）。同一来源同一条反复出现时计数（×N），不刷屏。机器的错误原因在侧栏里一直显示。
+- **"/" 菜单（skill 预览）**：输入框第一个词以 `/`（codex 的 skill 是 `$`）开头时弹出列表：该 agent 的内置命令 + **它这次会话实际加载的 skill**。claude 从对话记录里的 `skill_listing` 附件读（含插件 skill）；codex 从会话里的 "### Available skills" 目录读，插入 `$name`；omp 扫它会读的 skill 目录（`~/.omp/agent/skills`、`~/.claude/skills`、`~/.agents/skills` 和项目里的同名目录）读 SKILL.md 头部，插入 `/skill:name`。内置命令列表取自各 agent 自己的界面文字。前缀匹配优先，其次名字包含、描述包含；下方预览区显示完整描述；Tab / Enter 插入，↑/↓ 选择，Esc 关闭。实测：claude 57 项（35 个 skill），codex 79 项，omp 55 项。
+- **fork**：
+  - 状态栏"⑂ Fork"：在旁边开一个新 agent，带上到目前为止的整个对话。
+  - 用户消息上悬停出现"⑂ fork from here"（claude、omp）：新 agent 的历史停在这条消息之前，这条消息放进新 agent 的输入框，可以改了再发（类似 Claude app 的编辑重发）。
+  - 实现：claude 和 omp 复制对话文件到新的 session id（到这条消息所在行的起始字节为止），再 `--resume` 新文件；原对话不动。两个 CLI 都实测过：恢复后只记得分叉点之前的内容。fork 点只放在用户消息前，因为在一轮中间切断会留下没有结果的工具调用（omp 实测会提示）。codex 用 `codex fork <id>`，只能整段 fork。远程 pane 的复制在那台机器上做（`head -c | sed`）。
+  - 新 agent 启动时的提示（如 codex 的"信任此文件夹"）在渲染视图里也显示成选项卡片，即使还没有对话记录。
+
 ### 10.3 视觉
 
 - Linear / Raycast 风格：深色为主，低饱和，细边框，只用一个强调色。

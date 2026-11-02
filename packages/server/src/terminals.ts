@@ -12,6 +12,8 @@ export class TerminalBridge {
   constructor(
     private argvFor: ArgvFor,
     private send: (msg: ServerPush) => void,
+    /** A stream that ended on its own with an error message (not closed by the UI). */
+    private onError: (paneId: string, reason: string) => void = () => {},
   ) {}
 
   handle(msg: ClientPush) {
@@ -40,6 +42,7 @@ export class TerminalBridge {
     }
     const proc = Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     this.sessions.set(id, { proc, stdin: proc.stdin as import("bun").FileSink });
+    const stderr = new Response(proc.stderr as ReadableStream<Uint8Array>).text();
     void (async () => {
       const dec = new TextDecoder();
       let buf = "";
@@ -63,7 +66,11 @@ export class TerminalBridge {
       }
       if (this.sessions.get(id)?.proc === proc) {
         this.sessions.delete(id);
-        this.send({ type: "term.closed", id, reason: "ended" });
+        await proc.exited;
+        const err = (await stderr).trim().split("\n").filter(Boolean).at(-1);
+        const reason = err ? err.replace(/^herdr:\s*/, "") : proc.exitCode ? `exited with ${proc.exitCode}` : "ended";
+        this.send({ type: "term.closed", id, reason });
+        if (err || proc.exitCode) this.onError(paneId, reason);
       }
     })();
   }

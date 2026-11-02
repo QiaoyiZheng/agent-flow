@@ -27,6 +27,8 @@ export interface WorkspacesOptions {
   remote?: (spec: { key: string; label: string; target: string; session: string }, onChange: () => void) => { remote: RemoteLike; backend: () => TerminalBackend };
   /** How often Herdr's saved machine list is re-read (it can change in the Herdr TUI too). */
   machinesPollMs?: number;
+  /** Tell the user about connection trouble. */
+  notify?: (level: "error" | "warn" | "info", source: string, text: string, detail?: string) => void;
   now?: () => string;
   /** How often remote machines are polled (local: every refresh). */
   remotePollMs?: number;
@@ -48,6 +50,8 @@ interface Machine {
   lastPoll: number;
   /** Consecutive failed snapshots; two in a row make the connection check itself. */
   failedPolls: number;
+  /** The connection failed or dropped since it was last fine (so "connected again" is worth saying). */
+  troubled?: boolean;
 }
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
@@ -140,7 +144,9 @@ export class Workspaces {
     if (!t || /\s/.test(t) || t.startsWith("-")) throw new AfError("bad_target", "give an SSH target such as myhost, user@host or ssh://user@host:2222");
     const before = new Set([...this.machines.values()].map((m) => m.profileId));
     try {
-      await this.opts.backend.addMachine(t, label?.trim() || undefined, session?.trim() || undefined);
+      // without a terminal, herdr machine add needs a label: default to the host name
+      const host = t.replace(/^ssh:\/\//, "").replace(/^.*@/, "").replace(/:\d+$/, "");
+      await this.opts.backend.addMachine(t, label?.trim() || host, session?.trim() || undefined);
     } catch (e) {
       throw new AfError("machine_add_failed", (e as Error).message, 422);
     }
@@ -191,7 +197,17 @@ export class Workspaces {
   private remoteChanged(key: string) {
     const m = this.machines.get(key)!;
     const r = m.remote!;
+    const prev = m.meta;
     m.meta = { ...m.meta, state: r.state, error: r.error };
+    const say = this.opts.notify;
+    if (say) {
+      const src = `machine:${key}`;
+      if (r.state === "error" && (prev.state !== "error" || prev.error !== r.error)) say("error", src, `${m.meta.label}: ${r.error ?? "connection failed"}`, `ssh ${m.meta.target} — retrying automatically`);
+      else if (r.state === "connecting" && prev.state === "online") say("warn", src, `Lost the connection to ${m.meta.label}; reconnecting`, r.error);
+      else if (r.state === "online" && prev.state !== "online" && m.troubled) say("info", src, `Connected to ${m.meta.label} again`);
+      if (r.state === "error" || (r.state === "connecting" && prev.state === "online")) m.troubled = true;
+      if (r.state === "online" || r.state === "offline") m.troubled = false;
+    }
     if (r.state === "online" && !m.backend && m.makeBackend) {
       m.backend = m.makeBackend();
       this.watch(m);
@@ -289,6 +305,7 @@ export class Workspaces {
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
       m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId) }));
       m.layouts = layouts;
+      if (m.meta.local && m.failedPolls > 0) this.opts.notify?.("info", "herdr", "Herdr is responding again");
       m.failedPolls = 0;
       if (m.meta.local) {
         // forget viewers whose pane is gone
@@ -304,6 +321,7 @@ export class Workspaces {
     } catch (e) {
       m.failedPolls++;
       if (m.remote && m.failedPolls >= 2) void m.remote.verify?.();
+      if (m.meta.local && m.failedPolls === 1) this.opts.notify?.("error", "herdr", "Herdr is not responding", `${(e as Error).message} — is the Herdr server running?`);
       if (m.failedPolls === 1 || m.failedPolls % 20 === 0) console.error(`herdr refresh (${m.meta.id}):`, (e as Error).message);
     }
   }

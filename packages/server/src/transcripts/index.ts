@@ -8,7 +8,7 @@
 //   4. claude only: the newest transcript for the pane's folder, when no other claude pane shares that folder.
 // If none works, the UI shows the plain terminal.
 
-import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, ChatSource, HPane } from "@af/core";
@@ -28,6 +28,10 @@ export interface TranscriptFS {
   exists(path: string): Promise<boolean>;
   /** Bytes from `offset` (at most `max`), and the file's current size. undefined if the file is gone. */
   readFrom(path: string, offset: number, max: number): Promise<{ size: number; data: Buffer } | undefined>;
+  /** Write the first `bytes` of `src` (all of it when undefined) to `dst`, replacing every `from` with `to`. */
+  copyPrefix(src: string, dst: string, bytes: number | undefined, from: string, to: string): Promise<void>;
+  /** Run a shell command where the files are (to list skills). */
+  sh(cmd: string): Promise<string>;
 }
 
 export interface Roots {
@@ -109,6 +113,17 @@ export class LocalFS implements TranscriptFS {
     return existsSync(path);
   }
 
+  async copyPrefix(src: string, dst: string, bytes: number | undefined, from: string, to: string) {
+    const all = readFileSync(src);
+    const part = bytes === undefined ? all : all.subarray(0, bytes);
+    writeFileSync(dst, part.toString("utf8").split(from).join(to));
+  }
+
+  async sh(cmd: string) {
+    const p = Bun.spawnSync(["sh", "-c", cmd], { stdout: "pipe", stderr: "ignore" });
+    return p.stdout.toString();
+  }
+
   async readFrom(path: string, offset: number, max: number) {
     let size: number;
     try {
@@ -159,6 +174,17 @@ export class SshFS implements TranscriptFS {
 
   async exists(path: string) {
     return (await this.line(`test -f ${sq(path)} && echo yes`)) === "yes";
+  }
+
+  async copyPrefix(src: string, dst: string, bytes: number | undefined, from: string, to: string) {
+    if (!/^[0-9a-z-]+$/i.test(from) || !/^[0-9a-z-]+$/i.test(to)) throw new Error("ids must be plain uuids");
+    const take = bytes === undefined ? `cat ${sq(src)}` : `head -c ${Math.max(0, Math.floor(bytes))} ${sq(src)}`;
+    const r = await this.exec(`${take} | sed 's/${from}/${to}/g' > ${sq(dst)}`, { timeoutMs: 60_000 });
+    if (r.code !== 0) throw new Error(`could not copy the conversation: ${r.err}`);
+  }
+
+  async sh(cmd: string) {
+    return (await this.exec(cmd)).out.toString();
   }
 
   async readFrom(path: string, offset: number, max: number) {
@@ -317,17 +343,29 @@ export class TranscriptTail {
     if (!chunk.data.length) return { ops: [], reset };
     // split on newline bytes, so a read that ends inside a multi-byte character cannot corrupt a line
     let buf = this.partial.length ? Buffer.concat([this.partial, chunk.data]) : chunk.data;
-    if (this.skipped && this.offset === this.skipped && !this.partial.length) buf = buf.subarray(buf.indexOf(10) + 1); // drop the cut first line
+    // byte offset in the file where buf starts: entries remember where their line starts (fork points)
+    let start = this.offset - this.partial.length;
+    if (this.skipped && this.offset === this.skipped && !this.partial.length) {
+      const cut = buf.indexOf(10) + 1; // drop the cut first line
+      buf = buf.subarray(cut);
+      start += cut;
+    }
     this.offset += chunk.data.length;
     const end = buf.lastIndexOf(10);
     this.partial = Buffer.from(buf.subarray(end + 1));
-    const lines = end < 0 ? [] : buf.subarray(0, end).toString("utf8").split("\n");
     const parse = PARSERS[this.source.agent];
     const ops: ChatOp[] = [];
-    for (const l of lines) {
-      if (!l.trim()) continue;
+    for (let pos = 0; pos <= end; ) {
+      const nl = buf.indexOf(10, pos);
+      const line = buf.subarray(pos, nl).toString("utf8");
+      const lineStart = start + pos;
+      pos = nl + 1;
+      if (!line.trim()) continue;
       try {
-        ops.push(...parse(JSON.parse(l), this.ctx));
+        for (const op of parse(JSON.parse(line), this.ctx)) {
+          if (op.op === "add") op.entry.ref = lineStart;
+          ops.push(op);
+        }
       } catch {}
     }
     return { ops, reset };

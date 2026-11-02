@@ -88,6 +88,22 @@ describe("parsing agent menus", () => {
     expect(m.hint).toBe("Press enter to confirm or esc to cancel");
   });
 
+  test("codex folder trust: the shell line above the dialog is not part of the question", () => {
+    const m = parseMenu(
+      [
+        "zhengqiaoyi@Mac mul2 % codex fork --no-alt-screen 01a19ae6",
+        "  Folder access",
+        "  /Users/zhengqiaoyi/agent-flow/.sandbox/demo/.agent-flow/worktrees/rhv93/mul2",
+        "  Trust this folder? Codex can read, edit, and run files here.",
+        "› 1. Trust and continue",
+        "  2. Quit",
+        "  enter continue · esc quit",
+      ].join("\n"),
+    )!;
+    expect(m.question).toEqual(["Folder access", "/Users/zhengqiaoyi/agent-flow/.sandbox/demo/.agent-flow/worktrees/rhv93/mul2", "Trust this folder? Codex can read, edit, and run files here."]);
+    expect(m.options.map((o) => o.label)).toEqual(["Trust and continue", "Quit"]);
+  });
+
   test("not a menu: the agent's own input line, a lone pointer, plain output", () => {
     expect(parseMenu(["─".repeat(80), "❯ please fix the tests", "─".repeat(80), "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n"))).toBeUndefined();
     expect(parseMenu("❯ 1. only one option\n\nEnter to select")).toBeUndefined();

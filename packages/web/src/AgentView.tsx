@@ -5,7 +5,7 @@
 
 import { memo, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ChatBlock, ChatEntry, ChatOp, ChatSource } from "@af/core";
-import { TOKEN, api, fileUrl, onChat, send } from "./store";
+import { TOKEN, api, failed, fileUrl, notify, onChat, send } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
 import { basename } from "./view";
@@ -126,7 +126,7 @@ function segments(entries: ChatEntry[]): Segment[] {
   return out;
 }
 
-export function AgentView({ paneId, agent, status, focused }: { paneId: string; agent: string; status?: string; focused: boolean }) {
+export function AgentView({ paneId, agent, status, focused, onForked }: { paneId: string; agent: string; status?: string; focused: boolean; onForked?: (paneId: string) => void }) {
   const [source, setSource] = useState<ChatSource | null | undefined>(undefined);
   const [reason, setReason] = useState<string>();
   const log = useRef(new Log());
@@ -201,6 +201,21 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
 
   const blocked = status === "blocked";
   const menu = useMenu(paneId, blocked);
+  // claude and omp can fork at a message; codex forks the whole conversation
+  const forkable = source?.agent === "claude" || source?.agent === "omp";
+  const [forking, setForking] = useState(false);
+  const fork = (before?: number, prefill?: string) => {
+    setForking(true);
+    api<{ paneId: string; started: boolean }>("POST", "/pane/fork", { pane: paneId, before })
+      .then((r) => {
+        if (prefill) drafts.update(r.paneId, () => ({ text: prefill.replace(ATTACH_HEAD, ""), files: [] }));
+        if (!r.started) notify("warn", "The forked agent did not report ready yet", "Look at its pane; it may still be starting.");
+        onForked?.(r.paneId);
+      })
+      .catch(failed("Could not fork the conversation"))
+      .finally(() => setForking(false));
+  };
+  const forkAt = (ref: number, text: string) => () => fork(ref, text);
 
   // keep the newest output in view unless the user scrolled up
   useLayoutEffect(() => {
@@ -216,8 +231,14 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
     return (
       <div ref={box} className="agent-view">
         <div className="agent-banner">Showing the plain terminal: {reason ?? "no transcript found"}.</div>
+        {/* a startup prompt (folder trust, update, login) before there is any transcript: answer it here too */}
+        {blocked && menu && (
+          <div style={{ padding: "0 16px", flex: "none" }}>
+            <MenuCard key={menu.options.map((o) => o.label).join("|")} pane={paneId} menu={menu} focused={focused} />
+          </div>
+        )}
         <div style={{ flex: 1, position: "relative" }}>
-          <Terminal key="full" paneId={paneId} autoFocus={focused} />
+          <Terminal key="full" paneId={paneId} autoFocus={focused && !(blocked && menu)} />
         </div>
       </div>
     );
@@ -238,7 +259,12 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
           s.kind === "steps" ? (
             <Steps key={s.key} tools={s.tools} sig={s.tools.map((t) => (t.done ? (t.error ? "x" : "d") : "r")).join("")} />
           ) : (
-            <Entry key={s.entry.key} block={s.entry.block} hl={hl} />
+            <Entry
+              key={s.entry.key}
+              block={s.entry.block}
+              hl={hl}
+              onFork={forkable && s.entry.block.kind === "user" && s.entry.ref !== undefined ? forkAt(s.entry.ref, s.entry.block.text) : undefined}
+            />
           ),
         )}
         {out.map((o) => (
@@ -258,8 +284,13 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
         <span>{blocked ? (menu ? "waiting for your choice" : "waiting for your answer in the terminal") : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
         <span className="spacer" />
         {status === "working" && (
-          <button title="Interrupt (Esc)" onClick={() => api("POST", "/keys", { pane: paneId, keys: ["esc"] }).catch((e) => alert(e.message))}>
+          <button title="Interrupt (Esc)" onClick={() => api("POST", "/keys", { pane: paneId, keys: ["esc"] }).catch(failed("That did not work"))}>
             ■ Stop
+          </button>
+        )}
+        {source && (
+          <button disabled={forking} onClick={() => fork()} title="Fork: a new agent next to this one, with this whole conversation so far">
+            {forking ? "forking…" : "⑂ Fork"}
           </button>
         )}
         {(!blocked || menu) && (
@@ -278,10 +309,10 @@ export function AgentView({ paneId, agent, status, focused }: { paneId: string; 
 const ATTACH_HEAD = /^Read these attached files first:\n((?:- .+\n?)+)\n?/;
 
 const Entry = memo(
-  function Entry({ block, hl }: { block: ChatBlock; hl: number }) {
+  function Entry({ block, hl, onFork }: { block: ChatBlock; hl: number; onFork?: () => void }) {
     switch (block.kind) {
       case "user":
-        return <UserMessage text={block.text} />;
+        return <UserMessage text={block.text} onFork={onFork} />;
       case "text":
         return <Prose text={block.text} hl={hl} />;
       case "notice":
@@ -290,10 +321,10 @@ const Entry = memo(
         return <ToolCard t={block} />;
     }
   },
-  (a, b) => a.block === b.block && a.hl === b.hl,
+  (a, b) => a.block === b.block && a.hl === b.hl && !!a.onFork === !!b.onFork,
 );
 
-function UserMessage({ text }: { text: string }) {
+function UserMessage({ text, onFork }: { text: string; onFork?: () => void }) {
   const m = text.match(ATTACH_HEAD);
   const files = m ? m[1]!.trim().split("\n").map((l) => l.replace(/^- /, "")) : [];
   const body = m ? text.slice(m[0].length) : text;
@@ -302,6 +333,11 @@ function UserMessage({ text }: { text: string }) {
   return (
     <div className="c-user">
       <span className="c-caret">›</span>
+      {onFork && (
+        <button className="c-fork" title="Fork from here: a new agent with the conversation before this message, and this message in its box to edit" onClick={onFork}>
+          ⑂ fork from here
+        </button>
+      )}
       <div style={{ minWidth: 0, flex: 1 }}>
         {files.length > 0 && (
           <div className="c-files">
@@ -507,6 +543,13 @@ function Composer({
   const setFiles = (fn: (fs: PendingFile[]) => PendingFile[]) => drafts.update(paneId, (d) => ({ ...d, files: fn(d.files) }));
   const [drag, setDrag] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
+  const cmd = useCommandMenu(paneId, text, (t) => {
+    setText(t);
+    requestAnimationFrame(() => {
+      const el = ta.current;
+      if (el) (el.focus(), el.setSelectionRange(t.length, t.length));
+    });
+  });
   const picker = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -587,6 +630,7 @@ function Composer({
           ))}
         </div>
       )}
+      {cmd.open && <CommandMenu items={cmd.items} hi={cmd.hi} loading={cmd.loading} onHover={cmd.setHi} onPick={cmd.accept} />}
       <div className="composer-row">
         <button className="composer-attach" title="Attach files" onClick={() => picker.current?.click()} disabled={disabled}>
           ＋
@@ -607,6 +651,16 @@ function Composer({
             }
           }}
           onKeyDown={(e) => {
+            if (cmd.open && cmd.items.length) {
+              if (e.key === "ArrowDown") return (e.preventDefault(), cmd.move(1));
+              if (e.key === "ArrowUp") return (e.preventDefault(), cmd.move(-1));
+              if ((e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                // Enter on an exact, complete command sends it; otherwise Tab/Enter complete the highlighted one
+                const pick = cmd.items[cmd.hi]!;
+                if (!(e.key === "Enter" && text.trim() === pick.insert)) return (e.preventDefault(), cmd.accept(pick));
+              }
+              if (e.key === "Escape") return (e.preventDefault(), cmd.dismiss());
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
               e.preventDefault();
               submit();
@@ -761,6 +815,96 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
           Cancel (Esc)
         </button>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// the "/" menu: built-in commands and the skills this agent loaded ("$" for codex skills)
+
+interface CommandItem {
+  name: string;
+  insert: string;
+  description: string;
+  kind: "command" | "skill";
+}
+
+const commandCache = new Map<string, { at: number; items: CommandItem[] }>();
+
+function useCommandMenu(pane: string, text: string, setText: (t: string) => void) {
+  const [all, setAll] = useState<CommandItem[]>();
+  const [loading, setLoading] = useState(false);
+  const [hi, setHi] = useState(0);
+  const [dismissed, setDismissed] = useState<string>();
+  // the menu is about the first word while it is being typed: "/", "/sk", "$img"
+  const token = /^[/$][^\s]*$/.test(text) ? text : undefined;
+  const wanted = !!token && dismissed !== token;
+  useEffect(() => {
+    if (!wanted || all) return;
+    const hit = commandCache.get(pane);
+    if (hit && Date.now() - hit.at < 60_000) return void setAll(hit.items);
+    setLoading(true);
+    api<{ items: CommandItem[] }>("GET", "/pane/commands", { pane })
+      .then((r) => {
+        commandCache.set(pane, { at: Date.now(), items: r.items });
+        setAll(r.items);
+      })
+      .catch(failed("Could not load the agent's commands"))
+      .finally(() => setLoading(false));
+  }, [wanted, pane]);
+  const items = useMemo(() => {
+    if (!token || !all) return [];
+    const q = token.toLowerCase();
+    const pool = all.filter((c) => c.insert[0] === token[0] || (token[0] === "/" && c.insert.startsWith("/")));
+    const starts = pool.filter((c) => c.insert.toLowerCase().startsWith(q));
+    const word = q.slice(1);
+    const inName = pool.filter((c) => !starts.includes(c) && word && c.name.toLowerCase().includes(word));
+    const inDesc = pool.filter((c) => !starts.includes(c) && !inName.includes(c) && word.length > 1 && c.description.toLowerCase().includes(word));
+    return [...starts, ...inName, ...inDesc].slice(0, 60);
+  }, [token, all]);
+  useEffect(() => setHi(0), [token]);
+  return {
+    open: wanted && (loading || items.length > 0),
+    loading,
+    items,
+    hi: Math.min(hi, Math.max(0, items.length - 1)),
+    setHi,
+    move: (d: number) => setHi((h) => (items.length ? (h + d + items.length) % items.length : 0)),
+    accept: (c: CommandItem) => {
+      setDismissed(undefined);
+      setText(`${c.insert} `);
+    },
+    dismiss: () => setDismissed(token),
+  };
+}
+
+function CommandMenu({ items, hi, loading, onHover, onPick }: { items: CommandItem[]; hi: number; loading: boolean; onHover: (i: number) => void; onPick: (c: CommandItem) => void }) {
+  const list = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    list.current?.querySelector(`[data-i="${hi}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [hi]);
+  const cur = items[hi];
+  return (
+    <div className="cmd-menu" onMouseDown={(e) => e.preventDefault()}>
+      <div className="cmd-list" ref={list}>
+        {loading && !items.length && <div className="empty" style={{ padding: 10 }}>Loading the agent's commands…</div>}
+        {items.map((c, i) => (
+          <div key={c.insert} data-i={i} className={`cmd-row ${i === hi ? "hi" : ""}`} onMouseEnter={() => onHover(i)} onClick={() => onPick(c)}>
+            <span className="cmd-name">{c.insert}</span>
+            <span className={`cmd-kind ${c.kind}`}>{c.kind}</span>
+            <span className="cmd-desc">{c.description}</span>
+          </div>
+        ))}
+      </div>
+      {cur && (
+        <div className="cmd-preview">
+          <div className="cmd-preview-head">
+            <b>{cur.insert}</b> <span className={`cmd-kind ${cur.kind}`}>{cur.kind}</span>
+          </div>
+          <div className="cmd-preview-text">{cur.description || "No description."}</div>
+          <div className="cmd-preview-keys">Tab or Enter to insert · ↑/↓ to choose · Esc to close</div>
+        </div>
+      )}
     </div>
   );
 }

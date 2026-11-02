@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { renderMarkdown } from "./markdown";
 import type { Mail, RunState } from "@af/core";
-import { api, fileUrl } from "./store";
+import { api, fileUrl, failed } from "./store";
 import { ago } from "./view";
 
 const LANG: Record<string, string> = {
@@ -57,7 +57,7 @@ export function FileView({ path }: { path: string }) {
   return (
     <div className="viewer">
       <Bar path={path}>
-        <button className="btn" onClick={() => api("POST", "/edit", { path }).catch((e) => alert(e.message))}>
+        <button className="btn" onClick={() => api("POST", "/edit", { path }).catch(failed("That did not work"))}>
           Open in editor
         </button>
       </Bar>
@@ -134,7 +134,7 @@ export function Messages({ run, agent, node }: { run: RunState; agent?: string; 
           onSubmit={(e) => {
             e.preventDefault();
             if (!text.trim()) return;
-            api("POST", "/send", { to: agent, body: text }).then(() => setText(""), (err) => alert(err.message));
+            api("POST", "/send", { to: agent, body: text }).then(() => setText(""), failed("That did not work"));
           }}
         >
           <input className="text" placeholder={`Message ${agent} (delivered when it is idle)`} value={text} onChange={(e) => setText(e.target.value)} />

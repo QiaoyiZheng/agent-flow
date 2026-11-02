@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { RunState } from "@af/core";
 import { activeInstance, latestInstance } from "@af/core";
-import { api } from "./store";
+import { api, failed } from "./store";
 import { Terminal } from "./Terminal";
 import { DiffView, Messages } from "./Viewers";
 import { ago, basename, executorKind, executorLabel, kindColor, nodeLook } from "./view";
@@ -20,7 +20,7 @@ export function NodeDetail({ run, nodeId, onClose, onOpen, onGoTo }: { run: RunS
   const look = nodeLook(node);
   const opens = run.opens.filter((o) => o.node?.startsWith(`${nodeId}#`));
   const isolated = node.spec.isolation === "isolated" && !!run.meta?.repo;
-  const cmd = (command: object) => api("POST", "/graph", { command }).catch((e) => alert(e.message));
+  const cmd = (command: object) => api("POST", "/graph", { command }).catch(failed("That did not work"));
 
   return (
     <div className="detail">

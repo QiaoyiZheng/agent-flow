@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AgentKind, Attention, HPane } from "@af/core";
-import { api, useStore, watch } from "./store";
+import { api, useStore, watch, failed } from "./store";
 import { Terminal } from "./Terminal";
 import { Graph } from "./Graph";
 import { NodeDetail } from "./NodeDetail";
@@ -8,6 +8,7 @@ import { Sidebar } from "./Sidebar";
 import { LayoutView, type PaneCtx } from "./Layout";
 import { Messages } from "./Viewers";
 import { kindColor } from "./view";
+import { NoticesButton, Toasts } from "./Notices";
 
 const params = new URLSearchParams(location.search);
 
@@ -33,7 +34,7 @@ export function App() {
     if (drawer && !shell)
       api<{ paneId: string; workspaceId?: string }>("GET", "/shell").then(
         (r) => (setShell(r), r.workspaceId && setShellWs(r.workspaceId)),
-        (e) => alert(e.message),
+        failed("That did not work"),
       );
   }, [drawer]);
   const hidden = useMemo(() => new Set(shellWs ? [shellWs] : []), [shellWs]);
@@ -120,7 +121,7 @@ export function App() {
   };
   const showFile = (target: string) => {
     const of = focusedPane ?? leadPane;
-    if (of) api("POST", "/show", { target, of }).then((r) => goToPane(r.paneId), (e) => alert(e.message));
+    if (of) api("POST", "/show", { target, of }).then((r) => goToPane(r.paneId), failed("That did not work"));
   };
 
   const tabTitle = (t: { id: string; label: string }) => {
@@ -161,14 +162,14 @@ export function App() {
                   title="Close tab"
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (confirm(`Close tab "${tabTitle(t)}" and everything running in it?`)) api("POST", "/tab/close", { tab: t.id }).catch((err) => alert(err.message));
+                    if (confirm(`Close tab "${tabTitle(t)}" and everything running in it?`)) api("POST", "/tab/close", { tab: t.id }).catch(failed("That did not work"));
                   }}
                 >
                   ✕
                 </button>
               </div>
             ))}
-            <button className="tab-add" title="New tab with a shell" onClick={() => api("POST", "/tab/new", { workspace: ws.id }).then((r) => selectPane(ws.id, r.tabId, r.paneId), (e) => alert(e.message))}>
+            <button className="tab-add" title="New tab with a shell" onClick={() => api("POST", "/tab/new", { workspace: ws.id }).then((r) => selectPane(ws.id, r.tabId, r.paneId), failed("That did not work"))}>
               + tab
             </button>
           </div>
@@ -234,6 +235,7 @@ export function App() {
         )}
       </section>
 
+      <Toasts />
       <footer className="drawer">
         {/* one status line: shell toggle on the left, where you are in the middle, connection and brand on the right */}
         <div className="drawer-head">
@@ -252,6 +254,7 @@ export function App() {
             </span>
           )}
           <span className="spacer" />
+          <NoticesButton />
           <span className={`conn ${connected ? "" : "off"}`} title={connected ? "connected to the agent-flow server" : "reconnecting to the agent-flow server"}>
             <i /> {connected ? "connected" : "reconnecting…"}
           </span>
@@ -287,7 +290,7 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
       mode === "run"
         ? api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined }).then((meta) => meta.herdrWorkspace as string)
         : api("POST", "/workspace/new", { cwd: cwd || undefined, machine, label }).then((r) => r.workspaceId as string);
-    p.then(onDone, (err) => alert(err.message)).finally(() => setBusy(false));
+    p.then(onDone, failed("That did not work")).finally(() => setBusy(false));
   };
   return (
     <div className="welcome">

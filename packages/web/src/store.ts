@@ -1,7 +1,7 @@
 // Client state: one WebSocket to the af server. Run state is rebuilt with the same reducer the server uses.
 
 import { useSyncExternalStore } from "react";
-import { type ClientPush, type HerdrModel, type RunState, type RunSummary, type ServerPush, type ViewRec, applyRun } from "@af/core";
+import { type ClientPush, type HerdrModel, type Notice, type RunState, type RunSummary, type ServerPush, type ViewRec, applyRun } from "@af/core";
 
 const params = new URLSearchParams(location.search);
 export const TOKEN = params.get("token") ?? localStorage.getItem("af-token") ?? "";
@@ -24,9 +24,13 @@ interface State {
   version: number;
   herdr?: HerdrModel;
   views: Record<string, ViewRec>;
+  /** Errors and warnings from the server and from actions in this page, oldest first. */
+  notices: Notice[];
+  /** Notices seen in the list (for the unread badge). */
+  seenNotices: number;
 }
 
-let state: State = { connected: false, runs: [], version: 0, views: {} };
+let state: State = { connected: false, runs: [], version: 0, views: {}, notices: [], seenNotices: 0 };
 const subs = new Set<() => void>();
 const termSubs = new Map<string, TermListener>();
 let ws: WebSocket | undefined;
@@ -53,6 +57,7 @@ function connect() {
     queue = [];
   };
   ws.onclose = () => {
+    if (state.connected) notify("warn", "Lost the connection to the agent-flow server; reconnecting", undefined, "ui:server");
     set({ connected: false });
     setTimeout(connect, 1000);
   };
@@ -64,6 +69,12 @@ function connect() {
         if (state.runId && !m.runs.some((r) => r.id === state.runId)) watch(undefined);
         break;
       }
+      case "notices":
+        set({ notices: [...m.list, ...state.notices.filter((n) => n.source.startsWith("ui"))], seenNotices: m.list.length });
+        break;
+      case "notice":
+        addNotice(m.notice);
+        break;
       case "herdr":
         set({ herdr: m.model, views: m.views });
         break;
@@ -108,6 +119,27 @@ export function useStore(): State {
 }
 
 export const getState = () => state;
+
+function addNotice(n: Notice) {
+  set({ notices: [...state.notices.filter((x) => x.id !== n.id), n].slice(-300) });
+}
+
+let uiSeq = 0;
+/** Show an error, warning or note to the user (toast + the notices list). */
+export function notify(level: Notice["level"], text: string, detail?: string, source = "ui") {
+  addNotice({ id: `ui${++uiSeq}`, level, source, text, detail, at: new Date().toISOString(), count: 1 });
+}
+
+/** For promise chains: `.catch(failed("Could not close the pane"))`. */
+export const failed = (what: string) => (e: unknown) => notify("error", what, e instanceof Error ? e.message : String(e));
+
+export function markNoticesSeen() {
+  set({ seenNotices: state.notices.length });
+}
+
+export function clearNotices() {
+  set({ notices: [], seenNotices: 0 });
+}
 
 /** Call the HTTP API as the user. */
 export async function api<T = any>(method: "GET" | "POST", path: string, body: Record<string, unknown> = {}): Promise<T> {

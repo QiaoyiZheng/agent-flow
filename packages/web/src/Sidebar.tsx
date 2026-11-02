@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Attention, HerdrModel, RunState, RunSummary } from "@af/core";
-import { api } from "./store";
+import { api, failed, notify } from "./store";
 import { kindColor } from "./view";
 
 const KIND_LABEL: Record<Attention["kind"], string> = {
@@ -68,7 +68,7 @@ export function Sidebar({
                 title="Dismiss"
                 onClick={(e) => {
                   e.stopPropagation();
-                  api("POST", "/attention/dismiss", { id: a.id }).catch((err) => alert(err.message));
+                  api("POST", "/attention/dismiss", { id: a.id }).catch(failed("That did not work"));
                 }}
               >
                 ✕
@@ -115,9 +115,9 @@ export function Sidebar({
                   )}
                   {!m.local && (
                     <RowMenu id={`m:${m.id}`} open={menu} setOpen={setMenu}>
-                      {m.state !== "online" && <div className="item" onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch((e) => alert(e.message))}>{m.state === "offline" ? "Connect" : "Retry now"}</div>}
+                      {m.state !== "online" && <div className="item" onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch(failed("That did not work"))}>{m.state === "offline" ? "Connect" : "Retry now"}</div>}
                       {m.state !== "offline" && (
-                        <div className="item" onClick={() => api("POST", "/machine/disconnect", { machine: m.id }).catch((e) => alert(e.message))}>
+                        <div className="item" onClick={() => api("POST", "/machine/disconnect", { machine: m.id }).catch(failed("That did not work"))}>
                           Disconnect
                         </div>
                       )}
@@ -125,7 +125,7 @@ export function Sidebar({
                         className="item danger"
                         onClick={() => {
                           if (confirm(`Remove ${m.label} (${m.target}) from the machine list?\n\nIt is removed from Herdr's list too. Its Herdr server and the agents running there keep running; add it again to get back to them.`))
-                            api("POST", "/machine/remove", { machine: m.id }).catch((e) => alert(e.message));
+                            api("POST", "/machine/remove", { machine: m.id }).catch(failed("That did not work"));
                         }}
                       >
                         Remove machine…
@@ -134,7 +134,7 @@ export function Sidebar({
                   )}
                 </span>
               </div>
-              {open && !m.local && m.state === "error" && (
+              {!m.local && m.state === "error" && (
                 <div className="tree-note err">
                   {m.error}
                   <button className="c-more" style={{ marginLeft: 6 }} onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch(() => {})}>
@@ -176,7 +176,7 @@ export function Sidebar({
                               onClick={() => {
                                 const what = [agents.length ? `${agents.length} agent${agents.length > 1 ? "s" : ""}` : "", `${panes.length} pane${panes.length > 1 ? "s" : ""}`].filter(Boolean).join(", ");
                                 if (confirm(`Close workspace "${w.label}" on ${m.label}?\n\nThis stops everything running in it (${what})${r ? `, and stops run ${r.id}` : ""}.`))
-                                  api("POST", "/workspace/close", { workspace: w.id }).catch((e) => alert(e.message));
+                                  api("POST", "/workspace/close", { workspace: w.id }).catch(failed("That did not work"));
                               }}
                             >
                               Close workspace…
@@ -274,8 +274,8 @@ function AddMachine({ onDone }: { onDone: () => void }) {
                 className="c-more"
                 onClick={() =>
                   api("POST", "/machine/setup-in-shell", { target, label: label || undefined })
-                    .then(() => alert("The setup command is waiting in the persistent shell (ctrl+` to open it). Answer its questions there."))
-                    .catch((e2) => alert(e2.message))
+                    .then(() => notify("info", "The setup command is waiting in the persistent shell (ctrl+` to open it). Answer its questions there."))
+                    .catch(failed("That did not work"))
                 }
               >
                 Run the setup in the persistent shell

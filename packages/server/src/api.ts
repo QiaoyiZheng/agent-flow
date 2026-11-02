@@ -12,12 +12,16 @@ import { claudeExtraArgs } from "./agents.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
 import { ChatBridge } from "./transcripts/bridge.ts";
-import { LocalFS, SshFS } from "./transcripts/index.ts";
+import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
+import { commandsFor } from "./commands.ts";
+import { prepareFork } from "./fork.ts";
+import type { Notices } from "./notices.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
-export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBackend) {
+export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w)) {
+  const commandCache = new Map<string, { at: number; items: unknown[] }>();
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/api/, "");
@@ -117,6 +121,32 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           await w.prompt(body.pane, text);
           return json({ ok: true, sent: text });
         }
+        case "GET /pane/commands": {
+          const pane = String(body.pane ?? "");
+          const p = w.model.panes.find((x) => x.id === pane);
+          if (!p?.agent) return json({ items: [] });
+          const hit = commandCache.get(pane);
+          if (hit && Date.now() - hit.at < 30_000) return json({ items: hit.items });
+          const r = await access.resolve(pane).catch(() => undefined);
+          const items = await commandsFor(p.agent, access.fsFor(pane).fs, r && "source" in r ? r.source.path : undefined, p.cwd);
+          commandCache.set(pane, { at: Date.now(), items });
+          return json({ items });
+        }
+        case "POST /pane/fork": {
+          const pane = String(body.pane ?? "");
+          const r = await access.resolve(pane);
+          if ("reason" in r) throw new AfError("no_transcript", `cannot fork: ${r.reason}`);
+          const before = body.before === undefined || body.before === null ? undefined : Number(body.before);
+          const plan = await prepareFork(access.fsFor(pane).fs, r.source, before);
+          const { paneId } = await w.split(pane, body.direction === "down" ? "down" : "right");
+          if (plan.session) w.rememberSession(paneId, plan.session.id, plan.session.path);
+          const route = w.route(paneId);
+          const hook = r.source.agent === "claude" && route.local && o.opts.config.claudeSettings ? ["--settings", o.opts.config.claudeSettings] : [];
+          const name = `${r.source.agent}-fork-${paneId.replace(/[^a-z0-9]/gi, "").toLowerCase()}`.slice(0, 32);
+          const started = await route.backend.startAgent(name, r.source.agent, route.raw, [...plan.args, ...hook]);
+          await w.refresh();
+          return json({ paneId, agent: name, started: started.ok, session: plan.session });
+        }
         case "GET /pane/menu":
           return json({ menu: (await w.menu(String(body.pane ?? ""))) ?? null });
         case "POST /pane/choose":
@@ -166,7 +196,13 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
   const session = kind === "claude" ? crypto.randomUUID() : undefined;
   if (session) w.rememberSession(paneId, session);
   const route = w.route(paneId);
-  const args = session ? (route.local ? claudeExtraArgs(o.opts.config, session) : ["--session-id", session]) : kind === "codex" ? ["--no-alt-screen"] : [];
+  const args = session
+    ? route.local
+      ? claudeExtraArgs(o.opts.config, session)
+      : ["--session-id", session]
+    : kind === "codex"
+      ? ["-c", "check_for_update_on_startup=false", "--no-alt-screen"]
+      : [];
   const r = await route.backend.startAgent(name, kind, route.raw, args);
   await w.refresh();
   return { paneId, agent: name, started: r.ok };
@@ -203,21 +239,17 @@ interface WsData {
   unsub?: () => void;
 }
 
-export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string }) {
-  const handler = makeHandler(o, w, opts.backend);
-  const localFs = new LocalFS();
-  const sshFs = new Map<string, SshFS>();
-  const fsFor = (paneId: string) => {
-    const r = w.remoteOf(paneId);
-    if (!r) return { fs: localFs, remote: false };
-    let f = sshFs.get(paneId.split("~")[0]!);
-    if (!f) sshFs.set(paneId.split("~")[0]!, (f = new SshFS((cmd, o) => r.exec(cmd, o))));
-    return { fs: f, remote: true };
-  };
+export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices }) {
+  const access = makeTranscriptAccess(o, w);
+  const handler = makeHandler(o, w, opts.backend, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views } satisfies ServerPush);
   w.onChange(() => {
     const msg = herdrPush();
+    for (const c of clients) c.send(msg);
+  });
+  opts.notices.subscribe((notice) => {
+    const msg = JSON.stringify({ type: "notice", notice } satisfies ServerPush);
     for (const c of clients) c.send(msg);
   });
 
@@ -264,17 +296,22 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
     websocket: {
       open(ws) {
         const send = (m: ServerPush) => ws.send(JSON.stringify(m));
-        ws.data.bridge = new TerminalBridge((p, mode, cols, rows) => w.terminalArgv(p, mode, cols, rows), send);
+        ws.data.bridge = new TerminalBridge((p, mode, cols, rows) => w.terminalArgv(p, mode, cols, rows), send, (paneId, reason) => {
+          // ssh exits with 255 when the connection itself broke: check the machine now (its own notice says so)
+          const remote = w.remoteOf(paneId);
+          if (remote && /\b255\b|connection|broken pipe|closed by remote/i.test(reason)) return void remote.verify?.();
+          opts.notices.add("warn", `terminal:${paneId}`, `The terminal stream for ${paneId} stopped`, reason);
+        });
         ws.data.chat = new ChatBridge({
-          fsFor,
+          fsFor: access.fsFor,
           send,
           panes: () => w.model.panes,
-          // the hook's report wins: it follows /clear and resumes
-          knownSession: (p) => w.sessions[p] ?? (o.sessionForPane(p) ? { id: o.sessionForPane(p) } : undefined),
+          knownSession: access.known,
           argv: (p) => w.processArgv(p),
           screen: (p) => w.read(p, 400),
         });
         send({ type: "hello", runs: o.listRuns() });
+        send({ type: "notices", list: opts.notices.list });
         ws.send(herdrPush());
         clients.add(ws);
       },

@@ -191,6 +191,30 @@ export interface ChatEntry {
   key: string;
   at?: string;
   block: ChatBlock;
+  /** Byte offset in the transcript file where this entry's line starts: a fork point ("fork from here"). */
+  ref?: number;
+}
+
+/** Something the user should know about: a failed connection, a broken terminal stream, a lost Herdr. */
+export interface Notice {
+  id: string;
+  level: "error" | "warn" | "info";
+  /** Where it came from: "machine:ds03", "herdr", "terminal:w1:p2", "ui". */
+  source: string;
+  text: string;
+  detail?: string;
+  at: string;
+  /** How many times the same notice happened in a row (shown as ×N instead of repeating it). */
+  count: number;
+}
+
+/** A slash command or skill an agent offers, for the composer's "/" menu. */
+export interface CommandItem {
+  name: string;
+  /** Text the composer inserts: "/model", "/skill:x" (omp), "$x" (codex skills). */
+  insert: string;
+  description: string;
+  kind: "command" | "skill";
 }
 
 export type ChatOp = { op: "add"; entry: ChatEntry } | { op: "result"; id: string; output: string; error?: boolean };
@@ -208,6 +232,8 @@ export type ServerPush =
   | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec> }
   | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[] }
   | { type: "chat.ops"; id: string; ops: ChatOp[] }
+  | { type: "notices"; list: Notice[] }
+  | { type: "notice"; notice: Notice }
   | { type: "snapshot"; run: string; state: RunState }
   | { type: "event"; run: string; event: RunEvent }
   | { type: "term.frame"; id: string; bytes: string; width: number; height: number; full: boolean }

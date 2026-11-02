@@ -10,6 +10,7 @@ import { Orchestrator } from "./orchestrator.ts";
 import { serve } from "./api.ts";
 import { Workspaces } from "./workspaces.ts";
 import { RemoteMachine } from "./remote.ts";
+import { Notices } from "./notices.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -57,9 +58,11 @@ export async function main(argv: string[]) {
   const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config });
   const n = o.load();
   o.start(1000);
+  const notices = new Notices();
   const w = new Workspaces({
     home,
     backend,
+    notify: (level, source, text, detail) => notices.add(level, source, text, detail),
     paneEnv: () => ({ AF_SOCK: sock, PATH: `${binDir}:${process.env.PATH ?? ""}` }),
     remote: (spec, onChange) => {
       const remote = new RemoteMachine(spec, join(home, "ssh"), onChange);
@@ -67,7 +70,7 @@ export async function main(argv: string[]) {
     },
   });
   await w.start();
-  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist") });
+  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices });
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));
   console.log(`agent-flow server: ${n} run(s) loaded`);
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
