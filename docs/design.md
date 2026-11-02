@@ -297,7 +297,13 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
   2. **终端实时流**：`ssh <机器> <远程 herdr> terminal session control|observe <pane>`，和本地同一种 NDJSON。实测：首帧 32–180 ms，打字回显中位数 8 ms（同一局域网）。
   3. **短命令**：读远程 agent 的对话记录（`ls`、`tail -c`，按字节偏移增量读）、把附件写到远程的 `~/.agent-flow/attachments/`。
 - **id 带机器前缀**：远程的 workspace / tab / pane id 写成 `<机器>~<原 id>`，如 `allinai2plus~w6:p3`；本地 id 不变。所有操作按前缀路由到那台机器。`af ls`、`af read`、`af split` 等对远程 id 一样可用；`af connect <机器>` 手动连接。
-- **按需连接**：远程机器默认不连；在侧栏展开、或 `af connect` 时才连。断线后按 5 s、10 s、20 s……最长 60 s 重试；断线期间那台机器的 pane 从模型里去掉，侧栏显示原因（需要密码、主机不可达、主机密钥变了、远程没有运行 Herdr……），并有"retry"。
+- **连上就一直连着**（用户要求）：
+  - 第一次在侧栏展开或 `af connect` 时连接；连过的机器记在 `~/.agent-flow/machines.json`，之后每次 server 启动都自动重连，直到用户点"Disconnect"（或 `af disconnect`）。
+  - SSH 主连接在后台独立运行（`ssh -f -N -o ControlPersist=yes`），**agent-flow server 重启不会断**；新 server 用 `ssh -O check` 找到它直接复用（实测：重启后不需要任何操作，远程 pane 立刻都在）。
+  - 心跳：ServerAliveInterval 10 s × 6 次，网络抖动一分钟以内不会断。
+  - 健康检查：每 15 秒检查主连接和转发的 Herdr socket；连续两次拉取失败也会立刻检查。坏了就马上重连，之后 3 s、6 s……最长 30 s 无限重试。实测：手动杀掉 SSH 主连接，4.9 秒发现，5.7 秒恢复。
+  - 重连期间保留最后一次看到的 workspace 和 pane（侧栏变暗，pane 上显示"Reconnecting to …"），不会消失；网页里打开着的终端流断了会每 2 秒自动重开（实测约 2.4 秒恢复）。
+  - "Disconnect" 结束后台 SSH 连接（`ssh -O exit`）并不再自动重连；"Remove machine" 同时从 Herdr 的列表里删除。
 - 需要免密 SSH（BatchMode）。实测 allinai2plus、ds03 可以；其余机器未测。
 - **增删机器**（用户要求）：侧栏"+ machine"填 SSH 目标（和可选名字）→ `herdr machine add`，写进 Herdr 自己的机器列表（Herdr TUI 里也会出现），随后自动连接。远程没装 Herdr、需要确认安装时，Herdr 要交互确认：表单给出"在常驻终端里运行 setup"按钮，把 `herdr machine add …` 打进常驻终端，由用户回答。机器"⋯"菜单里"Remove machine…"→ `herdr machine remove`；那台机器上的 Herdr server 和 agent 继续运行，再加回来就能接上。每 15 秒同步一次 Herdr 的机器列表，在 Herdr TUI 里增删的机器也会跟着变；机器的 id 按 Herdr profile 固定。
 - **增删 workspace**（用户要求）：每台机器行上的"+"新建 workspace（远程机器支持 `~` 路径，目录在那台机器上检查）；workspace"⋯"菜单里"Close workspace…"关闭并停止其中所有进程（如果是 run 的 workspace，同时停止该 run），确认框里写明会停掉几个 agent、几个 pane。

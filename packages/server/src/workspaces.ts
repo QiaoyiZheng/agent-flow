@@ -16,7 +16,7 @@ import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, keysToChoose, parseMenu } from "./menu.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
-export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec">;
+export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
 
 export interface WorkspacesOptions {
   home: string;
@@ -46,6 +46,8 @@ interface Machine {
   sigs: Record<string, string>;
   stopWatch?: () => void;
   lastPoll: number;
+  /** Consecutive failed snapshots; two in a row make the connection check itself. */
+  failedPolls: number;
 }
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
@@ -64,11 +66,16 @@ export class Workspaces {
   private lastJson = "";
   private viewsFile: string;
   private now: () => string;
+  /** Herdr profile ids of machines the user connected: reconnected on every start until they disconnect. */
+  private autoconnect = new Set<string>();
+  private autoFile: string;
 
   constructor(private opts: WorkspacesOptions) {
     this.viewsFile = join(opts.home, "views.json");
     this.now = opts.now ?? (() => new Date().toISOString());
     if (existsSync(this.viewsFile)) this.views = JSON.parse(readFileSync(this.viewsFile, "utf8"));
+    this.autoFile = join(opts.home, "machines.json");
+    if (existsSync(this.autoFile)) for (const id of (JSON.parse(readFileSync(this.autoFile, "utf8")).connected ?? []) as string[]) this.autoconnect.add(id);
     const sf = join(opts.home, "sessions.json");
     if (existsSync(sf))
       for (const [k, v] of Object.entries(JSON.parse(readFileSync(sf, "utf8")) as Record<string, unknown>))
@@ -76,8 +83,12 @@ export class Workspaces {
     this.machines.set("local", this.newMachine({ id: "local", label: "Local", target: "local", local: true, state: "online" }, opts.backend));
   }
 
+  private saveAutoconnect() {
+    writeFileSync(this.autoFile, JSON.stringify({ connected: [...this.autoconnect] }, null, 2));
+  }
+
   private newMachine(meta: HMachine, backend?: TerminalBackend): Machine {
-    return { meta, backend, workspaces: [], tabs: [], panes: [], layouts: {}, sigs: {}, lastPoll: 0 };
+    return { meta, backend, workspaces: [], tabs: [], panes: [], layouts: {}, sigs: {}, lastPoll: 0, failedPolls: 0 };
   }
 
   async start(pollMs = 1500) {
@@ -98,8 +109,9 @@ export class Workspaces {
     for (const [key, m] of this.machines)
       if (!m.meta.local && !ids.has(m.profileId!)) {
         m.stopWatch?.();
-        m.remote?.close();
+        m.remote?.close(true);
         this.machines.delete(key);
+        this.autoconnect.delete(m.profileId!);
         changed = true;
       }
     const known = new Set([...this.machines.values()].map((m) => m.profileId));
@@ -116,6 +128,8 @@ export class Workspaces {
       } else m.meta.error = "remote machines are not enabled";
       this.machines.set(key, m);
       changed = true;
+      // stay connected across restarts: machines the user connected, or whose SSH connection is still up
+      if (m.remote && (this.autoconnect.has(s.id) || m.remote.masterAlive?.())) void m.remote.connect().catch(() => {});
     }
     if (changed) this.publish(true);
   }
@@ -142,6 +156,9 @@ export class Workspaces {
     const m = this.machines.get(key);
     if (!m) throw new AfError("unknown_machine", `no machine ${key}`, 404);
     if (m.meta.local) throw new AfError("local_machine", "the local machine cannot be removed");
+    m.remote?.close(true);
+    this.autoconnect.delete(m.profileId!);
+    this.saveAutoconnect();
     await this.opts.backend.removeMachine(m.profileId!);
     await this.reloadMachines();
     await this.refresh();
@@ -153,7 +170,7 @@ export class Workspaces {
     clearTimeout(this.debounce);
     for (const m of this.machines.values()) {
       m.stopWatch?.();
-      m.remote?.close();
+      m.remote?.close(false); // the SSH connections stay up for the next server run
     }
   }
 
@@ -186,6 +203,14 @@ export class Workspaces {
       m.stopWatch = undefined;
       m.backend = undefined;
     }
+    // while reconnecting, keep showing the last known workspaces (the UI dims them); forget them on disconnect
+    if (r.state === "offline") {
+      m.workspaces = [];
+      m.tabs = [];
+      m.panes = [];
+      m.layouts = {};
+      m.sigs = {};
+    }
     this.publish(true);
   }
 
@@ -194,9 +219,25 @@ export class Workspaces {
     const m = this.machines.get(key);
     if (!m) throw new AfError("unknown_machine", `no machine ${key}. Known: ${[...this.machines.keys()].join(", ")}`, 404);
     if (m.remote) {
+      if (m.profileId && !this.autoconnect.has(m.profileId)) {
+        this.autoconnect.add(m.profileId);
+        this.saveAutoconnect();
+      }
       await m.remote.connect().catch(() => {});
       await this.refresh();
     }
+    return m.meta;
+  }
+
+  /** Stop using a remote machine: end its SSH connection and stop reconnecting it on start. */
+  async disconnect(key: string): Promise<HMachine> {
+    const m = this.machines.get(key);
+    if (!m) throw new AfError("unknown_machine", `no machine ${key}`, 404);
+    if (m.meta.local) throw new AfError("local_machine", "the local machine is always connected");
+    if (m.profileId) this.autoconnect.delete(m.profileId);
+    this.saveAutoconnect();
+    m.remote?.close(true);
+    await this.refresh();
     return m.meta;
   }
 
@@ -221,13 +262,7 @@ export class Workspaces {
   }
 
   private async refreshMachine(m: Machine) {
-    if (!m.backend) {
-      m.workspaces = [];
-      m.tabs = [];
-      m.panes = [];
-      m.layouts = {};
-      return;
-    }
+    if (!m.backend) return; // remote and not connected: the last known model stays until it disconnects
     if (!m.meta.local && Date.now() - m.lastPoll < (this.opts.remotePollMs ?? 3000)) return;
     m.lastPoll = Date.now();
     try {
@@ -254,6 +289,7 @@ export class Workspaces {
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
       m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId) }));
       m.layouts = layouts;
+      m.failedPolls = 0;
       if (m.meta.local) {
         // forget viewers whose pane is gone
         const live = new Set(m.panes.map((x) => x.id));
@@ -266,7 +302,9 @@ export class Workspaces {
         if (dropped) this.saveViews();
       }
     } catch (e) {
-      console.error(`herdr refresh (${m.meta.id}):`, (e as Error).message);
+      m.failedPolls++;
+      if (m.remote && m.failedPolls >= 2) void m.remote.verify?.();
+      if (m.failedPolls === 1 || m.failedPolls % 20 === 0) console.error(`herdr refresh (${m.meta.id}):`, (e as Error).message);
     }
   }
 

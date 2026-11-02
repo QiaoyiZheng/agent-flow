@@ -571,3 +571,8 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .menu-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--text-3); }
 .menu-foot .spacer { flex: 1; }
 .menu-err { color: var(--s-rejected); }
+
+/* ---------- reconnecting machines ---------- */
+.stale { opacity: 0.5; }
+.pane-down { position: absolute; inset: 0; z-index: 8; display: grid; place-items: center; background: rgba(11, 12, 14, 0.72); color: var(--text-2); font-size: 13px; text-align: center; backdrop-filter: blur(1px); }
+.pane-down .sub { font-size: 11.5px; color: var(--text-3); margin-top: 4px; max-width: 420px; }

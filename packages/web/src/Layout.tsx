@@ -18,6 +18,8 @@ export interface PaneCtx {
   onFocus: (paneId: string) => void;
   /** Run agent names by pane, for nicer titles. */
   runAgents: Map<string, { name: string; kind: string; role?: string }>;
+  /** Remote machines that are not connected right now: their panes show the last known layout, dimmed. */
+  down: Map<string, { label: string; error?: string }>;
   leadPane?: string;
 }
 
@@ -169,6 +171,14 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         </button>
       </div>
       <div className="pane-body">
+        {p && ctx.down.has(p.machine) && (
+          <div className="pane-down">
+            <div>
+              Reconnecting to {ctx.down.get(p.machine)!.label}…
+              {ctx.down.get(p.machine)!.error && <div className="sub">{ctx.down.get(p.machine)!.error}</div>}
+            </div>
+          </div>
+        )}
         {view ? (
           isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} />
         ) : renderable && !raw ? (

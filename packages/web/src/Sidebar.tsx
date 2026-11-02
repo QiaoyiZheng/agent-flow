@@ -106,7 +106,7 @@ export function Sidebar({
                 <span className="caret">{open ? "▾" : "▸"}</span>
                 {!m.local && <span className={`dot m-${m.state}`} />}
                 <span className="name">{m.label}</span>
-                {!m.local && <span className="meta">{m.state === "online" ? workspaces.length || "" : m.state === "connecting" ? "connecting…" : m.state === "error" ? "error" : ""}</span>}
+                {!m.local && <span className="meta">{m.state === "online" ? workspaces.length || "" : m.state === "connecting" ? (workspaces.length ? "reconnecting…" : "connecting…") : m.state === "error" ? "retrying" : ""}</span>}
                 <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                   {(m.local || m.state === "online") && (
                     <button title={`New workspace on ${m.label}`} onClick={() => onNew(m.id)}>
@@ -115,7 +115,12 @@ export function Sidebar({
                   )}
                   {!m.local && (
                     <RowMenu id={`m:${m.id}`} open={menu} setOpen={setMenu}>
-                      {m.state !== "online" && <div className="item" onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch((e) => alert(e.message))}>Connect</div>}
+                      {m.state !== "online" && <div className="item" onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch((e) => alert(e.message))}>{m.state === "offline" ? "Connect" : "Retry now"}</div>}
+                      {m.state !== "offline" && (
+                        <div className="item" onClick={() => api("POST", "/machine/disconnect", { machine: m.id }).catch((e) => alert(e.message))}>
+                          Disconnect
+                        </div>
+                      )}
                       <div
                         className="item danger"
                         onClick={() => {
@@ -139,13 +144,17 @@ export function Sidebar({
               )}
               {open && !m.local && m.state === "connecting" && <div className="tree-note">connecting over SSH…</div>}
               {open &&
+                !m.local &&
+                m.state !== "online" &&
+                workspaces.length > 0 && <div className="tree-note">Last known workspaces; reconnecting{m.error ? `: ${m.error}` : "…"}</div>}
+              {open &&
                 workspaces.map((w) => {
                   const r = runOf.get(w.id);
                   const panes = herdr.panes.filter((p) => p.workspaceId === w.id);
                   const agents = panes.filter((p) => p.agent);
                   const wsOpen = !(collapsed[w.id] ?? w.id !== selectedWs);
                   return (
-                    <div key={w.id}>
+                    <div key={w.id} className={!m.local && m.state !== "online" ? "stale" : ""}>
                       <div className={`tree-row ws ${w.id === selectedWs ? "active" : ""}`} onClick={() => onSelectWs(w.id)}>
                         <span
                           className="caret"

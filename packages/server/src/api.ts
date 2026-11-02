@@ -80,6 +80,8 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           return json(await w.newWorkspace(body.label || "workspace", body.cwd, body.machine || "local"));
         case "POST /machine/connect":
           return json(await w.connect(String(body.machine ?? "")));
+        case "POST /machine/disconnect":
+          return json(await w.disconnect(String(body.machine ?? "")));
         case "POST /machine/add":
           return json(await w.addMachine(String(body.target ?? ""), body.label, body.session));
         case "POST /machine/remove":

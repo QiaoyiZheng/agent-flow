@@ -53,7 +53,7 @@ export function Terminal({
   stripRef.current = strip;
   const follow = useRef<() => void>(() => {});
   const termRef = useRef<XTerm | undefined>(undefined);
-  const [status, setStatus] = useState<"connecting" | "live" | "closed">("connecting");
+  const [status, setStatus] = useState<"connecting" | "live" | "reconnecting">("connecting");
 
   useEffect(() => {
     const el = host.current!;
@@ -81,9 +81,16 @@ export function Terminal({
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         term.write(bytes, () => follow.current());
-      } else setStatus("closed");
+      } else {
+        // the stream ended (server restart, SSH hiccup): open it again while this view exists
+        setStatus("reconnecting");
+        clearTimeout(retry);
+        retry = setTimeout(open, 2000);
+      }
     });
-    send({ type: "term.open", id, paneId, mode, cols: term.cols, rows: term.rows });
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const open = () => send({ type: "term.open", id, paneId, mode, cols: term.cols, rows: term.rows });
+    open();
     termRef.current = term;
     follow.current = () => {
       const st = stripRef.current;
@@ -129,6 +136,7 @@ export function Terminal({
     ro.observe(el);
 
     return () => {
+      clearTimeout(retry);
       ro.disconnect();
       el.removeEventListener("wheel", onWheel);
       input.dispose();
@@ -148,13 +156,13 @@ export function Terminal({
     return (
       <div className="term strip" style={{ height: strip.viewHeight }} onMouseDown={() => termRef.current?.focus()}>
         <div ref={host} style={{ height: strip.fullHeight, willChange: "transform" }} />
-        {status !== "live" && <div className="term-overlay">{status === "connecting" ? "connecting…" : "terminal closed"}</div>}
+        {status !== "live" && <div className="term-overlay">{status === "connecting" ? "connecting…" : "reconnecting…"}</div>}
       </div>
     );
   return (
     <div className="term">
       <div ref={host} style={{ height: "100%" }} />
-      {status !== "live" && <div className="term-overlay">{status === "connecting" ? "connecting…" : "terminal closed"}</div>}
+      {status !== "live" && <div className="term-overlay">{status === "connecting" ? "connecting…" : "reconnecting…"}</div>}
     </div>
   );
 }

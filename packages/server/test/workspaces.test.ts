@@ -123,6 +123,7 @@ describe("workspaces: remote machines", () => {
     local.saved = [{ id: "p1", label: "ds03", target: "ds03", session: "default" }, { id: "p2", label: "Build box", target: "me@build", session: "default" }];
     const remoteBackend = new FakeBackend();
     const execs: string[] = [];
+    const hangups: string[] = [];
     const remotes = new Map<string, { state: any; error?: string; home?: string; onChange: () => void }>();
     const w = new Workspaces({
       home,
@@ -135,6 +136,11 @@ describe("workspaces: remote machines", () => {
           error: undefined as string | undefined,
           home: "/home/u",
           onChange,
+          close(hangUp?: boolean) {
+            r.state = "offline";
+            if (hangUp) hangups.push(spec.key);
+            onChange();
+          },
           async connect() {
             if (spec.key !== "ds03") {
               r.state = "error";
@@ -145,7 +151,6 @@ describe("workspaces: remote machines", () => {
             r.state = "online";
             onChange();
           },
-          close() {},
           async exec(cmd: string) {
             execs.push(cmd);
             return { code: 0, out: Buffer.from("/home/u/.agent-flow/attachments/x-shot.png\n"), err: "" };
@@ -189,14 +194,19 @@ describe("workspaces: remote machines", () => {
     expect(() => w.route("build-box~w1:p1")).toThrow(/Build box is not connected: cannot reach me@build/);
     expect(() => w.route("nowhere~w1:p1")).toThrow(/no machine nowhere/);
 
-    // losing the connection drops the remote panes from the model
+    // losing the connection keeps the last known panes (shown dimmed) while it reconnects ...
     const r = remotes.get("ds03")!;
-    r.state = "error";
-    r.error = "connection lost";
+    const panesBefore = w.model.panes.filter((p) => p.machine === "ds03").length;
+    r.state = "connecting";
+    r.error = "connection lost; reconnecting";
     r.onChange();
     await w.refresh();
+    expect(w.model.panes.filter((p) => p.machine === "ds03").length).toBe(panesBefore);
+    expect(w.model.machines.find((m) => m.id === "ds03")).toMatchObject({ state: "connecting" });
+    expect(() => w.route(pane.id)).toThrow(/not connected/);
+    // ... and forgets them once the user disconnects
+    await w.disconnect("ds03");
     expect(w.model.panes.filter((p) => p.machine === "ds03")).toEqual([]);
-    expect(w.model.machines.find((m) => m.id === "ds03")).toMatchObject({ state: "error", error: "connection lost" });
     w.stop();
   });
 });
@@ -261,6 +271,53 @@ describe("workspaces: adding and removing machines and workspaces", () => {
     local.saved = local.saved.filter((x) => x.id !== "a");
     await w.reloadMachines();
     expect(w.model.machines.map((x) => x.id)).toEqual(["local", "tea0"]);
+  });
+
+  test("a connected machine reconnects on the next start until it is disconnected", async () => {
+    const { home, local } = make();
+    local.saved = [{ id: "a", label: "ds03", target: "ds03", session: "default" }];
+    const connects: string[] = [];
+    const build = () =>
+      new Workspaces({
+        home,
+        backend: local,
+        paneEnv: () => ({}),
+        remote: (spec, onChange) => {
+          const r = {
+            state: "offline" as any,
+            error: undefined,
+            home: "/h",
+            async connect() {
+              connects.push(spec.key);
+              r.state = "online";
+              onChange();
+            },
+            close() {
+              r.state = "offline";
+              onChange();
+            },
+            async exec() {
+              return { code: 0, out: Buffer.from(""), err: "" };
+            },
+          };
+          return { remote: r, backend: () => new FakeBackend() };
+        },
+      });
+    const w1 = build();
+    await w1.start(60_000);
+    expect(connects).toEqual([]); // nothing connects until asked
+    await w1.connect("ds03");
+    w1.stop();
+    const w2 = build();
+    await w2.start(60_000);
+    expect(connects).toEqual(["ds03", "ds03"]); // reconnected by itself
+    expect(w2.model.machines.find((m) => m.id === "ds03")!.state).toBe("online");
+    await w2.disconnect("ds03");
+    w2.stop();
+    const w3 = build();
+    await w3.start(60_000);
+    expect(connects.length).toBe(2); // disconnected: stays off
+    w3.stop();
   });
 
   test("create and close workspaces, locally and on a remote machine", async () => {

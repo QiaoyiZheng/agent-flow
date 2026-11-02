@@ -108,7 +108,9 @@ export function App() {
     if (node && run?.graph.nodes[node]) setSelectedNode(node);
     if (a.agent) goToPane(run?.agents[a.agent]?.paneId);
   };
+  const down = useMemo(() => new Map((herdr?.machines ?? []).filter((m) => !m.local && m.state !== "online").map((m) => [m.id, { label: m.label, error: m.error }])), [herdr]);
   const ctx: PaneCtx = {
+    down,
     panes: panesById,
     views,
     focused: focusedPane,
