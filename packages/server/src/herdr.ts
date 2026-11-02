@@ -40,6 +40,8 @@ export interface TerminalBackend {
   runInPane(paneId: string, command: string): Promise<void>;
   renamePane(paneId: string, label: string): Promise<void>;
   machines(): Promise<HMachine[]>;
+  /** argv of the pane's foreground processes. */
+  processArgv(paneId: string): Promise<string[][]>;
   /** Call `onEvent` on any workspace/tab/pane/layout lifecycle event. Returns a stop function. */
   watchLifecycle(onEvent: () => void): () => void;
 }
@@ -191,6 +193,9 @@ export class Herdr implements TerminalBackend {
   async snapshot(): Promise<HerdrSnapshot> {
     const s = (await this.rpc("session.snapshot")).snapshot;
     const names = new Map<string, string>((s.agents ?? []).filter((a: any) => a.name).map((a: any) => [a.pane_id, a.name]));
+    const sessions = new Map<string, { kind: "path" | "id"; value: string }>(
+      (s.agents ?? []).filter((a: any) => a.agent_session?.value).map((a: any) => [a.pane_id, { kind: a.agent_session.kind === "path" ? "path" : "id", value: a.agent_session.value }]),
+    );
     return {
       workspaces: s.workspaces.map((w: any) => ({ id: w.workspace_id, label: w.label, number: w.number, activeTabId: w.active_tab_id, agentStatus: w.agent_status })),
       tabs: s.tabs.map((t: any) => ({ id: t.tab_id, workspaceId: t.workspace_id, label: t.label, number: t.number })),
@@ -204,6 +209,7 @@ export class Herdr implements TerminalBackend {
         label: p.label ?? undefined,
         title: p.terminal_title_stripped || undefined,
         cwd: p.foreground_cwd ?? p.cwd,
+        session: sessions.get(p.pane_id),
       })),
       layoutSigs: Object.fromEntries(s.layouts.map((l: any) => [l.tab_id, JSON.stringify([l.zoomed, l.panes.map((p: any) => [p.pane_id, p.rect]), l.splits])])),
     };
@@ -237,6 +243,11 @@ export class Herdr implements TerminalBackend {
 
   async renamePane(paneId: string, label: string) {
     await this.cli(["pane", "rename", paneId, label]).catch(() => {});
+  }
+
+  async processArgv(paneId: string): Promise<string[][]> {
+    const r = await this.rpc("pane.process_info", { pane_id: paneId }).catch(() => undefined);
+    return (r?.process_info?.foreground_processes ?? []).map((p: any) => (Array.isArray(p.argv) ? p.argv : []));
   }
 
   async machines(): Promise<HMachine[]> {

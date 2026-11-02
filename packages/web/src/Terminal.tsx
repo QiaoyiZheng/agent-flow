@@ -32,8 +32,26 @@ const THEME = {
 
 let seq = 0;
 
-export function Terminal({ paneId, mode = "control", autoFocus = false }: { paneId: string; mode?: "control" | "observe"; autoFocus?: boolean }) {
+/**
+ * `strip`: show only `viewHeight` px of a terminal that is really `fullHeight` px tall, following the last
+ * row that has content (where inline TUIs such as claude draw their input box). The PTY keeps its full
+ * size, so the Herdr TUI and the agent see no change.
+ */
+export function Terminal({
+  paneId,
+  mode = "control",
+  autoFocus = false,
+  strip,
+}: {
+  paneId: string;
+  mode?: "control" | "observe";
+  autoFocus?: boolean;
+  strip?: { fullHeight: number; viewHeight: number };
+}) {
   const host = useRef<HTMLDivElement>(null);
+  const stripRef = useRef(strip);
+  stripRef.current = strip;
+  const follow = useRef<() => void>(() => {});
   const termRef = useRef<XTerm | undefined>(undefined);
   const [status, setStatus] = useState<"connecting" | "live" | "closed">("connecting");
 
@@ -62,11 +80,24 @@ export function Terminal({ paneId, mode = "control", autoFocus = false }: { pane
         const bin = atob(m.bytes);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        term.write(bytes);
+        term.write(bytes, () => follow.current());
       } else setStatus("closed");
     });
     send({ type: "term.open", id, paneId, mode, cols: term.cols, rows: term.rows });
     termRef.current = term;
+    follow.current = () => {
+      const st = stripRef.current;
+      if (!st) {
+        el.style.transform = "";
+        return;
+      }
+      const buf = term.buffer.active;
+      let last = term.rows - 1;
+      while (last > 0 && !buf.getLine(buf.viewportY + last)?.translateToString(true).trim()) last--;
+      const cell = el.clientHeight / term.rows;
+      const offset = Math.max(0, Math.min(st.fullHeight - st.viewHeight, (last + 1) * cell + 10 - st.viewHeight));
+      el.style.transform = `translateY(${-offset}px)`;
+    };
     if (autoFocus && mode === "control") term.focus();
 
     const input = term.onData((text) => send({ type: "term.input", id, text }));
@@ -75,6 +106,7 @@ export function Terminal({ paneId, mode = "control", autoFocus = false }: { pane
     term.attachCustomWheelEventHandler(() => false);
     let wheelAcc = 0;
     const onWheel = (e: WheelEvent) => {
+      if (stripRef.current) return; // in a strip the wheel scrolls the rendered view instead
       e.preventDefault();
       wheelAcc += e.deltaY;
       const lines = Math.trunc(wheelAcc / 16);
@@ -110,7 +142,15 @@ export function Terminal({ paneId, mode = "control", autoFocus = false }: { pane
   useEffect(() => {
     if (autoFocus && mode === "control") termRef.current?.focus();
   }, [autoFocus, mode]);
+  useEffect(() => follow.current(), [strip?.fullHeight, strip?.viewHeight]);
 
+  if (strip)
+    return (
+      <div className="term strip" style={{ height: strip.viewHeight }} onMouseDown={() => termRef.current?.focus()}>
+        <div ref={host} style={{ height: strip.fullHeight, willChange: "transform" }} />
+        {status !== "live" && <div className="term-overlay">{status === "connecting" ? "connecting…" : "terminal closed"}</div>}
+      </div>
+    );
   return (
     <div className="term">
       <div ref={host} style={{ height: "100%" }} />

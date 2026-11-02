@@ -9,6 +9,8 @@ import { AfError, type Orchestrator } from "./orchestrator.ts";
 import type { Workspaces } from "./workspaces.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
+import { ChatBridge } from "./transcripts/bridge.ts";
+import { TranscriptFinder } from "./transcripts/index.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
@@ -113,7 +115,9 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
   }
   const { paneId } = await w.split(pane, direction);
   const name = `${kind}-${paneId.replace(/[^a-z0-9]/gi, "").toLowerCase()}`.slice(0, 32);
-  const r = await backend.startAgent(name, kind, paneId, []);
+  const session = kind === "claude" ? crypto.randomUUID() : undefined;
+  if (session) w.rememberSession(paneId, session);
+  const r = await backend.startAgent(name, kind, paneId, session ? ["--session-id", session] : kind === "codex" ? ["--no-alt-screen"] : []);
   await w.refresh();
   return { paneId, agent: name, started: r.ok };
 }
@@ -145,11 +149,13 @@ function serveFile(o: Orchestrator, home: string, url: URL): Response {
 
 interface WsData {
   bridge?: TerminalBridge;
+  chat?: ChatBridge;
   unsub?: () => void;
 }
 
 export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string }) {
   const handler = makeHandler(o, w, opts.backend);
+  const finder = new TranscriptFinder();
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views } satisfies ServerPush);
   w.onChange(() => {
@@ -189,6 +195,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
       open(ws) {
         const send = (m: ServerPush) => ws.send(JSON.stringify(m));
         ws.data.bridge = new TerminalBridge(opts.backend, send);
+        ws.data.chat = new ChatBridge({ finder, send, panes: () => w.model.panes, knownSession: (p) => o.sessionForPane(p) ?? w.sessions[p], argv: (p) => opts.backend.processArgv(p) });
         send({ type: "hello", runs: o.listRuns() });
         ws.send(herdrPush());
         clients.add(ws);
@@ -216,12 +223,14 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           });
           return;
         }
+        if (msg.type === "chat.open" || msg.type === "chat.close") return ws.data.chat?.handle(msg);
         ws.data.bridge?.handle(msg);
       },
       close(ws) {
         clients.delete(ws);
         ws.data.unsub?.();
         ws.data.bridge?.closeAll();
+        ws.data.chat?.closeAll();
       },
     },
   });

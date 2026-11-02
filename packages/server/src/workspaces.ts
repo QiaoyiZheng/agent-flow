@@ -23,6 +23,8 @@ const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
 export class Workspaces {
   model: HerdrModel = { machines: [], workspaces: [], tabs: [], panes: [], layouts: {} };
   views: Record<string, ViewRec> = {};
+  /** Session ids of agents started by agent-flow outside runs (claude --session-id), by pane. */
+  sessions: Record<string, string> = {};
   private sigs: Record<string, string> = {};
   private listeners = new Set<() => void>();
   private refreshing?: Promise<void>;
@@ -38,6 +40,8 @@ export class Workspaces {
     this.viewsFile = join(opts.home, "views.json");
     this.now = opts.now ?? (() => new Date().toISOString());
     if (existsSync(this.viewsFile)) this.views = JSON.parse(readFileSync(this.viewsFile, "utf8"));
+    const sf = join(opts.home, "sessions.json");
+    if (existsSync(sf)) this.sessions = JSON.parse(readFileSync(sf, "utf8"));
   }
 
   async start(pollMs = 1500) {
@@ -215,6 +219,11 @@ export class Workspaces {
     this.lastJson = "";
     for (const l of this.listeners) l();
     return rec;
+  }
+
+  rememberSession(paneId: string, session: string) {
+    this.sessions[paneId] = session;
+    writeFileSync(join(this.opts.home, "sessions.json"), JSON.stringify(this.sessions, null, 2));
   }
 
   view(paneId: string): ViewRec | undefined {

@@ -37,6 +37,8 @@ export interface AgentRec {
   node?: string;
   status: AgentStatus;
   spawnedAt: string;
+  /** Session id agent-flow gave the agent at launch (claude --session-id), to find its transcript. */
+  session?: string;
 }
 
 export type MailKind = "task" | "message" | "reply" | "system";

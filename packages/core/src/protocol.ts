@@ -97,6 +97,8 @@ export interface HPane {
   label?: string;
   title?: string;
   cwd: string;
+  /** Session the agent's Herdr integration reported: a transcript path (omp) or a session id (codex). */
+  session?: { kind: "path" | "id"; value: string };
 }
 
 export interface HLayout {
@@ -147,10 +149,52 @@ export interface ShowRequest extends Caller {
   pane?: string;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Rendered agent output: read from each agent's own transcript file (claude, codex, omp), normalized.
+
+export type ChatBlock =
+  | { kind: "user"; text: string }
+  /** Assistant prose: markdown with LaTeX math. */
+  | { kind: "text"; text: string }
+  | {
+      kind: "tool";
+      id: string;
+      name: string;
+      /** One line, e.g. the shell command or the file path. */
+      summary: string;
+      /** Full input when the summary does not say everything. */
+      input?: string;
+      /** For edits: a unified-diff-like patch, or before/after text. */
+      patch?: string;
+      edit?: { path: string; before: string; after: string };
+      output?: string;
+      error?: boolean;
+      done: boolean;
+    }
+  /** Compact line: slash commands, agent-flow wake-up notices, interruptions. */
+  | { kind: "notice"; text: string };
+
+export interface ChatEntry {
+  key: string;
+  at?: string;
+  block: ChatBlock;
+}
+
+export type ChatOp = { op: "add"; entry: ChatEntry } | { op: "result"; id: string; output: string; error?: boolean };
+
+export interface ChatSource {
+  agent: "claude" | "codex" | "omp";
+  path: string;
+  /** How the transcript was found: exact session id/path, or a guess from the pane's folder. */
+  how: "session" | "folder";
+}
+
 /** Messages the server pushes to the web UI over WebSocket. */
 export type ServerPush =
   | { type: "hello"; runs: RunSummary[] }
   | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec> }
+  | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[] }
+  | { type: "chat.ops"; id: string; ops: ChatOp[] }
   | { type: "snapshot"; run: string; state: RunState }
   | { type: "event"; run: string; event: RunEvent }
   | { type: "term.frame"; id: string; bytes: string; width: number; height: number; full: boolean }
@@ -163,4 +207,6 @@ export type ClientPush =
   | { type: "term.input"; id: string; text: string }
   | { type: "term.resize"; id: string; cols: number; rows: number }
   | { type: "term.scroll"; id: string; direction: "up" | "down"; lines: number }
-  | { type: "term.close"; id: string };
+  | { type: "term.close"; id: string }
+  | { type: "chat.open"; id: string; paneId: string }
+  | { type: "chat.close"; id: string };

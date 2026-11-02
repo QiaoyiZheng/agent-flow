@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { marked } from "marked";
+import { renderMarkdown } from "./markdown";
 import type { Mail, RunState } from "@af/core";
 import { api, fileUrl } from "./store";
 import { ago } from "./view";
@@ -41,7 +41,7 @@ export function FileView({ path }: { path: string }) {
     fetch(fileUrl(path))
       .then(async (r) => (r.ok ? r.text() : Promise.reject(new Error((await r.json()).error?.message ?? r.statusText))))
       .then(async (text) => {
-        if (ext === "md" || ext === "markdown") return `<div class="md">${await marked.parse(text)}</div>`;
+        if (ext === "md" || ext === "markdown") return `<div class="md doc">${renderMarkdown(text)}</div>`;
         const lang = LANG[ext];
         if (!lang || text.length > 400_000) return `<div class="code"><pre>${text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</pre></div>`;
         const h = await getHighlighter();

@@ -29,11 +29,12 @@ export function loadConfig(home: string): AgentConfig {
  * a typed line at 1024 bytes (MAX_CANON), so the protocol text never goes on the command line: claude and
  * omp take a file path, codex takes a profile name.
  */
-export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, config: AgentConfig): string[] {
+export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, config: AgentConfig, session?: string): string[] {
   const extra = config.args[kind] ?? [];
   switch (kind) {
     case "claude":
-      return ["--append-system-prompt-file", protocolFile, ...extra];
+      // --session-id: lets agent-flow find the transcript it renders (~/.claude/projects/*/<id>.jsonl)
+      return ["--append-system-prompt-file", protocolFile, ...(session ? ["--session-id", session] : []), ...extra];
     case "codex":
       // --no-alt-screen: in the alternate screen Herdr keeps no scrollback, so the UI could not scroll codex back
       return ["-p", writeCodexProfile(role, protocolFile), "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];

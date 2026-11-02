@@ -359,6 +359,12 @@ export class Orchestrator {
     return out;
   }
 
+  /** Session id agent-flow launched the agent in `paneId` with, if any. */
+  sessionForPane(paneId: string): string | undefined {
+    for (const r of this.runs.values()) for (const a of Object.values(r.state.agents)) if (a.paneId === paneId && a.status !== "exited") return a.session;
+    return undefined;
+  }
+
   /** Run agent name -> pane id, for resolving `af read <agent>`. */
   agentPanes(runId: string | undefined): Record<string, string | undefined> {
     const run = runId ? this.runs.get(runId) : undefined;
@@ -387,7 +393,17 @@ export class Orchestrator {
     if (a.name === USER || a.name === SYSTEM) throw new AfError("bad_name", `${a.name} is reserved`);
     if (run.state.agents[a.name]) throw new AfError("duplicate_agent", `agent ${a.name} already exists in run ${run.id}`);
     const meta = run.state.meta!;
-    const rec: AgentRec = { name: a.name, kind: a.kind, role: a.role, herdrName: herdrAgentName(run.id, a.name), cwd: a.cwd, node: a.node, status: "starting", spawnedAt: this.now() };
+    const rec: AgentRec = {
+      name: a.name,
+      kind: a.kind,
+      role: a.role,
+      herdrName: herdrAgentName(run.id, a.name),
+      cwd: a.cwd,
+      node: a.node,
+      status: "starting",
+      spawnedAt: this.now(),
+      session: a.kind === "claude" ? crypto.randomUUID() : undefined,
+    };
     this.emit(run, { type: "agent.spawned", at: this.now(), agent: rec });
     run.starting.add(a.name);
     try {
@@ -399,7 +415,7 @@ export class Orchestrator {
         : await this.opts.backend.createTab(meta.herdrWorkspace!, a.cwd, a.name, env);
       this.emit(run, { type: "agent.placed", at: this.now(), name: a.name, paneId: tab.paneId, tabId: tab.tabId });
       const proto = join(run.dir, "protocol", `${a.protocol}.md`);
-      const res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config));
+      const res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config, rec.session));
       if (res.ok) this.setStatus(run, a.name, "idle");
       else if (res.code !== "agent_not_ready") {
         // the agent never came up (e.g. timeout); do not leave a half-started process behind

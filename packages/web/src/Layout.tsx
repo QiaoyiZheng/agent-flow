@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import type { AgentKind, HPane, LayoutNode, ViewRec } from "@af/core";
 import { api } from "./store";
 import { Terminal } from "./Terminal";
+import { AgentView } from "./AgentView";
 import { FileView, WebView } from "./Viewers";
 import { basename, kindColor } from "./view";
 
@@ -71,6 +72,12 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   const runAgent = ctx.runAgents.get(paneId);
   const [menu, setMenu] = useState(false);
   const focused = ctx.focused === paneId;
+  const renderable = !view && ["claude", "codex", "omp"].includes(p?.agent ?? runAgent?.kind ?? "");
+  const [raw, setRaw] = useState(() => localStorage.getItem(`af-raw:${paneId}`) === "1");
+  const toggleRaw = () => {
+    localStorage.setItem(`af-raw:${paneId}`, raw ? "0" : "1");
+    setRaw(!raw);
+  };
   const split = (direction: "right" | "down", extra: Record<string, unknown> = {}) =>
     api("POST", "/pane/split", { pane: paneId, direction, ...extra }).then((r) => r?.paneId && ctx.onFocus(r.paneId), (e) => alert(e.message));
   const show = () => {
@@ -109,6 +116,16 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         {(runAgent || p?.agent) && <span className="kind" style={{ color }}>{runAgent?.kind ?? p?.agent}</span>}
         {status && <span className={`st st-${status}`}>{status}</span>}
         <span className="spacer" />
+        {renderable && (
+          <span className="view-toggle" title="Rendered output or the raw terminal">
+            <button className={!raw ? "on" : ""} onClick={() => raw && toggleRaw()}>
+              rendered
+            </button>
+            <button className={raw ? "on" : ""} onClick={() => !raw && toggleRaw()}>
+              terminal
+            </button>
+          </span>
+        )}
         <span className="pane-id">{paneId}</span>
         <button title="Split right (shell)" onClick={() => split("right")}>
           ◫
@@ -149,7 +166,15 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
           ✕
         </button>
       </div>
-      <div className="pane-body">{view ? isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} /> : <Terminal paneId={paneId} autoFocus={focused} />}</div>
+      <div className="pane-body">
+        {view ? (
+          isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} />
+        ) : renderable && !raw ? (
+          <AgentView paneId={paneId} status={p?.agentStatus} focused={focused} />
+        ) : (
+          <Terminal paneId={paneId} autoFocus={focused} />
+        )}
+      </div>
     </div>
   );
 }

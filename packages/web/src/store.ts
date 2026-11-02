@@ -8,6 +8,12 @@ export const TOKEN = params.get("token") ?? localStorage.getItem("af-token") ?? 
 if (params.get("token")) localStorage.setItem("af-token", TOKEN);
 
 type TermListener = (m: Extract<ServerPush, { type: "term.frame" | "term.closed" }>) => void;
+type ChatListener = (m: Extract<ServerPush, { type: "chat.reset" | "chat.ops" }>) => void;
+const chatSubs = new Map<string, ChatListener>();
+export function onChat(id: string, fn: ChatListener) {
+  chatSubs.set(id, fn);
+  return () => chatSubs.delete(id);
+}
 
 interface State {
   connected: boolean;
@@ -73,6 +79,10 @@ function connect() {
       case "term.frame":
       case "term.closed":
         termSubs.get(m.id)?.(m);
+        break;
+      case "chat.reset":
+      case "chat.ops":
+        chatSubs.get(m.id)?.(m);
         break;
     }
   };

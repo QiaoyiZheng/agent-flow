@@ -150,6 +150,9 @@ export class FakeBackend implements TerminalBackend {
   async renamePane(paneId: string, label: string) {
     this.panes.get(paneId)!.label = label;
   }
+  async processArgv(): Promise<string[][]> {
+    return [];
+  }
   async machines(): Promise<HMachine[]> {
     return [{ id: "local", label: "Local", target: "local", available: true }];
   }

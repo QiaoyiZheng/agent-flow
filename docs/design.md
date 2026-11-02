@@ -264,6 +264,18 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - 远程机器：`herdr machine list` 能列出；但本机装的 Herdr 0.9.0 还没有 `--machine`（0.9.5 才有），而且 Herdr 不转发终端实时流。所以远程机器暂时只显示名字。要浏览远程，需要先升级 Herdr（`herdr update`，由用户决定）。
 - 已知副作用：网页打开某个 pane 时，会把它的 PTY 调成网页里的尺寸；如果用户同时在 Herdr TUI 里看着同一个 tab，两边会按"最后操作的一方"来回调尺寸（Herdr 的多客户端规则）。
 
+### 10.2.2 agent 输出自动渲染（2026-11-02，用户要求：像 Claude app / VS Code 插件那样渲染 markdown 和 LaTeX）
+
+- agent pane（claude / codex / omp）默认显示**渲染视图**，pane 头上可以切换"rendered | terminal"，选择按 pane 记在浏览器里。
+- 渲染视图：上面是已经完成的输出，markdown（GFM 表格、列表、引用）+ LaTeX（KaTeX：`$$…$$`、`\[…\]` 为独立公式，`$…$`、`\(…\)` 为行内；"$5 和 $10" 这类不当成公式）+ 代码高亮（Shiki，关闭连字，`<=` 照原样显示）；工具调用是可展开的卡片（命令、输出、编辑的 diff）；agent-flow 的唤醒通知、斜杠命令显示成小字。下面保留一条**实时终端**：用来打字、回答审批、看正在生成的内容。它显示的是终端里最后有内容的那几行（claude 的输入框紧跟在输出后面，不一定在屏幕底部），PTY 尺寸不变；agent 在等审批时自动变高。
+- **数据来源是 agent 自己写的对话记录，不是终端画面**（画面已被折叠、截断）：
+  - claude：`~/.claude/projects/*/<session>.jsonl`。agent-flow 启动的 claude 一律加 `--session-id <uuid>`，所以能精确找到；别人启动的 claude 先看进程参数里的 `--resume` / `--session-id`，再按目录找最新的一个，同目录有多个 claude 时放弃并显示终端。
+  - codex：Herdr 记录的 session id → `~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`。
+  - omp：Herdr 直接记录的路径。
+- server 每 0.5 秒看一次文件有没有变长，只解析新增的行，通过 WebSocket 推给网页（实测：工具调用写入后约 1 秒内出现在网页上）。不是逐字流式：文件按"一段正文 / 一次工具调用"写入。
+- 这些文件格式没有文档、可能随版本变化：解析器对未知字段一律跳过；找不到或解析不了就显示终端并说明原因。实现：`packages/server/src/transcripts/`，测试：`packages/server/test/transcripts.test.ts`。
+- 查看器里打开的 markdown 文件用同一套渲染（含 LaTeX）。
+
 ### 10.3 视觉
 
 - Linear / Raycast 风格：深色为主，低饱和，细边框，只用一个强调色。
