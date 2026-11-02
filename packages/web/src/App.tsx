@@ -131,33 +131,6 @@ export function App() {
 
   return (
     <div className="app" style={{ "--right-w": showRight ? (selectedNode ? "460px" : "380px") : "0px" } as React.CSSProperties}>
-      <header className="topbar">
-        <span className="brand">
-          <span className="brand-dots">
-            <i />
-            <i />
-            <i />
-            <i />
-          </span>
-          agent-flow
-        </span>
-        {ws && (
-          <span className="crumb">
-            / <span className={ws.machine === "local" ? "" : "machine-tag"}>{herdr?.machines.find((m) => m.id === ws.machine)?.label ?? ws.machine}</span> / <b>{ws.label}</b>
-            {run?.meta && (
-              <>
-                {" "}· run {run.meta.id}
-                {run.meta.branch && <> · {run.meta.branch}</>}
-              </>
-            )}
-          </span>
-        )}
-        <span className="spacer" />
-        <span className={`conn ${connected ? "" : "off"}`}>
-          <i /> {connected ? "connected" : "reconnecting…"}
-        </span>
-      </header>
-
       <Sidebar
         herdr={herdr}
         runs={runs}
@@ -254,10 +227,35 @@ export function App() {
       </section>
 
       <footer className="drawer">
-        <div className="drawer-head" onClick={() => setDrawer((d) => !d)}>
-          <span>{drawer ? "▾" : "▸"} Persistent shell</span>
-          <kbd>ctrl `</kbd>
-          <span style={{ marginLeft: "auto" }}>survives browser and server restarts</span>
+        {/* one status line: shell toggle on the left, where you are in the middle, connection and brand on the right */}
+        <div className="drawer-head">
+          <button className="drawer-toggle" onClick={() => setDrawer((d) => !d)} title="Persistent shell: survives browser and server restarts (ctrl+`)">
+            {drawer ? "▾" : "▸"} Persistent shell <kbd>ctrl `</kbd>
+          </button>
+          {ws && (
+            <span className="crumb">
+              <span className={ws.machine === "local" ? "" : "machine-tag"}>{herdr?.machines.find((m) => m.id === ws.machine)?.label ?? ws.machine}</span> / <b>{ws.label}</b>
+              {run?.meta && (
+                <>
+                  {" "}· run {run.meta.id}
+                  {run.meta.branch && <> · {run.meta.branch}</>}
+                </>
+              )}
+            </span>
+          )}
+          <span className="spacer" />
+          <span className={`conn ${connected ? "" : "off"}`} title={connected ? "connected to the agent-flow server" : "reconnecting to the agent-flow server"}>
+            <i /> {connected ? "connected" : "reconnecting…"}
+          </span>
+          <span className="brand">
+            <span className="brand-dots">
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+            agent-flow
+          </span>
         </div>
         {drawer && <div className="drawer-body">{shell ? <Terminal paneId={shell.paneId} autoFocus /> : <div className="term-overlay">starting…</div>}</div>}
       </footer>
