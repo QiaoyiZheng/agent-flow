@@ -70,7 +70,15 @@ export type LayoutNode =
   | { type: "split"; direction: SplitDirection; ratio: number; first: LayoutNode; second: LayoutNode }
   | { type: "pane"; paneId: string };
 
+/** Ids from remote machines carry their machine key: "ds03~w3:p4". Local ids have no prefix. */
+export const MACHINE_SEP = "~";
+export const splitId = (id: string) => {
+  const i = id.indexOf(MACHINE_SEP);
+  return i < 0 ? { machine: "local", raw: id } : { machine: id.slice(0, i), raw: id.slice(i + 1) };
+};
+
 export interface HWorkspace {
+  machine: string;
   id: string;
   label: string;
   number: number;
@@ -86,6 +94,7 @@ export interface HTab {
 }
 
 export interface HPane {
+  machine: string;
   id: string;
   tabId: string;
   workspaceId: string;
@@ -109,13 +118,17 @@ export interface HLayout {
 }
 
 export interface HMachine {
+  /** "local", or a slug of the saved machine's label; used as the id prefix. */
   id: string;
   label: string;
   /** "local", or the SSH target of a saved Herdr machine. */
   target: string;
-  /** Whether agent-flow can browse it. Remote machines need Herdr >= 0.9.5 (--machine). */
-  available: boolean;
-  note?: string;
+  local: boolean;
+  /** Remote machines connect on demand (when the UI expands them or an agent asks). */
+  state: "online" | "connecting" | "offline" | "error";
+  error?: string;
+  /** Remote Herdr session name. */
+  session?: string;
 }
 
 export interface HerdrModel {

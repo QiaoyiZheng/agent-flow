@@ -4,7 +4,7 @@
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentKind, AgentStatus, HLayout, HMachine, HPane, HTab, HWorkspace, LayoutNode, SplitDirection } from "@af/core";
+import type { AgentKind, AgentStatus, HLayout, HPane, HTab, HWorkspace, LayoutNode, SplitDirection } from "@af/core";
 
 export interface HerdrAgentInfo {
   name?: string;
@@ -41,7 +41,8 @@ export interface TerminalBackend {
   /** Type a command into a shell pane and press Enter. */
   runInPane(paneId: string, command: string): Promise<void>;
   renamePane(paneId: string, label: string): Promise<void>;
-  machines(): Promise<HMachine[]>;
+  /** Saved remote machines (`herdr machine list`). Only meaningful on the local backend. */
+  savedMachines(): Promise<{ label: string; target: string; session: string }[]>;
   /** argv of the pane's foreground processes. */
   processArgv(paneId: string): Promise<string[][]>;
   /** Call `onEvent` on any workspace/tab/pane/layout lifecycle event. Returns a stop function. */
@@ -84,6 +85,8 @@ export class Herdr implements TerminalBackend {
   constructor(
     readonly bin = process.env.HERDR_BIN_PATH ?? "herdr",
     readonly socket = process.env.HERDR_SOCKET_PATH ?? join(homedir(), ".config/herdr/herdr.sock"),
+    /** For a remote machine: how to stream its terminals (over SSH, with the remote herdr binary). */
+    readonly terminalVia?: (paneId: string, mode: "control" | "observe", cols: number, rows: number) => string[],
   ) {}
 
   private async cli(args: string[], timeoutMs = 120_000): Promise<any> {
@@ -203,9 +206,10 @@ export class Herdr implements TerminalBackend {
       (s.agents ?? []).filter((a: any) => a.agent_session?.value).map((a: any) => [a.pane_id, { kind: a.agent_session.kind === "path" ? "path" : "id", value: a.agent_session.value }]),
     );
     return {
-      workspaces: s.workspaces.map((w: any) => ({ id: w.workspace_id, label: w.label, number: w.number, activeTabId: w.active_tab_id, agentStatus: w.agent_status })),
+      workspaces: s.workspaces.map((w: any) => ({ machine: "local", id: w.workspace_id, label: w.label, number: w.number, activeTabId: w.active_tab_id, agentStatus: w.agent_status })),
       tabs: s.tabs.map((t: any) => ({ id: t.tab_id, workspaceId: t.workspace_id, label: t.label, number: t.number })),
       panes: s.panes.map((p: any) => ({
+        machine: "local",
         id: p.pane_id,
         tabId: p.tab_id,
         workspaceId: p.workspace_id,
@@ -256,27 +260,13 @@ export class Herdr implements TerminalBackend {
     return (r?.process_info?.foreground_processes ?? []).map((p: any) => (Array.isArray(p.argv) ? p.argv : []));
   }
 
-  async machines(): Promise<HMachine[]> {
-    const local: HMachine = { id: "local", label: "Local", target: "local", available: true };
+  async savedMachines() {
     const p = Bun.spawnSync([this.bin, "machine", "list", "--json"], { stdout: "pipe", stderr: "pipe" });
-    let saved: any[] = [];
     try {
-      saved = JSON.parse(p.stdout.toString());
-    } catch {}
-    const help = Bun.spawnSync([this.bin, "--help"], { stdout: "pipe" }).stdout.toString();
-    const canForward = help.includes("--machine");
-    return [
-      local,
-      ...saved
-        .filter((m) => m.enabled)
-        .map((m) => ({
-          id: m.id,
-          label: m.label,
-          target: m.target,
-          available: false,
-          note: canForward ? "remote browsing is not built yet" : "needs Herdr 0.9.5+ (herdr update) to browse remote machines",
-        })),
-    ];
+      return (JSON.parse(p.stdout.toString()) as any[]).filter((m) => m.enabled).map((m) => ({ label: String(m.label), target: String(m.target), session: String(m.session ?? "default") }));
+    } catch {
+      return [];
+    }
   }
 
   watchLifecycle(onEvent: () => void) {
@@ -298,6 +288,7 @@ export class Herdr implements TerminalBackend {
   }
 
   terminalSessionArgv(paneId: string, mode: "control" | "observe", cols: number, rows: number) {
+    if (this.terminalVia) return this.terminalVia(paneId, mode, cols, rows);
     return [this.bin, "terminal", "session", mode, paneId, ...(mode === "control" ? ["--takeover"] : []), "--cols", String(cols), "--rows", String(rows)];
   }
 }

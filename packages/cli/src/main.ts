@@ -119,9 +119,8 @@ function formatLs(r: { model: HerdrModel; views: Record<string, { target: string
   const lines: string[] = [];
   const { model, views, runs } = r;
   for (const m of model.machines) {
-    lines.push(m.available ? m.label : `${m.label} (${m.target}) — ${m.note}`);
-    if (!m.available) continue;
-    for (const w of model.workspaces) {
+    lines.push(m.local ? m.label : `${m.label} [${m.id}] ${m.state}${m.error ? `: ${m.error}` : ""}${m.state === "offline" ? `  (af connect ${m.id})` : ""}`);
+    for (const w of model.workspaces.filter((x) => x.machine === m.id)) {
       if (w.id === r.shellWorkspace) continue;
       lines.push(`  ${w.id}  ${w.label}${runs[w.id] ? `  [run ${runs[w.id]}]` : ""}`);
       for (const t of model.tabs.filter((t) => t.workspaceId === w.id)) {
@@ -165,7 +164,8 @@ Panes (everyone; Herdr owns the layout, the web UI shows it):
   af open <path|url> --in <viewer pane>          show it in an existing viewer pane instead
   af open <path|url> --tab [WORKSPACE]           show it in a new tab
   af split [PANE] [--down] [--agent K]           split a pane (default yours): a shell, or an agent
-  af close <pane>`;
+  af close <pane>
+  af connect <machine>                           connect a saved SSH machine (Herdr's own list); its ids look like ds03~w3:p4`;
 
 // ---------------------------------------------------------------------------------------------
 
@@ -273,6 +273,11 @@ async function main() {
       if (!pane) die("usage: af split [<pane>] [--down] [--agent claude|codex|omp]");
       const r = await call("POST", "/pane/split", { pane, direction: flags.down ? "down" : "right", kind: typeof flags.agent === "string" ? "agent" : "shell", agentKind: flags.agent });
       return console.log(`new pane ${r.paneId}${r.agent ? ` running ${r.agent}` : ""}`);
+    }
+    case "connect": {
+      if (!pos[0]) die("usage: af connect <machine>   (machines: af ls)");
+      const m = await call("POST", "/machine/connect", { machine: pos[0] });
+      return console.log(`${m.label}: ${m.state}${m.error ? ` (${m.error})` : ""}`);
     }
     case "close": {
       if (!pos[0]) die("usage: af close <pane>");

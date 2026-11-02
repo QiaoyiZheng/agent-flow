@@ -482,3 +482,14 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .composer-attach:hover { background: var(--bg-hover); color: var(--text); }
 .composer-send { background: var(--accent); color: white; font-weight: 700; }
 .composer-send:disabled { background: var(--bg-3); color: var(--text-3); cursor: default; }
+
+/* ---------- remote machines ---------- */
+.remote-machine:first-of-type, .tree > div:not(.remote-machine) + .remote-machine { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+.tree-row.machine.remote { font-weight: 500; color: var(--text-2); }
+.tree-row.machine .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot.m-online { background: var(--s-accepted); }
+.dot.m-connecting { background: var(--s-running); animation: pulse 1.2s ease-in-out infinite; }
+.dot.m-offline { background: transparent; box-shadow: inset 0 0 0 1px var(--text-3); }
+.dot.m-error { background: var(--s-rejected); }
+.tree-note.err { color: var(--s-rejected); }
+.crumb .machine-tag { color: var(--accent); }

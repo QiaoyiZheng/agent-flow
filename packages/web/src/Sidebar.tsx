@@ -84,82 +84,70 @@ export function Sidebar({
             +
           </button>
         </div>
-        {herdr?.machines.filter((m) => m.available).map((m) => {
-          const open = !(collapsed[m.id] ?? false);
+        {herdr?.machines.map((m) => {
+          // remote machines start collapsed and connect when expanded
+          const open = !(collapsed[m.id] ?? !m.local);
+          const workspaces = herdr.workspaces.filter((w) => w.machine === m.id && !hidden.has(w.id));
+          const expand = () => {
+            toggle(m.id, !m.local);
+            if (!m.local && !open && m.state !== "online") api("POST", "/machine/connect", { machine: m.id }).catch(() => {});
+          };
           return (
-            <div key={m.id}>
-              <div className="tree-row machine" onClick={() => toggle(m.id, false)}>
+            <div key={m.id} className={m.local ? "" : "remote-machine"}>
+              <div className={`tree-row machine ${m.local ? "" : "remote"}`} onClick={expand} title={m.local ? undefined : `${m.target}${m.error ? ` — ${m.error}` : ""}`}>
                 <span className="caret">{open ? "▾" : "▸"}</span>
-                <span>{m.label}</span>
+                {!m.local && <span className={`dot m-${m.state}`} />}
+                <span className="name">{m.label}</span>
+                {!m.local && <span className="meta">{m.state === "online" ? workspaces.length || "" : m.state === "connecting" ? "connecting…" : m.state === "error" ? "error" : ""}</span>}
               </div>
+              {open && !m.local && m.state === "error" && (
+                <div className="tree-note err">
+                  {m.error}
+                  <button className="c-more" style={{ marginLeft: 6 }} onClick={() => api("POST", "/machine/connect", { machine: m.id }).catch(() => {})}>
+                    retry
+                  </button>
+                </div>
+              )}
+              {open && !m.local && m.state === "connecting" && <div className="tree-note">connecting over SSH…</div>}
               {open &&
-                herdr.workspaces
-                  .filter((w) => !hidden.has(w.id))
-                  .map((w) => {
-                    const r = runOf.get(w.id);
-                    const panes = herdr.panes.filter((p) => p.workspaceId === w.id);
-                    const agents = panes.filter((p) => p.agent);
-                    const wsOpen = !(collapsed[w.id] ?? w.id !== selectedWs);
-                    return (
-                      <div key={w.id}>
-                        <div className={`tree-row ws ${w.id === selectedWs ? "active" : ""}`} onClick={() => onSelectWs(w.id)}>
-                          <span
-                            className="caret"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggle(w.id, w.id !== selectedWs);
-                            }}
-                          >
-                            {wsOpen ? "▾" : "▸"}
-                          </span>
-                          <span className={`dot ${statusDot(w.agentStatus)}`} />
-                          <span className="name">{w.label}</span>
-                          {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
-                          {r && r.attention > 0 ? <span className="count">{r.attention}</span> : <span className="meta">{agents.length || ""}</span>}
-                        </div>
-                        {wsOpen &&
-                          agents.map((p) => (
-                            <div key={p.id} className="tree-row agent" onClick={() => onSelectPane(w.id, p.tabId, p.id)}>
-                              <span className={`dot ${statusDot(p.agentStatus)}`} />
-                              <span className="name mono">{p.agentName?.replace(r ? `${r.id}-` : "\u0000", "") ?? p.label ?? p.agent}</span>
-                              <span className="meta" style={{ color: kindColor(p.agent!) }}>
-                                {p.agent}
-                              </span>
-                            </div>
-                          ))}
+                workspaces.map((w) => {
+                  const r = runOf.get(w.id);
+                  const panes = herdr.panes.filter((p) => p.workspaceId === w.id);
+                  const agents = panes.filter((p) => p.agent);
+                  const wsOpen = !(collapsed[w.id] ?? w.id !== selectedWs);
+                  return (
+                    <div key={w.id}>
+                      <div className={`tree-row ws ${w.id === selectedWs ? "active" : ""}`} onClick={() => onSelectWs(w.id)}>
+                        <span
+                          className="caret"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggle(w.id, w.id !== selectedWs);
+                          }}
+                        >
+                          {wsOpen ? "▾" : "▸"}
+                        </span>
+                        <span className={`dot ${statusDot(w.agentStatus)}`} />
+                        <span className="name">{w.label}</span>
+                        {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
+                        {r && r.attention > 0 ? <span className="count">{r.attention}</span> : <span className="meta">{agents.length || ""}</span>}
                       </div>
-                    );
-                  })}
+                      {wsOpen &&
+                        agents.map((p) => (
+                          <div key={p.id} className="tree-row agent" onClick={() => onSelectPane(w.id, p.tabId, p.id)}>
+                            <span className={`dot ${statusDot(p.agentStatus)}`} />
+                            <span className="name mono">{p.agentName?.replace(r ? `${r.id}-` : "\u0000", "") ?? p.label ?? p.agent}</span>
+                            <span className="meta" style={{ color: kindColor(p.agent!) }}>
+                              {p.agent}
+                            </span>
+                          </div>
+                        ))}
+                    </div>
+                  );
+                })}
             </div>
           );
         })}
-        {(() => {
-          const remote = herdr?.machines.filter((m) => !m.available) ?? [];
-          if (!remote.length) return null;
-          const open = collapsed["ssh"] === false;
-          return (
-            <>
-              <div className="tree-row machine off" style={{ marginTop: 6, cursor: "pointer" }} onClick={() => setCollapsed((c) => ({ ...c, ssh: open }))}>
-                <span className="caret">{open ? "▾" : "▸"}</span>
-                <span>SSH machines</span>
-                <span className="meta">{remote.length}</span>
-              </div>
-              {open && (
-                <>
-                  <div className="tree-note">{remote[0]!.note}</div>
-                  {remote.map((m) => (
-                    <div key={m.id} className="tree-row ws off" title={m.target}>
-                      <span className="caret">·</span>
-                      <span className="name" style={{ color: "var(--text-3)" }}>
-                        {m.label}
-                      </span>
-                    </div>
-                  ))}
-                </>
-              )}
-            </>
-          );
-        })()}
         {pastRuns.length > 0 && (
           <>
             <div className="section-title" style={{ padding: "14px 14px 6px" }}>

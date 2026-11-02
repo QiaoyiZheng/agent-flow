@@ -11,7 +11,7 @@ import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
 import { ChatBridge } from "./transcripts/bridge.ts";
-import { TranscriptFinder } from "./transcripts/index.ts";
+import { LocalFS, SshFS } from "./transcripts/index.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
@@ -76,7 +76,9 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           await w.closeTab(body.tab);
           return json({ ok: true });
         case "POST /workspace/new":
-          return json(await w.newWorkspace(body.label || "workspace", body.cwd));
+          return json(await w.newWorkspace(body.label || "workspace", body.cwd, body.machine || "local"));
+        case "POST /machine/connect":
+          return json(await w.connect(String(body.machine ?? "")));
         case "POST /layout/ratio":
           await w.setRatio(body.tab, body.path, Number(body.ratio));
           return json({ ok: true });
@@ -119,7 +121,7 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
   if (!AGENT_KINDS.includes(kind)) throw new AfError("bad_kind", `kind must be one of ${AGENT_KINDS.join(", ")}`);
   const base = w.model.panes.find((p) => p.id === pane);
   if (!base) throw new AfError("unknown_pane", `no Herdr pane ${pane}`, 404);
-  const run = o.runByWorkspace(base.workspaceId);
+  const run = base.machine === "local" ? o.runByWorkspace(base.workspaceId) : undefined;
   if (run && !o.getRun(run).stopped) {
     const a = await o.spawn({ run }, { name: "", kind, place: { split: pane, direction } });
     await w.refresh();
@@ -129,7 +131,8 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
   const name = `${kind}-${paneId.replace(/[^a-z0-9]/gi, "").toLowerCase()}`.slice(0, 32);
   const session = kind === "claude" ? crypto.randomUUID() : undefined;
   if (session) w.rememberSession(paneId, session);
-  const r = await backend.startAgent(name, kind, paneId, session ? ["--session-id", session] : kind === "codex" ? ["--no-alt-screen"] : []);
+  const route = w.route(paneId);
+  const r = await route.backend.startAgent(name, kind, route.raw, session ? ["--session-id", session] : kind === "codex" ? ["--no-alt-screen"] : []);
   await w.refresh();
   return { paneId, agent: name, started: r.ok };
 }
@@ -167,7 +170,15 @@ interface WsData {
 
 export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string }) {
   const handler = makeHandler(o, w, opts.backend);
-  const finder = new TranscriptFinder();
+  const localFs = new LocalFS();
+  const sshFs = new Map<string, SshFS>();
+  const fsFor = (paneId: string) => {
+    const r = w.remoteOf(paneId);
+    if (!r) return { fs: localFs, remote: false };
+    let f = sshFs.get(paneId.split("~")[0]!);
+    if (!f) sshFs.set(paneId.split("~")[0]!, (f = new SshFS((cmd, o) => r.exec(cmd, o))));
+    return { fs: f, remote: true };
+  };
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views } satisfies ServerPush);
   w.onChange(() => {
@@ -218,8 +229,8 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
     websocket: {
       open(ws) {
         const send = (m: ServerPush) => ws.send(JSON.stringify(m));
-        ws.data.bridge = new TerminalBridge(opts.backend, send);
-        ws.data.chat = new ChatBridge({ finder, send, panes: () => w.model.panes, knownSession: (p) => o.sessionForPane(p) ?? w.sessions[p], argv: (p) => opts.backend.processArgv(p) });
+        ws.data.bridge = new TerminalBridge((p, mode, cols, rows) => w.terminalArgv(p, mode, cols, rows), send);
+        ws.data.chat = new ChatBridge({ fsFor, send, panes: () => w.model.panes, knownSession: (p) => o.sessionForPane(p) ?? w.sessions[p], argv: (p) => w.processArgv(p) });
         send({ type: "hello", runs: o.listRuns() });
         ws.send(herdrPush());
         clients.add(ws);

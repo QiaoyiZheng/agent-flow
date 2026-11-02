@@ -261,7 +261,7 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - server 维护一份 Herdr 模型：`session.snapshot`（约 110 ms）+ 每个 tab 的 `layout.export`（二叉树：`split{direction, ratio, first, second}` / `pane{pane_id}`）。只对布局签名变了的 tab 重新导出。
 - 触发：订阅 Herdr 的生命周期事件（workspace / tab / pane / layout，全部可以不带过滤条件订阅；只有 `pane.agent_status_changed` 必须指定 pane），80 ms 防抖；外加每 1.5 秒轮询一次以更新 agent 状态。变化时推给所有网页。
 - 分隔线：`layout.set_split_ratio {tab_id, path, ratio}`，path 是从根往下的布尔数组，`false` = first，`true` = second（实测）。
-- 远程机器：`herdr machine list` 能列出；但本机装的 Herdr 0.9.0 还没有 `--machine`（0.9.5 才有），而且 Herdr 不转发终端实时流。所以远程机器暂时只显示名字。要浏览远程，需要先升级 Herdr（`herdr update`，由用户决定）。
+- 远程机器：见 10.2.3。
 - 已知副作用：网页打开某个 pane 时，会把它的 PTY 调成网页里的尺寸；如果用户同时在 Herdr TUI 里看着同一个 tab，两边会按"最后操作的一方"来回调尺寸（Herdr 的多客户端规则）。
 
 ### 10.2.2 agent 输出自动渲染（2026-11-02，用户要求：像 Claude app / VS Code 插件那样渲染 markdown 和 LaTeX）
@@ -284,6 +284,21 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
   ```
   再接用户的话，通过 `herdr agent prompt <pane>` 送达（实测：claude 按路径读到图片并正确回答）。
 - 实时终端默认隐藏，只在三种情况出现：agent 等审批或提问（blocked，自动出现，输入框禁用并提示去终端回答）；发送了以 `/` 开头的斜杠命令（可能弹菜单）；用户点状态栏的 "terminal"。agent 工作时状态栏有 "■ Stop"（发 Esc）。
+
+### 10.2.3 远程机器（2026-11-02）
+
+- **不需要升级 Herdr，也不在远程装任何东西。** Herdr 自己的 TUI 就是 SSH 到每台机器、直接连那台机器的 Herdr server；agent-flow 做同样的事。机器列表来自 `herdr machine list`（用户在 Herdr 里存过的机器）。
+- **每台机器一条 SSH 主连接**（ControlMaster，`~/.agent-flow/ssh/<机器>.ctl`），上面跑三样东西：
+  1. **把远程 Herdr 的 Unix socket 转发到本机**（`ssh -O forward -L ~/.agent-flow/ssh/<机器>.sock:<远程 home>/.config/herdr/herdr.sock`）。于是本地的 Herdr 适配层原样可用：JSON API、事件订阅、`herdr` CLI（`HERDR_SOCKET_PATH` 指过去）。实测：snapshot 115 ms，订阅正常。
+  2. **终端实时流**：`ssh <机器> <远程 herdr> terminal session control|observe <pane>`，和本地同一种 NDJSON。实测：首帧 32–180 ms，打字回显中位数 8 ms（同一局域网）。
+  3. **短命令**：读远程 agent 的对话记录（`ls`、`tail -c`，按字节偏移增量读）、把附件写到远程的 `~/.agent-flow/attachments/`。
+- **id 带机器前缀**：远程的 workspace / tab / pane id 写成 `<机器>~<原 id>`，如 `allinai2plus~w6:p3`；本地 id 不变。所有操作按前缀路由到那台机器。`af ls`、`af read`、`af split` 等对远程 id 一样可用；`af connect <机器>` 手动连接。
+- **按需连接**：远程机器默认不连；在侧栏展开、或 `af connect` 时才连。断线后按 5 s、10 s、20 s……最长 60 s 重试；断线期间那台机器的 pane 从模型里去掉，侧栏显示原因（需要密码、主机不可达、主机密钥变了、远程没有运行 Herdr……），并有"retry"。
+- 需要免密 SSH（BatchMode）。实测 allinai2plus、ds03 可以；其余机器未测。
+- 远程 agent 的渲染视图：对话记录在远程读，按 session 精确匹配（实测 3 个远程 agent 都命中）；轮询 1.5 秒一次；打开时只读最后 8 MB。
+- 远程 agent 粘贴图片：附件写到**远程机器**上，提示词里给的是远程路径，agent 能直接读。
+- 暂不支持：在远程 pane 旁边开查看器（查看器是本地进程）；在远程机器上跑 run 的 worker。
+- 注意：网页里打开远程 pane 时，那个 pane 的 PTY 会变成网页里的尺寸（和本地同一条 Herdr 多客户端规则）。
 
 ### 10.3 视觉
 

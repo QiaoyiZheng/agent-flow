@@ -9,6 +9,7 @@ import { Herdr } from "./herdr.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { serve } from "./api.ts";
 import { Workspaces } from "./workspaces.ts";
+import { RemoteMachine } from "./remote.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -55,7 +56,15 @@ export async function main(argv: string[]) {
   const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config: loadConfig(home) });
   const n = o.load();
   o.start(1000);
-  const w = new Workspaces({ home, backend, paneEnv: () => ({ AF_SOCK: sock, PATH: `${binDir}:${process.env.PATH ?? ""}` }) });
+  const w = new Workspaces({
+    home,
+    backend,
+    paneEnv: () => ({ AF_SOCK: sock, PATH: `${binDir}:${process.env.PATH ?? ""}` }),
+    remote: (spec, onChange) => {
+      const remote = new RemoteMachine(spec, join(home, "ssh"), onChange);
+      return { remote, backend: () => new Herdr(backend.bin, remote.sock, (p, mode, cols, rows) => remote.terminalArgv(p, mode, cols, rows)) };
+    },
+  });
   await w.start();
   serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist") });
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));

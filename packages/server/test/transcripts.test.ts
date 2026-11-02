@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, HPane } from "@af/core";
 import { parseClaude, parseCodex, parseOmp } from "../src/transcripts/parse.ts";
-import { TranscriptFinder, TranscriptTail } from "../src/transcripts/index.ts";
+import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, resolveTranscript } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -99,54 +99,87 @@ describe("omp transcript", () => {
 });
 
 describe("finding and following transcripts", () => {
-  const pane = (over: Partial<HPane>): HPane => ({ id: "w1:p1", tabId: "w1:t1", workspaceId: "w1", agentStatus: "idle", cwd: "/proj", ...over });
+  const pane = (over: Partial<HPane>): HPane => ({ machine: "local", id: "w1:p1", tabId: "w1:t1", workspaceId: "w1", agentStatus: "idle", cwd: "/proj", ...over });
+  const id = "11111111-2222-3333-4444-555555555555";
 
-  test("by session id, by Herdr-reported path and id, by argv, and by folder only when unambiguous", async () => {
+  /** A fake home with claude, codex and omp transcripts. */
+  function home() {
     const root = tmp();
-    const claude = join(root, "claude");
-    const codex = join(root, "codex");
-    mkdirSync(join(claude, "-proj"), { recursive: true });
-    mkdirSync(join(codex, "2026", "11", "02"), { recursive: true });
-    const id = "11111111-2222-3333-4444-555555555555";
-    writeFileSync(join(claude, "-proj", `${id}.jsonl`), JSON.stringify({ type: "user", cwd: "/proj", message: { content: "hi" } }) + "\n");
-    const old = join(claude, "-proj", "99999999-2222-3333-4444-555555555555.jsonl");
+    mkdirSync(join(root, ".claude/projects/-proj"), { recursive: true });
+    mkdirSync(join(root, ".codex/sessions/2026/11/02"), { recursive: true });
+    writeFileSync(join(root, ".claude/projects/-proj", `${id}.jsonl`), JSON.stringify({ type: "user", cwd: "/proj", message: { content: "hi" } }) + "\n");
+    const old = join(root, ".claude/projects/-proj/99999999-2222-3333-4444-555555555555.jsonl");
     writeFileSync(old, JSON.stringify({ type: "user", cwd: "/proj" }) + "\n");
     utimesSync(old, new Date(Date.now() - 3600_000), new Date(Date.now() - 3600_000));
-    writeFileSync(join(codex, "2026", "11", "02", "rollout-2026-11-02T14-16-30-abc-123.jsonl"), "");
-    const omp = join(root, "omp.jsonl");
-    writeFileSync(omp, "");
-    const f = new TranscriptFinder({ claude, codex });
-    const none = async () => [] as string[][];
+    writeFileSync(join(root, ".codex/sessions/2026/11/02/rollout-2026-11-02T14-16-30-abc-123.jsonl"), "");
+    writeFileSync(join(root, "omp.jsonl"), "");
+    return root;
+  }
 
-    const c = pane({ agent: "claude" });
-    expect(await f.resolve({ pane: c, panes: [c], knownSession: id, argv: none })).toEqual({ source: { agent: "claude", path: join(claude, "-proj", `${id}.jsonl`), how: "session" } });
-    expect(await f.resolve({ pane: c, panes: [c], argv: async () => [["claude", "--resume", id]] })).toMatchObject({ source: { how: "session" } });
-    expect(await f.resolve({ pane: c, panes: [c], argv: none })).toEqual({ source: { agent: "claude", path: join(claude, "-proj", `${id}.jsonl`), how: "folder" } }); // newest for the folder
-    const twin = pane({ id: "w1:p2", agent: "claude" });
-    expect(await f.resolve({ pane: c, panes: [c, twin], argv: none })).toEqual({ reason: "2 claude agents run in /proj; cannot tell which transcript is this one" });
+  /** The SSH file access, run for real in a local shell with HOME pointing at the fake home. */
+  const shellFs = (root: string) =>
+    new SshFS(async (cmd) => {
+      const p = Bun.spawnSync(["sh", "-c", cmd], { env: { ...process.env, HOME: root }, stdout: "pipe", stderr: "pipe" });
+      return { code: p.exitCode ?? -1, out: Buffer.from(p.stdout), err: p.stderr.toString() };
+    });
 
-    const x = pane({ agent: "codex", session: { kind: "id", value: "abc-123" } });
-    expect(await f.resolve({ pane: x, panes: [x], argv: none })).toMatchObject({ source: { agent: "codex", how: "session" } });
-    const o = pane({ agent: "omp", session: { kind: "path", value: omp } });
-    expect(await f.resolve({ pane: o, panes: [o], argv: none })).toEqual({ source: { agent: "omp", path: omp, how: "session" } });
-    expect(await f.resolve({ pane: pane({ agent: "omp" }), panes: [], argv: none })).toEqual({ reason: "omp has not reported its session to Herdr yet" });
-    expect(await f.resolve({ pane: pane({}), panes: [], argv: none })).toEqual({ reason: "no agent in this pane" });
-  });
+  for (const [name, make] of [
+    ["local files", (root: string) => new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, ".codex/sessions") }) as TranscriptFS],
+    ["files over SSH (shell commands)", shellFs],
+  ] as const) {
+    test(`resolve by session id, Herdr path/id, argv, and folder only when unambiguous — ${name}`, async () => {
+      const root = home();
+      const fs = make(root);
+      const none = async () => [] as string[][];
+      const claudeFile = join(root, ".claude/projects/-proj", `${id}.jsonl`);
+      const c = pane({ agent: "claude" });
+      expect(await resolveTranscript(fs, { pane: c, panes: [c], knownSession: id, argv: none })).toEqual({ source: { agent: "claude", path: claudeFile, how: "session" } });
+      expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: async () => [["claude", "--resume", id]] })).toMatchObject({ source: { how: "session" } });
+      expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: none })).toEqual({ source: { agent: "claude", path: claudeFile, how: "folder" } }); // newest for the folder
+      const twin = pane({ id: "w1:p2", agent: "claude" });
+      expect(await resolveTranscript(fs, { pane: c, panes: [c, twin], argv: none })).toEqual({ reason: "2 claude agents run in /proj; cannot tell which transcript is this one" });
+      const elsewhere = pane({ id: "ds03~w1:p2", machine: "ds03", agent: "claude" });
+      expect(await resolveTranscript(fs, { pane: c, panes: [c, elsewhere], argv: none })).toMatchObject({ source: { how: "folder" } }); // same folder on another machine does not count
+      const x = pane({ agent: "codex", session: { kind: "id", value: "abc-123" } });
+      expect(await resolveTranscript(fs, { pane: x, panes: [x], argv: none })).toMatchObject({ source: { agent: "codex", how: "session" } });
+      const o = pane({ agent: "omp", session: { kind: "path", value: join(root, "omp.jsonl") } });
+      expect(await resolveTranscript(fs, { pane: o, panes: [o], argv: none })).toEqual({ source: { agent: "omp", path: join(root, "omp.jsonl"), how: "session" } });
+      expect(await resolveTranscript(fs, { pane: pane({ agent: "omp" }), panes: [], argv: none })).toEqual({ reason: "omp has not reported its session to Herdr yet" });
+      expect(await resolveTranscript(fs, { pane: pane({}), panes: [], argv: none })).toEqual({ reason: "no agent in this pane" });
+    });
 
-  test("the tail returns only appended entries, survives partial lines, and resets when the file is rewritten", () => {
-    const path = join(tmp(), "t.jsonl");
-    const line = (text: string) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
-    writeFileSync(path, line("one") + "\n");
-    const t = new TranscriptTail({ agent: "omp", path, how: "session" });
-    expect(blocks(t.read().ops)).toEqual([{ kind: "text", text: "one" }]);
-    const two = line("two");
-    appendFileSync(path, two.slice(0, 20));
-    expect(t.read().ops).toEqual([]);
-    appendFileSync(path, two.slice(20) + "\n");
-    expect(blocks(t.read().ops)).toEqual([{ kind: "text", text: "two" }]);
-    writeFileSync(path, line("fresh") + "\n");
-    const r = t.read();
-    expect(r.reset).toBe(true);
-    expect(blocks(r.ops)).toEqual([{ kind: "text", text: "fresh" }]);
+    test(`the tail returns only appended entries, survives partial and multi-byte lines, resets on rewrite — ${name}`, async () => {
+      const root = tmp();
+      const path = join(root, "t.jsonl");
+      const fs = make(root);
+      const line = (text: string) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
+      writeFileSync(path, line("one") + "\n");
+      const t = new TranscriptTail({ agent: "omp", path, how: "session" }, fs);
+      expect(blocks((await t.read()).ops)).toEqual([{ kind: "text", text: "one" }]);
+      const two = Buffer.from(line("二是中文") + "\n");
+      const cut = two.indexOf(Buffer.from("中")) + 1; // inside a multi-byte character
+      appendFileSync(path, two.subarray(0, cut));
+      expect((await t.read()).ops).toEqual([]);
+      appendFileSync(path, two.subarray(cut));
+      expect(blocks((await t.read()).ops)).toEqual([{ kind: "text", text: "二是中文" }]);
+      writeFileSync(path, line("fresh") + "\n");
+      const r = await t.read();
+      expect(r.reset).toBe(true);
+      expect(blocks(r.ops)).toEqual([{ kind: "text", text: "fresh" }]);
+    });
+  }
+
+  test("a large transcript opens at its last part, from a whole line", async () => {
+    const root = tmp();
+    const path = join(root, "big.jsonl");
+    const line = (n: number) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `entry ${n} ${"x".repeat(80)}` }] } });
+    writeFileSync(path, Array.from({ length: 200 }, (_, i) => line(i)).join("\n") + "\n");
+    const t = new TranscriptTail({ agent: "omp", path, how: "session" }, new LocalFS(), 5000);
+    const got = blocks((await t.read()).ops).map((b: any) => Number(b.text.split(" ")[1]));
+    expect(got.at(-1)).toBe(199);
+    expect(got.length).toBeLessThan(60); // ~5000 bytes of ~140-byte lines
+    expect(got.length).toBeGreaterThan(20);
+    expect(got).toEqual(Array.from({ length: got.length }, (_, i) => 200 - got.length + i)); // contiguous, newest last
+    expect(t.skipped).toBeGreaterThan(0);
   });
 });

@@ -116,6 +116,91 @@ describe("workspaces: viewer panes", () => {
   });
 });
 
+describe("workspaces: remote machines", () => {
+  test("remote ids are prefixed, operations route to the right machine, offline machines refuse clearly", async () => {
+    const home = tmp("af-ws-remote-");
+    const local = new FakeBackend();
+    local.saved = [{ label: "ds03", target: "ds03", session: "default" }, { label: "Build box", target: "me@build", session: "default" }];
+    const remoteBackend = new FakeBackend();
+    const execs: string[] = [];
+    const remotes = new Map<string, { state: any; error?: string; home?: string; onChange: () => void }>();
+    const w = new Workspaces({
+      home,
+      backend: local,
+      paneEnv: () => ({ PATH: "/af/bin" }),
+      remotePollMs: 0,
+      remote: (spec, onChange) => {
+        const r = {
+          state: "offline" as any,
+          error: undefined as string | undefined,
+          home: "/home/u",
+          onChange,
+          async connect() {
+            if (spec.key !== "ds03") {
+              r.state = "error";
+              r.error = "cannot reach me@build";
+              onChange();
+              throw new Error(r.error);
+            }
+            r.state = "online";
+            onChange();
+          },
+          close() {},
+          async exec(cmd: string) {
+            execs.push(cmd);
+            return { code: 0, out: Buffer.from("/home/u/.agent-flow/attachments/x-shot.png\n"), err: "" };
+          },
+        };
+        remotes.set(spec.key, r);
+        return { remote: r, backend: () => remoteBackend };
+      },
+    });
+    await w.start(60_000);
+    expect(w.model.machines.map((m) => `${m.id}:${m.state}`)).toEqual(["local:online", "ds03:offline", "build-box:offline"]);
+
+    const rws = await remoteBackend.createWorkspace("paper", "/home/u/paper");
+    await remoteBackend.startAgent("writer", "claude", rws.paneId, []);
+    expect(w.model.workspaces.filter((x) => x.machine === "ds03")).toEqual([]); // not connected yet
+
+    expect((await w.connect("ds03")).state).toBe("online");
+    const ws = w.model.workspaces.find((x) => x.machine === "ds03")!;
+    expect(ws.id).toBe(`ds03~${rws.workspaceId}`);
+    const pane = w.model.panes.find((p) => p.machine === "ds03")!;
+    expect(pane).toMatchObject({ id: `ds03~${rws.paneId}`, tabId: `ds03~${rws.tabId}`, agent: "claude" });
+    expect(w.model.layouts[`ds03~${rws.tabId}`]!.root).toEqual({ type: "pane", paneId: `ds03~${rws.paneId}` });
+
+    // operations reach the remote backend with the raw id; results come back prefixed
+    const split = await w.split(pane.id, "down");
+    expect(split.paneId).toStartWith("ds03~");
+    expect(remoteBackend.panes.has(split.paneId.slice(5))).toBe(true);
+    expect(local.panes.size).toBe(0);
+    await w.prompt(pane.id, "hello");
+    expect(remoteBackend.prompts.at(-1)).toEqual({ name: rws.paneId, text: "hello" });
+    expect(await w.read(pane.id)).toBe(`screen of ${rws.paneId}\n`);
+
+    // attachments for remote panes are written on the remote machine
+    const att = await w.saveAttachment(pane.id, new Uint8Array([1, 2, 3]), "shot.png");
+    expect(att).toMatchObject({ path: "/home/u/.agent-flow/attachments/x-shot.png", remote: true });
+    expect(execs.at(-1)).toContain("cat > ");
+    await expect(w.show({ target: "/etc/hosts", of: pane.id }, "u")).rejects.toThrow(/not supported yet/);
+
+    // a machine that cannot connect reports why, and its ids are refused with that reason
+    expect(await w.connect("build-box")).toMatchObject({ state: "error", error: "cannot reach me@build" });
+    expect(() => w.route("build-box~w1:p1")).toThrow(/Build box is not connected: cannot reach me@build/);
+    expect(() => w.route("nowhere~w1:p1")).toThrow(/no machine nowhere/);
+
+    // losing the connection drops the remote panes from the model
+    const r = remotes.get("ds03")!;
+    r.state = "error";
+    r.error = "connection lost";
+    r.onChange();
+    await w.refresh();
+    expect(w.model.panes.filter((p) => p.machine === "ds03")).toEqual([]);
+    expect(w.model.machines.find((m) => m.id === "ds03")).toMatchObject({ state: "error", error: "connection lost" });
+    w.stop();
+  });
+});
+
 describe("composer: prompt with attachments, keys", () => {
   test("attachments are saved under home and listed before the message; keys are validated", async () => {
     const { home, backend, w, ws } = await setup();

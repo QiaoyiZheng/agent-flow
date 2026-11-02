@@ -144,9 +144,11 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
                   <span style={{ color: kindColor(k) }}>●</span> {k} agent, right
                 </div>
               ))}
-              <div className="item" onClick={() => (setMenu(false), show())}>
-                ≡ file, folder or URL, right
-              </div>
+              {p?.machine === "local" && (
+                <div className="item" onClick={() => (setMenu(false), show())}>
+                  ≡ file, folder or URL, right
+                </div>
+              )}
               {view && (
                 <div
                   className="item"

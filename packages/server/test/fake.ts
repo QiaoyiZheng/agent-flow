@@ -1,6 +1,6 @@
 // An in-memory TerminalBackend with real workspace/tab/split-tree behavior, for tests.
 
-import type { AgentKind, AgentStatus, HLayout, HMachine, LayoutNode, SplitDirection } from "@af/core";
+import type { AgentKind, AgentStatus, HLayout, LayoutNode, SplitDirection } from "@af/core";
 import type { HerdrAgentInfo, HerdrSnapshot, StartResult, TerminalBackend } from "../src/herdr.ts";
 
 interface FPane {
@@ -125,9 +125,9 @@ export class FakeBackend implements TerminalBackend {
   }
   async snapshot(): Promise<HerdrSnapshot> {
     return {
-      workspaces: [...this.workspaces.values()].map((w, i) => ({ id: w.id, label: w.label, number: i + 1, agentStatus: "unknown" })),
+      workspaces: [...this.workspaces.values()].map((w, i) => ({ machine: "local", id: w.id, label: w.label, number: i + 1, agentStatus: "unknown" })),
       tabs: [...this.tabs.values()].map((t, i) => ({ id: t.id, workspaceId: t.workspaceId, label: t.label, number: i + 1 })),
-      panes: [...this.panes.values()].map((p) => ({ id: p.id, tabId: p.tabId, workspaceId: p.workspaceId, agent: p.agent?.kind, agentName: p.agent?.name, agentStatus: p.agent?.status ?? "unknown", label: p.label, cwd: p.cwd })),
+      panes: [...this.panes.values()].map((p) => ({ machine: "local", id: p.id, tabId: p.tabId, workspaceId: p.workspaceId, agent: p.agent?.kind, agentName: p.agent?.name, agentStatus: p.agent?.status ?? "unknown", label: p.label, cwd: p.cwd })),
       layoutSigs: Object.fromEntries([...this.tabs.values()].map((t) => [t.id, JSON.stringify(t.root)])),
     };
   }
@@ -157,8 +157,9 @@ export class FakeBackend implements TerminalBackend {
   async processArgv(): Promise<string[][]> {
     return [];
   }
-  async machines(): Promise<HMachine[]> {
-    return [{ id: "local", label: "Local", target: "local", available: true }];
+  saved: { label: string; target: string; session: string }[] = [];
+  async savedMachines() {
+    return this.saved;
   }
   watchLifecycle(onEvent: () => void) {
     this.lifecycle.add(onEvent);

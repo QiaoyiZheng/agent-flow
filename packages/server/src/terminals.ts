@@ -2,7 +2,7 @@
 // terminal, NDJSON frames out, input/resize/scroll in. Message shapes verified in spikes/s1-terminal.
 
 import type { ClientPush, ServerPush } from "@af/core";
-import type { TerminalBackend } from "./herdr.ts";
+type ArgvFor = (paneId: string, mode: "control" | "observe", cols: number, rows: number) => string[];
 
 type Session = { proc: ReturnType<typeof Bun.spawn>; stdin: import("bun").FileSink };
 
@@ -10,7 +10,7 @@ export class TerminalBridge {
   private sessions = new Map<string, Session>();
 
   constructor(
-    private backend: TerminalBackend,
+    private argvFor: ArgvFor,
     private send: (msg: ServerPush) => void,
   ) {}
 
@@ -31,7 +31,14 @@ export class TerminalBridge {
 
   private open(id: string, paneId: string, mode: "control" | "observe", cols: number, rows: number) {
     this.close(id);
-    const proc = Bun.spawn(this.backend.terminalSessionArgv(paneId, mode, cols, rows), { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    let argv: string[];
+    try {
+      argv = this.argvFor(paneId, mode, cols, rows);
+    } catch (e) {
+      this.send({ type: "term.closed", id, reason: (e as Error).message });
+      return;
+    }
+    const proc = Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     this.sessions.set(id, { proc, stdin: proc.stdin as import("bun").FileSink });
     void (async () => {
       const dec = new TextDecoder();
