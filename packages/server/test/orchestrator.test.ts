@@ -47,6 +47,9 @@ class FakeBackend implements TerminalBackend {
   async readPane() {
     return "";
   }
+  async paneExists() {
+    return true;
+  }
   async closeTab(tabId: string) {
     this.closed.push(tabId);
     for (const [k, v] of this.agents) if (v.tabId === tabId) this.agents.delete(k);
@@ -63,6 +66,8 @@ class FakeBackend implements TerminalBackend {
   }
 }
 
+const clock = { ms: 0 };
+
 function setup(opts: { git?: boolean } = { git: true }) {
   const home = tmp("af-home-");
   process.env.CODEX_HOME = tmp("af-codex-"); // codex profiles must not land in the real ~/.codex
@@ -74,6 +79,7 @@ function setup(opts: { git?: boolean } = { git: true }) {
   }
   const backend = new FakeBackend();
   let t = 0;
+  clock.ms = 0;
   const o = new Orchestrator({
     home,
     backend,
@@ -82,6 +88,8 @@ function setup(opts: { git?: boolean } = { git: true }) {
     protocolDir: join(import.meta.dir, "../../skill"),
     config: DEFAULT_CONFIG,
     now: () => `2026-11-02T00:00:${String(++t).padStart(4, "0")}Z`,
+    clock: () => clock.ms,
+    idleGraceMs: 20_000,
   });
   return { home, repo, backend, o };
 }
@@ -227,26 +235,45 @@ describe("orchestrator: conflicts, startup, reminders", () => {
     expect(att()).not.toContain("startup:x");
   });
 
-  test("a worker that goes quiet without af done is reminded once, then the human is asked", async () => {
+  test("a worker idle for the grace period after reading its task is reminded once, then the human is asked", async () => {
     const { repo, backend, o } = setup();
     const { id: run } = await o.createRun({ cwd: repo });
     o.graph({ run }, { type: "node.add", id: "w", spec: { task: "work", executor: { kind: "claude" } } });
     await o.flush();
-    await o.flush(); // notice delivered
+    await o.flush(); // task notice delivered
     const h = `${run}-w`;
+    const reminders = () => o.getRun(run).mail.filter((m) => m.to === "w" && m.body.includes("has not been submitted")).length;
+
+    // status flicker right after the notice, before the task is even read: no reminder
+    backend.set(h, "working");
+    await o.flush();
+    backend.set(h, "done");
+    clock.ms += 60_000;
+    await o.flush();
+    await o.flush();
+    expect(reminders()).toBe(0);
+
+    // reads the task, works, goes idle: nothing until the grace period has passed
     o.inbox({ run, agent: "w" });
     backend.set(h, "working");
     await o.flush();
     backend.set(h, "idle");
-    await o.flush(); // reminder queued
-    await o.flush(); // reminder delivered
-    expect(backend.promptsTo(h).length).toBe(2);
-    expect(o.inbox({ run, agent: "w" }).at(-1)!.body).toContain("w#1 has not been submitted");
-    backend.set(h, "working");
     await o.flush();
-    backend.set(h, "idle");
+    clock.ms += 19_000;
+    await o.flush();
+    expect(reminders()).toBe(0);
+    clock.ms += 2_000;
+    await o.flush();
+    expect(reminders()).toBe(1);
+    await o.flush(); // reminder delivered
+    expect(backend.promptsTo(h).at(-1)).toContain("New message");
+
+    // still idle another full period: ask the human
+    o.inbox({ run, agent: "w" });
+    clock.ms += 21_000;
     await o.flush();
     expect(Object.values(o.getRun(run).attention).map((a) => a.kind)).toContain("no_submit");
+    expect(reminders()).toBe(1);
     o.done({ run, agent: "w" }, { note: "finally" });
     expect(Object.values(o.getRun(run).attention).map((a) => a.kind)).not.toContain("no_submit");
   });

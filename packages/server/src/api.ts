@@ -46,6 +46,15 @@ export function makeHandler(o: Orchestrator) {
           return json(o.open(caller, body.target));
         case "POST /spawn":
           return json(await o.spawn(caller, body));
+        case "POST /attention/dismiss":
+          o.dismiss(caller, body.id);
+          return json({ ok: true });
+        case "POST /terminal":
+          return json(await o.newTerminal(caller, body.cwd));
+        case "GET /shell":
+          return json(await o.shell());
+        case "POST /edit":
+          return json(openInEditor(body.path));
         case "POST /flush":
           await o.flush();
           return json({ ok: true });
@@ -58,6 +67,16 @@ export function makeHandler(o: Orchestrator) {
       return fail("internal", (e as Error).message, 500);
     }
   };
+}
+
+/** Open a file in the user's editor: VS Code when installed, else the system default. */
+function openInEditor(path: string) {
+  if (!path || !existsSync(path)) throw new AfError("not_found", `${path} does not exist`);
+  const code = Bun.which("code");
+  const argv = code ? [code, path] : process.platform === "darwin" ? ["open", "-a", "Visual Studio Code", path] : ["xdg-open", path];
+  const r = Bun.spawnSync(argv, { stdout: "ignore", stderr: "pipe" });
+  if (r.exitCode !== 0 && process.platform === "darwin") Bun.spawnSync(["open", "-t", path]);
+  return { ok: true };
 }
 
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".json": "application/json" };

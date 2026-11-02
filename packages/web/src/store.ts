@@ -87,11 +87,11 @@ export function onTerm(id: string, fn: TermListener) {
   return () => termSubs.delete(id);
 }
 
-export function useStore<T>(pick: (s: State) => T): T {
-  return useSyncExternalStore(
-    (f) => (subs.add(f), () => subs.delete(f)),
-    () => pick(state),
-  );
+const subscribe = (f: () => void) => (subs.add(f), () => void subs.delete(f));
+
+/** The whole client state. `state` is replaced (never mutated in place) on every change, so this re-renders correctly. */
+export function useStore(): State {
+  return useSyncExternalStore(subscribe, () => state);
 }
 
 export const getState = () => state;

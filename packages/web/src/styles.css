@@ -203,6 +203,11 @@ button { font: inherit; color: inherit; }
 .react-flow__handle { opacity: 0; }
 .react-flow__edge-text { font: 10px var(--mono); fill: var(--text-3); }
 .react-flow__edge-textbg { fill: var(--bg-1); }
+.edge-label {
+  position: absolute; pointer-events: none;
+  font: 10px var(--mono); color: var(--accent);
+  background: var(--bg-1); padding: 1px 4px; border-radius: 4px; border: 1px solid var(--line);
+}
 
 /* ---------- node detail ---------- */
 .detail { border-top: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; height: 55%; }

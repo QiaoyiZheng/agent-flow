@@ -69,6 +69,10 @@ export interface OrchestratorOptions {
   protocolDir: string;
   config: AgentConfig;
   now?: () => string;
+  /** Wall clock in ms, for idle timing. Tests replace it. */
+  clock?: () => number;
+  /** How long a worker must sit idle, after reading its task, before it is reminded to submit. */
+  idleGraceMs?: number;
 }
 
 interface Run {
@@ -83,6 +87,8 @@ interface Run {
   direct: Map<string, string[]>;
   /** Reminders sent per instance label for "went idle without af done". */
   reminded: Map<string, number>;
+  /** Agent name -> ms since it has been continuously idle or done. */
+  idleSince: Map<string, number>;
 }
 
 interface TeamFile {
@@ -136,7 +142,7 @@ export class Orchestrator {
   }
 
   private newRun(id: string, state: RunState): Run {
-    return { id, dir: join(this.opts.home, "runs", id), state, dispatching: new Set(), starting: new Set(), direct: new Map(), reminded: new Map() };
+    return { id, dir: join(this.opts.home, "runs", id), state, dispatching: new Set(), starting: new Set(), direct: new Map(), reminded: new Map(), idleSince: new Map() };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -406,8 +412,7 @@ export class Orchestrator {
     const meta = run.state.meta!;
     const label = instanceLabel(inst);
     if (meta.repo && node.spec.isolation === "isolated") {
-      const note = inst.submissions.at(-1)?.note ?? "";
-      const m = git.mergeInto(meta.integration!, nodeBranch(run.id, nodeId), `${label}: ${note}`.slice(0, 200));
+      const m = git.mergeInto(meta.integration!, nodeBranch(run.id, nodeId), `merge ${label} into ${meta.branch}`);
       if (!m.ok) {
         this.emit(run, { type: "git.merge_failed", at: this.now(), node: nodeId, n: inst.n, files: m.files });
         const text = `Merging ${label} into ${meta.branch} conflicts in: ${m.files.join(", ")}.`;
@@ -546,6 +551,38 @@ export class Orchestrator {
   }
 
   // -------------------------------------------------------------------------------------------
+  // UI helpers
+
+  dismiss(caller: Caller, id: string) {
+    const run = this.requireRun(caller.run);
+    this.requireLeadOrUser(run, caller);
+    if (!run.state.attention[id]) throw new AfError("unknown_attention", `no attention item ${id}`);
+    this.resolve(run, id);
+  }
+
+  /** A plain shell tab inside the run's Herdr workspace. */
+  async newTerminal(caller: Caller, cwd?: string) {
+    const run = this.requireRun(caller.run);
+    const meta = run.state.meta!;
+    const dir = cwd && existsSync(cwd) ? cwd : (meta.integration ?? meta.cwd);
+    const env = { AF_RUN: run.id, AF_SOCK: this.opts.sock, PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
+    return this.opts.backend.createTab(meta.herdrWorkspace!, dir, "shell", env);
+  }
+
+  /** The persistent shell shown in the UI's bottom drawer: one Herdr workspace that outlives runs. */
+  async shell(): Promise<{ paneId: string }> {
+    const file = join(this.opts.home, "shell.json");
+    if (existsSync(file)) {
+      const saved = JSON.parse(readFileSync(file, "utf8")) as { paneId: string };
+      if (await this.opts.backend.paneExists(saved.paneId)) return saved;
+    }
+    const ws = await this.opts.backend.createWorkspace("af shell", process.env.HOME ?? "/");
+    const saved = { paneId: ws.paneId, workspaceId: ws.workspaceId };
+    writeFileSync(file, JSON.stringify(saved));
+    return saved;
+  }
+
+  // -------------------------------------------------------------------------------------------
   // the loop: track agent status, dispatch ready instances, deliver notices
 
   /** One tick, then wait for the dispatches it started. Used by tests and by `af` calls that want a settled view. */
@@ -596,19 +633,24 @@ export class Orchestrator {
         }
         continue;
       }
-      if (now !== "idle" && now !== "done") continue;
+      if (now !== "idle" && now !== "done") {
+        run.idleSince.delete(a.name);
+        continue;
+      }
+      const clock = this.opts.clock?.() ?? Date.now();
+      if (!run.idleSince.has(a.name)) run.idleSince.set(a.name, clock);
 
-      // went quiet while holding a running instance without submitting: remind once, then ask the human
-      if (prev === "working") {
-        const running = liveNodes(run.state.graph).map(activeInstance).find((i) => i?.state === "running" && i.agent === a.name);
-        if (running && !undeliveredMail(run.state, a.name).length) {
-          const label = instanceLabel(running);
-          const n = run.reminded.get(label) ?? 0;
-          run.reminded.set(label, n + 1);
-          if (n === 0)
-            this.mail(run, { from: SYSTEM, to: a.name, kind: "system", node: label, body: `${label} has not been submitted. If it is finished or cannot be finished, run af done now. If you are waiting for an answer, ignore this.` });
-          else this.raise(run, { id: `nosubmit:${a.name}`, kind: "no_submit", agent: a.name, node: label, text: `${a.name} stopped without submitting ${label}.` });
-        }
+      // Sat idle, after reading its task, while holding a running instance: remind once, then ask the human.
+      // Agents' status flickers (working -> done -> working within a second), hence the grace period.
+      const running = liveNodes(run.state.graph).map(activeInstance).find((i) => i?.state === "running" && i.agent === a.name);
+      if (running && !unreadMail(run.state, a.name).length && clock - run.idleSince.get(a.name)! >= (this.opts.idleGraceMs ?? 20_000)) {
+        const label = instanceLabel(running);
+        const n = run.reminded.get(label) ?? 0;
+        run.reminded.set(label, n + 1);
+        run.idleSince.set(a.name, clock); // the next step needs another full idle period
+        if (n === 0)
+          this.mail(run, { from: SYSTEM, to: a.name, kind: "system", node: label, body: `${label} has not been submitted. If it is finished or cannot be finished, run af done now. If you are waiting for an answer, ignore this.` });
+        else this.raise(run, { id: `nosubmit:${a.name}`, kind: "no_submit", agent: a.name, node: label, text: `${a.name} has been idle without submitting ${label}.` });
       }
 
       const direct = run.direct.get(a.name);

@@ -175,7 +175,7 @@ af graph add  docs   --after review --on pass
   - blocked：不往终端里打字（避免误答审批提示），在"需要你"里出现一条待办。
 - 结果由 agent 主动交：`af reply` 或 `af done`，**不靠读屏**。大的结果（diff、报告）只传文件路径。
 - server 监听信箱目录，UI 据此画出消息流。
-- 已知风险：要靠 agent 守规矩用 `af done`。第 0 步要实测遵守率；如果超时还没交，server 提醒它一次，再不行就进"需要你"。
+- 要靠 agent 守规矩用 `af done`（第 0 步实测 15/15）。兜底规则：worker **读过任务后**连续空闲 20 秒仍没提交，server 提醒它一次；再空闲 20 秒就进"需要你"。必须等它读过任务、并且要有宽限期，是因为 agent 的状态会抖动（端到端测试里 codex 收到通知后 1 秒内 working → done → working），立刻提醒会误报。
 
 ## 8. CLI：`af`
 

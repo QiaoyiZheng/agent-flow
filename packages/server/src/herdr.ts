@@ -23,6 +23,7 @@ export interface TerminalBackend {
   /** Type `text` into the agent's prompt and submit it. Does not wait for the turn. */
   prompt(name: string, text: string): Promise<void>;
   readPane(paneId: string, lines: number): Promise<string>;
+  paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
   closeWorkspace(workspaceId: string): Promise<void>;
   /** argv for a streaming terminal session (control or observe), used by the WebSocket bridge. */
@@ -47,10 +48,16 @@ export class Herdr implements TerminalBackend {
     readonly socket = process.env.HERDR_SOCKET_PATH ?? join(homedir(), ".config/herdr/herdr.sock"),
   ) {}
 
-  private async cli(args: string[]): Promise<any> {
+  private async cli(args: string[], timeoutMs = 120_000): Promise<any> {
+    const started = performance.now();
     const p = Bun.spawn([this.bin, ...args], { stdout: "pipe", stderr: "pipe" });
+    const killer = setTimeout(() => p.kill(), timeoutMs);
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     await p.exited;
+    clearTimeout(killer);
+    const secs = (performance.now() - started) / 1000;
+    if (secs > 5) console.warn(`[herdr] ${args.slice(0, 3).join(" ")} took ${secs.toFixed(1)}s (exit ${p.exitCode})`);
+    if (p.signalCode) throw new HerdrError("timeout", `herdr ${args.slice(0, 3).join(" ")} did not finish within ${timeoutMs / 1000}s`);
     const text = (out.trim() || err.trim()).split("\n").filter(Boolean).at(-1) ?? "";
     let json: any;
     try {
@@ -129,6 +136,13 @@ export class Herdr implements TerminalBackend {
     const out = await new Response(p.stdout).text();
     await p.exited;
     return out;
+  }
+
+  async paneExists(paneId: string) {
+    return this.cli(["pane", "get", paneId]).then(
+      () => true,
+      () => false,
+    );
   }
 
   async closeTab(tabId: string) {
