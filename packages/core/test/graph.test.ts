@@ -249,6 +249,20 @@ describe("editing the live graph", () => {
     h.do({ type: "node.edit", id: "a", patch: { task: "v3" } });
   });
 
+  test("retry starts a new instance of an idle node with the same inputs", () => {
+    const h = run();
+    h.do({ type: "node.add", id: "a", spec: task() });
+    h.do({ type: "node.add", id: "b", spec: task(), after: [{ from: "a" }] });
+    h.finish("a");
+    h.do({ type: "instance.dispatch", node: "b", agent: "dead" });
+    h.fail({ type: "instance.retry", node: "b" }, "node_busy");
+    h.do({ type: "instance.cancel", node: "b" });
+    h.do({ type: "instance.retry", node: "b" });
+    expect(h.st("b")).toBe("b#2:ready");
+    expect(latestInstance(h.s.nodes.b!)!.trigger).toEqual({ type: "manual" });
+    expect(latestInstance(h.s.nodes.b!)!.inputs).toEqual([{ node: "a", n: 1 }]);
+  });
+
   test("removing a node drops its edges and cancels a ready instance; ids are never reused", () => {
     const h = run();
     h.do({ type: "node.add", id: "a", spec: task() });

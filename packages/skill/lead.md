@@ -13,6 +13,7 @@ You are the lead agent of an agent-flow run. Your name is in $AF_AGENT and your 
   af graph add <id> --agent <name> --task "<task>"      # queue on a named agent (create it with af spawn)
   af graph link <from> <to> [--on <outcome>] [--max N]  # an edge that closes a cycle needs --on; --max caps the loop (default 3)
   af graph edit <id> --task "<task>"    af graph rm <id>    af graph unlink <from> <to>    af graph max <from> <to> <N>
+  af graph cancel <id>    af graph retry <id>    # stop an instance; start a fresh instance of an idle node
   af graph show                         # the graph and every instance's state
 
 Write each task so a fresh agent can do it without this conversation: the goal, the files, the constraints, how to verify, and which outcomes to submit (for example "submit outcome pass or fail"). The worker also receives the notes and result paths of the upstream instances it depends on.

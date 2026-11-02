@@ -62,7 +62,7 @@ Herdr server（原版，不 fork）
 
 | 概念 | 含义 |
 |---|---|
-| **run** | 一次完整的协作任务。有自己的图、信箱、集成分支 `af/<run>` |
+| **run** | 一次完整的协作任务。有自己的图、信箱、集成分支 `af/<run>/main` |
 | **团队模板** | YAML 文件，声明一个 run 启动时要起哪些 agent、各自的角色。**不写控制流** |
 | **agent** | 跑在某个 Herdr pane 里的一个 coding agent 实例，在 run 内有唯一名字 |
 | **lead（总控）** | run 的入口 agent。用户主要和它对话；它负责建图、改图、校验 |
@@ -146,13 +146,17 @@ af graph add  docs   --after review --on pass
 
 ## 6. 仓库隔离（git）
 
-- 每个节点二选一：`--isolated`（写代码的节点默认用这个）或 `--shared`（只读节点，如审查、调研；不是 git 仓库的目录也只能用这个）。
-- run 开始时，从当前 HEAD 建集成分支 `af/<run>`。**用户的 main 在整个 run 期间不会被碰。**
-- isolated 节点第一次执行时，从 `af/<run>` 的最新状态切出 `af/<run>/<node>`，并通过 `herdr worktree create --path` 开 worktree。
-- **worktree 放在仓库里面**：`<repo>/.agent-flow/worktrees/<run>/<node>`，并写进 `.git/info/exclude`。原因是 claude 的"信任此文件夹"会从父目录继承（已实测）：用户信任过仓库，新 worktree 就不会在启动时弹框卡住。
-- accept 时，server 把 `af/<run>/<node>` 合并进 `af/<run>`。下游节点在合并之后才切分支，所以**图的依赖关系 = git 的先后关系**。
-- 合并冲突：不自动处理。实例退回 submitted 状态，并通知 lead。lead 可以 reject 打回（让原 agent 基于最新的 `af/<run>` 解决冲突），也可以加一个修复节点。
-- run 结束后，`af/<run>` 交给用户，由用户决定怎么合进 main。
+- 每个节点二选一：`--isolated`（默认）或 `--shared`（只读节点，如审查、调研）。不是 git 仓库的目录，所有节点都直接在 run 的目录里跑。
+- **分支命名**：集成分支 `af/<run>/main`，节点分支 `af/<run>/node/<node>`。（不能用 `af/<run>` 加 `af/<run>/<node>`：git 里一个 ref 不能同时是文件和目录。）
+- run 开始时，从当前 HEAD 建 `af/<run>/main`，并在 `<repo>/.agent-flow/worktrees/<run>/_main` 开一个集成 worktree。**用户的分支在整个 run 期间不会被碰。** 所有 git 操作都是 `git -C <目录>`，不切换用户的分支。
+- isolated 节点第一次执行时，从 `af/<run>/main` 切出节点分支，在 `<repo>/.agent-flow/worktrees/<run>/<node>` 开 worktree。直接用 git 创建，不用 `herdr worktree create`，因为我们有自己的 UI，不需要 Herdr 的分组。
+- **worktree 放在仓库里面**，并写进 `.git/info/exclude`。原因是 claude 的"信任此文件夹"会从父目录继承（已实测）：用户信任过仓库，新 worktree 就不会在启动时弹框卡住。已知副作用：仓库里的其他工具（测试运行器、搜索）可能扫到 `.agent-flow/`，需要时让用户在工具配置里排除它。
+- shared 节点在集成 worktree 里跑，能看到到目前为止所有已接受的工作。
+- **提交**：worker 执行 `af done` 时，server 把它目录里的改动自动提交（提交作者 `agent-flow`）。worker 自己不需要 commit。
+- **合并**：accept 时，server 把节点分支 `--no-ff` 合并进 `af/<run>/main`。下游节点在合并之后才切分支或刷新，所以**图的依赖关系 = git 的先后关系**。
+- **再次执行**（回边触发）：节点的 worktree 保留，派发前先把 `af/<run>/main` 合并进节点分支，拿到别的节点已接受的改动。
+- **合并冲突**：不自动处理。合并被中止，实例留在 submitted 状态，"需要你"里出现一条待办，并通知 lead。lead reject 时，给 worker 的消息里会附上"先执行 `git merge af/<run>/main` 并解决冲突"。
+- run 结束后，`af/<run>/main` 交给用户，由用户决定怎么合进自己的分支。
 - 已知成本：每个 worktree 都要重新装依赖。v0 不处理，以后在团队模板里加 `setup:` 命令。
 
 ## 7. 通信：终端唤醒 + 文件信箱
@@ -205,11 +209,16 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 | agent | 注入协议 | 必须加的其他参数 |
 |---|---|---|
 | claude | `--append-system-prompt-file <worker.md>` | 权限模式由用户配置（spike 用 `--permission-mode auto`） |
-| codex | `-c developer_instructions=<协议，压成一行>` | `-c check_for_update_on_startup=false`（否则更新提示会卡住启动）；如果用沙盒模式，还要 `-c sandbox_workspace_write.network_access=true`（否则连不上 af 的 Unix socket） |
+| codex | `-p agent-flow-<role>`：server 把协议写进 `$CODEX_HOME/agent-flow-<role>.config.toml` 的 `developer_instructions` | profile 里写 `check_for_update_on_startup = false`（否则更新提示会卡住启动）；命令行加 `-c sandbox_workspace_write.network_access=true`（沙盒模式下否则连不上 af 的 Unix socket） |
 | omp | `--append-system-prompt=<worker.md>` | 无 |
 
 - 环境变量（`AF_RUN`、`AF_AGENT`、`AF_SOCK`、`PATH` 里加上 af）通过 `herdr tab create --env` 注入，在 login shell 里也能保住（已实测）。
-- 启动流程：建 pane → `herdr agent start --kind <k> -- <参数>` → 等到 idle → 送第一条通知。启动时卡在 blocked（信任框、更新提示、登录过期等）就进"需要你"，不自动按键。
+- **协议文本绝不能放在命令行上。** Herdr 是把启动命令"打"进 shell 的，macOS 终端单行输入上限 1024 字节（MAX_CANON），超出部分被截断，codex 会卡在半截命令里（端到端测试实测）。所以只传文件路径或 profile 名，命令行保持在 200 字节以内（有测试守着）。
+- 启动流程：建 pane → `herdr agent start --kind <k> -- <参数>` → 等到 idle → 送第一条通知。
+  - 卡在 blocked（信任框、登录过期等）：进"需要你"，不自动按键，用户在 UI 里打开它的终端回答。
+  - 根本没起来（如超时）：关掉它的 tab，取消该实例，通知 lead"修好原因后 `af graph retry <node>`"，不自动重试。
+- **claude 的文件夹信任以 git 仓库为单位**（端到端测试实测）：worktree 算主仓库的一部分；不在 git 里的目录才沿父目录往上找。所以每个新仓库，lead 第一次启动时用户确认一次信任即可，之后所有 worktree 都不再弹框。
+- `af graph retry <node>`：给一个空闲节点手动开新实例（输入沿用上一个实例），并且**一律换新 agent**：该节点原来的 agent 被退役（关 tab、标记退出）。用于 agent 挂掉后的恢复。下属 agent 意外退出时，server 会把这条恢复命令发给 lead。
 
 ## 10. UI
 
@@ -319,7 +328,7 @@ agent-flow/
 1. 用户在 UI 里对 lead 说一个任务。
 2. lead 建图：2 个并行的写代码节点（一个 codex、一个 omp，都是 isolated），加 1 个 claude 审查节点（`--auto-accept`），审查到 fail 就回到写代码节点（`--max 3`）。
 3. 全程自动派发。至少发生一次 fail → 重写 → pass 的循环；lead 至少 reject 一次。
-4. 所有节点通过，合并进 `af/<run>`，用户的 main 不变。
+4. 所有节点通过，合并进 `af/<run>/main`，用户的 main 不变。
 5. 用户只看网页 UI 就能看懂发生了什么。中途关掉浏览器、甚至重启 af server，再打开时状态完整。
 
 ## 15. 以后再做

@@ -215,13 +215,30 @@ export class Orchestrator {
       case "run.quiescent":
         this.mail(run, { from: SYSTEM, to: meta.lead, kind: "system", body: this.quiescentSummary(run) });
         break;
+      case "instance.created":
+        if (ev.trigger.type === "manual") {
+          this.clearAttentionFor(run, ev.node);
+          const spec = run.state.graph.nodes[ev.node]!.spec;
+          if ("kind" in spec.executor)
+            for (const a of Object.values(run.state.agents)) if (a.node === ev.node) void this.retire(run, a.name);
+        }
+        break;
+      case "node.removed":
+        this.clearAttentionFor(run, ev.id);
+        break;
       case "instance.cancelled": {
+        this.clearAttentionFor(run, ev.node);
         const i = getInstance(run.state.graph, ev)!;
         if (i.agent && run.state.agents[i.agent]?.status !== "exited")
           this.mail(run, { from: meta.lead, to: i.agent, kind: "message", node: instanceLabel(ev), body: `${instanceLabel(ev)} was cancelled. Stop working on it and wait for new messages.` });
         break;
       }
     }
+  }
+
+  private clearAttentionFor(run: Run, nodeId: string) {
+    for (const a of Object.values(run.state.attention))
+      if (a.node && (a.node === nodeId || a.node.startsWith(`${nodeId}#`)) && a.kind !== "merge_conflict") this.resolve(run, a.id);
   }
 
   private raise(run: Run, a: Omit<Attention, "at">) {
@@ -331,20 +348,19 @@ export class Orchestrator {
       const tab = await this.opts.backend.createTab(meta.herdrWorkspace!, a.cwd, a.name, env);
       this.emit(run, { type: "agent.placed", at: this.now(), name: a.name, paneId: tab.paneId, tabId: tab.tabId });
       const proto = join(run.dir, "protocol", `${a.protocol}.md`);
-      const res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, proto, this.opts.config));
+      const res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config));
       if (res.ok) this.setStatus(run, a.name, "idle");
-      else {
+      else if (res.code !== "agent_not_ready") {
+        // the agent never came up (e.g. timeout); do not leave a half-started process behind
+        await this.opts.backend.closeTab(tab.tabId);
+        throw new AfError("agent_start_failed", `${a.kind} did not start (${res.code}: ${res.message})`);
+      } else {
         this.setStatus(run, a.name, "blocked");
-        this.raise(run, {
-          id: `startup:${a.name}`,
-          kind: "startup_blocked",
-          agent: a.name,
-          text: `${a.name} (${a.kind}) is stuck while starting (${res.code}). Open its terminal and answer the prompt (folder trust, login, update).`,
-        });
+        const hint = res.code === "agent_not_ready" ? "Open its terminal and answer the prompt (folder trust, login, update)." : `Open its terminal to see what went wrong (${res.message}).`;
+        this.raise(run, { id: `startup:${a.name}`, kind: "startup_blocked", agent: a.name, text: `${a.name} (${a.kind}) is stuck while starting (${res.code}). ${hint}` });
       }
     } catch (e) {
       this.setStatus(run, a.name, "exited");
-      this.raise(run, { id: `startup:${a.name}`, kind: "startup_blocked", agent: a.name, text: `${a.name} failed to start: ${(e as Error).message}` });
       throw e;
     } finally {
       run.starting.delete(a.name);
@@ -571,7 +587,13 @@ export class Orchestrator {
       }
       if (now === "exited") {
         const label = this.currentLabel(run, a.name);
-        if (label) this.raise(run, { id: `exited:${a.name}`, kind: "agent_exited", agent: a.name, node: label, text: `${a.name} exited while working on ${label}.` });
+        if (label) {
+          const nodeId = label.split("#")[0]!;
+          const text = `${a.name} exited while working on ${label}.`;
+          this.raise(run, { id: `exited:${a.name}`, kind: "agent_exited", agent: a.name, node: label, text });
+          if (a.name !== run.state.meta!.lead)
+            this.mail(run, { from: SYSTEM, to: run.state.meta!.lead, kind: "system", node: label, body: `${text} To run it again with a fresh agent: af graph cancel ${nodeId} && af graph retry ${nodeId}` });
+        }
         continue;
       }
       if (now !== "idle" && now !== "done") continue;
@@ -610,7 +632,7 @@ export class Orchestrator {
       if (run.dispatching.has(label)) continue;
       run.dispatching.add(label);
       const p = this.dispatchOne(run, node, inst)
-        .catch((e) => this.raise(run, { id: `dispatch:${label}`, kind: "agent_exited", node: node.id, text: `Could not dispatch ${label}: ${(e as Error).message}` }))
+        .catch((e) => this.dispatchFailed(run, node.id, label, (e as Error).message))
         .finally(() => {
           run.dispatching.delete(label);
           this.pending.delete(p);
@@ -645,6 +667,22 @@ export class Orchestrator {
     this.resolve(run, `noagent:${node.id}`);
     this.exec(run, { type: "instance.dispatch", node: node.id, agent: agentName });
     this.mail(run, { from: run.state.meta!.lead, to: agentName, kind: "task", node: instanceLabel(cur), body: this.taskBody(run, node, cur, cwd) });
+  }
+
+  private dispatchFailed(run: Run, nodeId: string, label: string, why: string) {
+    const text = `Could not start an agent for ${label}: ${why}`;
+    const cur = activeInstance(run.state.graph.nodes[nodeId]!);
+    if (cur && instanceLabel(cur) === label && cur.state !== "submitted") this.exec(run, { type: "instance.cancel", node: nodeId });
+    this.raise(run, { id: `dispatch:${label}`, kind: "agent_exited", node: label, text });
+    this.mail(run, { from: SYSTEM, to: run.state.meta!.lead, kind: "system", node: label, body: `${text}\n${label} was cancelled. Fix the cause (see the agent's terminal or the server log), then: af graph retry ${nodeId}` });
+  }
+
+  /** Stop an agent for good: close its terminal and mark it exited, so the next instance gets a fresh agent. */
+  private async retire(run: Run, name: string) {
+    const a = run.state.agents[name];
+    if (!a || a.status === "exited") return;
+    this.setStatus(run, name, "exited");
+    if (a.tabId) await this.opts.backend.closeTab(a.tabId);
   }
 
   private uniqueAgentName(run: Run, base: string) {

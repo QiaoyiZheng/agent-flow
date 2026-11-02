@@ -36,7 +36,7 @@ export interface InstanceRef {
 export type InstanceState = "ready" | "running" | "submitted" | "accepted" | "cancelled";
 export const ACTIVE_STATES: readonly InstanceState[] = ["ready", "running", "submitted"];
 
-export type Trigger = { type: "root" } | { type: "forward" } | { type: "back"; edge: string };
+export type Trigger = { type: "root" } | { type: "forward" } | { type: "back"; edge: string } | { type: "manual" };
 
 export interface Submission {
   outcome?: string;
@@ -108,7 +108,9 @@ export type Command =
   | { type: "instance.submit"; node: string; agent?: string; outcome?: string; result?: string; note?: string }
   | { type: "instance.accept"; node: string }
   | { type: "instance.reject"; node: string; reason: string }
-  | { type: "instance.cancel"; node: string };
+  | { type: "instance.cancel"; node: string }
+  /** Start a new instance of an idle node by hand, e.g. after its agent died and the instance was cancelled. */
+  | { type: "instance.retry"; node: string };
 
 type E<T extends string, P> = { type: T; at: string } & P;
 
@@ -468,6 +470,14 @@ export function decide(state: GraphState, cmd: Command, now: string): GraphEvent
     case "instance.cancel": {
       const i = requireActive(cmd.node, ["ready", "running", "submitted"], "cancel");
       emit({ type: "instance.cancelled", at, node: i.node, n: i.n });
+      break;
+    }
+    case "instance.retry": {
+      const n = requireNode(cmd.node);
+      const busy = activeInstance(n);
+      if (busy) throw new GraphError("node_busy", `${instanceLabel(busy)} is ${busy.state}; cancel it first`);
+      const last = latestInstance(n);
+      emit({ type: "instance.created", at, node: n.id, n: n.instances.length + 1, trigger: { type: "manual" }, inputs: last?.inputs ?? [], held: n.spec.hold });
       break;
     }
     default: {

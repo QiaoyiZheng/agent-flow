@@ -1,7 +1,8 @@
 // How each agent kind is launched with the agent-flow protocol injected. Flags come from the step-0 spikes
 // (spikes/s2s3-agents/RESULT.md); docs/design.md section 9 explains each one.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentKind } from "@af/core";
 
@@ -23,27 +24,40 @@ export function loadConfig(home: string): AgentConfig {
   return { args: { ...DEFAULT_CONFIG.args, ...(user.args ?? {}) } };
 }
 
-export function launchArgs(kind: AgentKind, protocolFile: string, config: AgentConfig): string[] {
+/**
+ * Flags that start `kind` with the protocol injected. Herdr types the command into a shell, and macOS caps
+ * a typed line at 1024 bytes (MAX_CANON), so the protocol text never goes on the command line: claude and
+ * omp take a file path, codex takes a profile name.
+ */
+export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, config: AgentConfig): string[] {
   const extra = config.args[kind] ?? [];
   switch (kind) {
     case "claude":
       return ["--append-system-prompt-file", protocolFile, ...extra];
-    case "codex": {
-      // codex has no file flag for extra instructions; the protocol goes in as one line.
-      const oneLine = readFileSync(protocolFile, "utf8").replace(/\s*\n\s*/g, " ").trim();
-      return [
-        "-c",
-        "check_for_update_on_startup=false",
-        "-c",
-        "sandbox_workspace_write.network_access=true",
-        "-c",
-        `developer_instructions=${oneLine}`,
-        ...extra,
-      ];
-    }
+    case "codex":
+      return ["-p", writeCodexProfile(role, protocolFile), "-c", "sandbox_workspace_write.network_access=true", ...extra];
     case "omp":
       return [`--append-system-prompt=${protocolFile}`, ...extra];
   }
+}
+
+const TOML_LITERAL_FENCE = "'".repeat(3);
+
+/** codex reads $CODEX_HOME/<name>.config.toml for `-p <name>`. Writes agent-flow-<role>.config.toml and returns <name>. */
+export function writeCodexProfile(role: Role, protocolFile: string, codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex")) {
+  const name = `agent-flow-${role}`;
+  const text = readFileSync(protocolFile, "utf8");
+  if (text.includes(TOML_LITERAL_FENCE)) throw new Error(`${protocolFile} must not contain ${TOML_LITERAL_FENCE}; it is embedded as a TOML literal string`);
+  mkdirSync(codexHome, { recursive: true });
+  const toml = [
+    `# Written by agent-flow for agents it starts with \`codex -p ${name}\`. Safe to delete.`,
+    "check_for_update_on_startup = false",
+    `developer_instructions = ${TOML_LITERAL_FENCE}`,
+    `${text}${TOML_LITERAL_FENCE}`,
+    "",
+  ].join("\n");
+  writeFileSync(join(codexHome, `${name}.config.toml`), toml);
+  return name;
 }
 
 /** The line typed into an agent's terminal to wake it up. Matches what the protocols tell agents to look for. */

@@ -21,6 +21,8 @@ class FakeBackend implements TerminalBackend {
   prompts: { name: string; text: string }[] = [];
   envs = new Map<string, Record<string, string>>();
   blockOnStart = new Set<string>();
+  failOnStart = new Set<string>();
+  closed: string[] = [];
   private n = 0;
   async createWorkspace() {
     return { workspaceId: "w1", tabId: "w1:t0", paneId: "w1:p0" };
@@ -31,6 +33,7 @@ class FakeBackend implements TerminalBackend {
     return { tabId: `w1:t${k}`, paneId: `w1:p${k}` };
   }
   async startAgent(name: string, kind: AgentKind, paneId: string, args: string[]): Promise<StartResult> {
+    if (this.failOnStart.has(name)) return { ok: false, code: "timeout", message: "agent did not become ready" };
     const blocked = this.blockOnStart.has(name);
     this.agents.set(name, { name, paneId, tabId: paneId.replace("p", "t"), status: blocked ? "blocked" : "idle", kind, args, env: {} });
     return blocked ? { ok: false, code: "agent_not_ready", message: "blocked during startup" } : { ok: true };
@@ -44,7 +47,10 @@ class FakeBackend implements TerminalBackend {
   async readPane() {
     return "";
   }
-  async closeTab() {}
+  async closeTab(tabId: string) {
+    this.closed.push(tabId);
+    for (const [k, v] of this.agents) if (v.tabId === tabId) this.agents.delete(k);
+  }
   async closeWorkspace() {}
   terminalSessionArgv() {
     return [];
@@ -59,6 +65,7 @@ class FakeBackend implements TerminalBackend {
 
 function setup(opts: { git?: boolean } = { git: true }) {
   const home = tmp("af-home-");
+  process.env.CODEX_HOME = tmp("af-codex-"); // codex profiles must not land in the real ~/.codex
   const repo = tmp("af-repo-");
   if (opts.git) {
     git(repo, ["init", "-q", "-b", "main"]);
@@ -264,6 +271,41 @@ describe("orchestrator: conflicts, startup, reminders", () => {
     expect(Object.values(o.getRun(run).attention).map((a) => a.id)).not.toContain("blocked:lead");
   });
 
+  test("an agent that never starts: the instance is cancelled, the lead is told, retry gets a fresh agent", async () => {
+    const { repo, backend, o } = setup();
+    const { id: run } = await o.createRun({ cwd: repo });
+    backend.failOnStart.add(`${run}-w`);
+    o.graph({ run }, { type: "node.add", id: "w", spec: { task: "work", executor: { kind: "codex" } } });
+    await o.flush();
+    await o.flush(); // a second tick must not try again
+    expect(st(o, run, "w")).toBe("w#1:cancelled");
+    expect(o.getRun(run).agents.w!.status).toBe("exited");
+    expect(backend.closed.length).toBe(1);
+    expect(Object.keys(o.getRun(run).agents)).toEqual(["lead", "w"]);
+    expect(o.inbox({ run, agent: "lead" }).at(-1)!.body).toContain("af graph retry w");
+    expect(Object.values(o.getRun(run).attention).map((a) => a.id)).toContain("dispatch:w#1");
+
+    o.graph({ run, agent: "lead" }, { type: "instance.retry", node: "w" });
+    expect(Object.values(o.getRun(run).attention).map((a) => a.id)).not.toContain("dispatch:w#1");
+    await o.flush();
+    expect(st(o, run, "w")).toBe("w#2:running");
+    expect(latestInstance(o.getRun(run).graph.nodes.w!)!.agent).toBe("w-2");
+  });
+
+  test("retry retires the node's old agent even if it still looks alive", async () => {
+    const { repo, backend, o } = setup();
+    const { id: run } = await o.createRun({ cwd: repo });
+    o.graph({ run }, { type: "node.add", id: "w", spec: { task: "work", executor: { kind: "omp" } } });
+    await o.flush();
+    backend.set(`${run}-w`, "unknown"); // e.g. a confused agent
+    o.graph({ run }, { type: "instance.cancel", node: "w" });
+    o.graph({ run }, { type: "instance.retry", node: "w" });
+    await o.flush();
+    expect(o.getRun(run).agents.w!.status).toBe("exited");
+    expect(backend.closed).toContain(o.getRun(run).agents.w!.tabId!);
+    expect(latestInstance(o.getRun(run).graph.nodes.w!)!.agent).toBe("w-2");
+  });
+
   test("an agent that disappears from Herdr while working raises attention", async () => {
     const { repo, backend, o } = setup();
     const { id: run } = await o.createRun({ cwd: repo });
@@ -273,6 +315,9 @@ describe("orchestrator: conflicts, startup, reminders", () => {
     await o.flush();
     expect(o.getRun(run).agents.w!.status).toBe("exited");
     expect(Object.values(o.getRun(run).attention).map((a) => a.kind)).toContain("agent_exited");
+    expect(o.inbox({ run, agent: "lead" }).at(-1)!.body).toContain("af graph cancel w && af graph retry w");
+    o.graph({ run }, { type: "instance.cancel", node: "w" });
+    expect(Object.values(o.getRun(run).attention).map((a) => a.kind)).not.toContain("agent_exited");
   });
 });
 
@@ -321,6 +366,10 @@ describe("orchestrator: messaging and other entry points", () => {
     const meta = await o.createRun({ cwd: repo, team: "team.yaml" });
     expect(meta.lead).toBe("boss");
     expect(backend.agents.get(`${meta.id}-reviewer`)!.kind).toBe("codex");
+    const args = backend.agents.get(`${meta.id}-reviewer`)!.args;
+    expect(args.slice(0, 2)).toEqual(["-p", "agent-flow-worker"]);
+    expect(args.join(" ").length).toBeLessThan(200); // never the protocol itself: typed lines are capped at 1024 bytes
+    expect(readFileSync(join(process.env.CODEX_HOME!, "agent-flow-worker.config.toml"), "utf8")).toContain("af done --outcome");
     expect(o.getRun(meta.id).agents.reviewer!.cwd).toBe(meta.integration!);
     expect(o.inbox({ run: meta.id, agent: "reviewer" })[0]!.body).toContain("review diffs");
     await expect(o.createRun({ cwd: repo, team: "missing" })).rejects.toThrow(/no team file/);
