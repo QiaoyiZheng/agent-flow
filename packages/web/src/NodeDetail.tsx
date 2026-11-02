@@ -8,7 +8,7 @@ import { ago, basename, executorKind, executorLabel, kindColor, nodeLook } from 
 
 type Seg = "overview" | "terminal" | "messages" | "diff" | "opened";
 
-export function NodeDetail({ run, nodeId, onClose, onOpen }: { run: RunState; nodeId: string; onClose: () => void; onOpen: (target: string) => void }) {
+export function NodeDetail({ run, nodeId, onClose, onOpen, onGoTo }: { run: RunState; nodeId: string; onClose: () => void; onOpen: (target: string) => void; onGoTo: (paneId: string) => void }) {
   const [seg, setSeg] = useState<Seg>("overview");
   const [reason, setReason] = useState("");
   const [rejecting, setRejecting] = useState(false);
@@ -60,6 +60,11 @@ export function NodeDetail({ run, nodeId, onClose, onOpen }: { run: RunState; no
                   <dt>agent</dt>
                   <dd>
                     {agent.name} · {agent.status}
+                    {agent.paneId && (
+                      <a href="#" style={{ color: "var(--accent)", marginLeft: 8 }} onClick={(e) => (e.preventDefault(), onGoTo(agent.paneId!))}>
+                        go to pane
+                      </a>
+                    )}
                   </dd>
                   <dt>directory</dt>
                   <dd style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{agent.cwd}</dd>
@@ -99,7 +104,17 @@ export function NodeDetail({ run, nodeId, onClose, onOpen }: { run: RunState; no
             ))}
           </>
         )}
-        {seg === "terminal" && (agent?.paneId ? <Terminal key={agent.paneId} paneId={agent.paneId} /> : <div className="empty" style={{ padding: 12 }}>No agent yet.</div>)}
+        {seg === "terminal" &&
+          (agent?.paneId ? (
+            <>
+              <Terminal key={agent.paneId} paneId={agent.paneId} mode="observe" />
+              <button className="btn goto" onClick={() => onGoTo(agent.paneId!)}>
+                Go to pane ↗
+              </button>
+            </>
+          ) : (
+            <div className="empty" style={{ padding: 12 }}>No agent yet.</div>
+          ))}
         {seg === "messages" && <Messages run={run} agent={agent?.name} node={nodeId} />}
         {seg === "diff" && <DiffView node={nodeId} />}
         {seg === "opened" && (

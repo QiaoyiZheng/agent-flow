@@ -1,0 +1,25 @@
+// For an agent pane: does terminal.scroll move Herdr's viewport (good) or reach the app as input (bad)?
+import { Terminal } from "@xterm/headless";
+const pane = process.argv[2];
+const COLS = 120, ROWS = 36;
+const proc = Bun.spawn(["herdr", "terminal", "session", "control", pane, "--takeover", "--cols", `${COLS}`, "--rows", `${ROWS}`], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+const term = new Terminal({ cols: COLS, rows: ROWS, scrollback: 0, allowProposedApi: true });
+(async () => { const r = (proc.stdout as ReadableStream<Uint8Array>).getReader(); const d = new TextDecoder(); let b = ""; for (;;) { const { value, done } = await r.read(); if (done) break; b += d.decode(value, { stream: true }); let i; while ((i = b.indexOf("\n")) >= 0) { const l = b.slice(0, i); b = b.slice(i + 1); const m = JSON.parse(l); if (m.type === "terminal.frame") term.write(Buffer.from(m.bytes, "base64")); } } })();
+(async () => { const r = (proc.stderr as ReadableStream<Uint8Array>).getReader(); for (;;) { const { value, done } = await r.read(); if (done) break; console.log("ERR", new TextDecoder().decode(value).trim()); } })();
+const send = (o: object) => { proc.stdin.write(JSON.stringify(o) + "\n"); proc.stdin.flush(); };
+const screen = () => { const b = term.buffer.active; const out: string[] = []; for (let y = 0; y < ROWS; y++) out.push(b.getLine(b.viewportY + y)?.translateToString(true) ?? ""); return out; };
+const sig = (s: string[]) => s.filter((l) => l.trim()).slice(0, 2).map((l) => l.trim().slice(0, 60)).join(" | ");
+await Bun.sleep(1200);
+const before = screen();
+const pi0 = JSON.parse(Bun.spawnSync(["herdr", "pane", "get", pane]).stdout.toString()).result.pane.scroll;
+send({ type: "terminal.scroll", direction: "up", lines: 15 });
+await Bun.sleep(1000);
+const after = screen();
+const pi1 = JSON.parse(Bun.spawnSync(["herdr", "pane", "get", pane]).stdout.toString()).result.pane.scroll;
+console.log(`alt buffer: ${term.buffer.active.type}`);
+console.log(`herdr scroll before: ${JSON.stringify(pi0)}\nherdr scroll after:  ${JSON.stringify(pi1)}`);
+console.log(`top before: ${sig(before)}\ntop after:  ${sig(after)}`);
+console.log(`screen changed: ${before.join("\n") !== after.join("\n")}`);
+send({ type: "terminal.scroll", direction: "down", lines: 1000 });
+await Bun.sleep(600);
+send({ type: "terminal.release" }); await Bun.sleep(200); proc.kill(); process.exit(0);

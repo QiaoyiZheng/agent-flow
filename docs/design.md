@@ -195,7 +195,11 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 | `af inbox [--all]` | 所有 agent | 读消息 |
 | `af reply <msg-id> <text> [--attach PATH]` | 所有 agent | 回复消息 |
 | `af done [--outcome X] [--result PATH] [--note ...]` | 下属 | 提交当前节点 |
-| `af open <url\|path>` | 所有 agent、人 | 在 UI 里打开网页或文件 |
+| `af ls [--json]` | 所有 agent、人 | 列出机器、workspace、tab、pane（agent、查看器、shell） |
+| `af read <agent\|pane> [--lines N]` | 所有 agent | 读另一个 agent 或 pane 最近的输出 |
+| `af open <path\|url> [--down] [--of PANE] [--in VIEWER] [--tab [WS]]` | 所有 agent、人 | 在自己旁边（或指定 pane 旁边、已有查看器里、新 tab 里）显示文件、文件夹或网页 |
+| `af split [PANE] [--down] [--agent K]` | 所有 agent、人 | 分屏出一个 shell，或一个 agent（在 run 的 workspace 里会作为 run 的成员加入） |
+| `af close <pane>` | 所有 agent、人 | 关闭 pane |
 
 - 用 `bun build --compile` 打包成单个二进制，启动要快，因为 agent 会频繁调用它。
 - 所有命令都支持 `--json`，方便 agent 解析输出。
@@ -222,36 +226,43 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 
 ## 10. UI
 
-### 10.1 布局：以 lead 对话为中心
+### 10.1 布局（2026-11-02 第一次 UI 评审后改定）
 
 ```
-+- runs ------+- [lead] [shell] [report.md] [localhost:3000] -+- 图 ----------+
-| * auth-fix  | > refactor login to ...                       | design  ✓     |
-|   docs-sync | ● built 4 nodes, dispatching...              |  ├ api   ●    |
-|-------------|                                               |  └ ui    ●    |
-| 需要你 2     |                                               | code ⟳ 2/3    |
-| ! coder-2   |                                               |               |
-|   等待审批    |                                               | 点节点 →       |
-| ! api 合并冲突|  > _                                          | 终端|消息|diff  |
-+-------------+-----------------------------------------------+---------------+
-| $ 持久终端                                                        (ctrl+`)  |
-+-----------------------------------------------------------------------------+
++- 需要你 · rhv93 --+- [lead] [div] [review] [+ tab] ------------+- 图 | 消息 ---+
+| ! div 待校验       | +- ● lead claude idle -+- ≡ calc.js -------+ | design ✓       |
+|-------------------| | > ...                | export function   | |  ├ api   ●     |
+| 机器              | |                      |   mul(a, b) {     | |  └ ui    ●     |
+| ▾ Local           | +- ● div omp ----------+                   | | code ⟳ 1/3     |
+|   ▸ llm-solver    | | ...                  |                   | |                |
+|   ▾ af rhv93 ◆rhv93| +----------------------+-------------------+ | 点节点 → 详情   |
+|     ● lead claude |                                              |                |
+|     ● div  omp    |                                              |                |
+| ▸ SSH machines 12 |                                              |                |
++-------------------+----------------------------------------------+----------------+
+| $ 常驻终端                                                              (ctrl+`) |
++-----------------------------------------------------------------------------------+
 ```
 
-- **左栏**：run 列表；"需要你"待办（agent 卡在审批、合并冲突、环到达上限、agent 异常退出、lead 主动找你）。
-- **中间**：标签页。默认是 lead 的终端，还可以开：
-  - **终端**：普通 shell，也是 Herdr pane，所以是持久的。
-  - **网页**：用 iframe 嵌入。禁止被嵌入的网站提供"在系统浏览器打开"按钮；以后换成 Tauri webview 就没这个限制了。
-  - **文件**：只读。Shiki 代码高亮、Markdown、图片、PDF、diff，带"在 VS Code / $EDITOR 打开"按钮。
-- **右栏**：实时的图（React Flow）。节点上显示状态、执行者、轮数；环显示 `⟳ 当前轮 / 上限`。
-- **节点详情**（点节点后打开）：这个节点 agent 的终端 / 消息 / diff / 它打开过的文件和网页。也可以在这里开终端、文件、网页标签，默认目录是这个节点的 worktree。
-- **底部**：一个常驻的持久终端抽屉，按 ctrl+` 展开或收起。
-- 下属 agent 平时不占屏幕。
+- **布局归 Herdr 管。** 网页显示 Herdr 真实的 机器 → workspace → tab → 分屏 pane；在网页里分屏、关闭、拖分隔线都直接改 Herdr，所以 Herdr TUI 和网页永远一致，在 TUI 里建的分屏网页里也看得到。
+- **左栏**：顶部是当前 run 的"需要你"；下面是一棵树：机器 → workspace（run 的 workspace 带 ◆ 标记和待办数）→ 其中的 agent 及状态。点 agent 跳到它所在的 tab 和 pane。已关闭 workspace 的旧 run 列在"Past runs"。SSH 机器折叠成一组。
+- **中间**：所选 workspace 的 Herdr tab；每个 tab 是 Herdr 的二叉分屏树。pane 有三种：终端（shell）、agent、查看器（文件 / 文件夹 / 网页）。pane 头上有分屏（右 / 下）、"＋"（在旁边开 claude / codex / omp agent，或文件 / URL）、关闭。run 的 workspace 默认打开 lead 的 tab。
+- **右栏**：只在 run 的 workspace 里出现：图（或消息列表）+ 节点详情。节点详情里的终端是只读观察模式，不抢分屏里那个 pane 的控制权，旁边有"Go to pane"跳过去。
+- **底部**：常驻终端抽屉，它自己的 Herdr workspace 不在树里显示。
 
-### 10.2 `af open` 打开到哪里
+### 10.2 查看器 pane 和 `af open`
 
-- lead 或人执行：在中间区域开新标签。
-- 下属执行：挂到它那个节点的详情面板里，图上的节点出现一个角标，**不抢焦点**。
+- 查看器是一个普通的 Herdr pane，里面运行 `af viewer`。server 在 `~/.agent-flow/views.json` 里记"哪个 pane 显示什么"。网页看到这个记录，就画高亮的文件 / Markdown / 图片 / PDF / 网页；Herdr TUI 里则显示 `af viewer` 打出的纯文本（有 bat 就用 bat 高亮）。pane 被关掉后记录自动清除。
+- `af open` 默认在**调用者自己的 pane 旁边**开查看器，所以 worker 开的文件出现在它自己的 tab 里，不抢用户的焦点；`--of` 指定开在谁旁边，`--in` 换掉已有查看器的内容（避免越开越多），`--tab` 开新 tab。run 里的调用仍然记一条 `open.requested`，节点详情的 "opened" 列表照旧。
+- agent 也能直接用 `herdr` CLI 做其余的排布（`herdr pane move`、`herdr tab create`……），因为它们本来就跑在 Herdr pane 里。
+
+### 10.2.1 与 Herdr 同步的实现（实测）
+
+- server 维护一份 Herdr 模型：`session.snapshot`（约 110 ms）+ 每个 tab 的 `layout.export`（二叉树：`split{direction, ratio, first, second}` / `pane{pane_id}`）。只对布局签名变了的 tab 重新导出。
+- 触发：订阅 Herdr 的生命周期事件（workspace / tab / pane / layout，全部可以不带过滤条件订阅；只有 `pane.agent_status_changed` 必须指定 pane），80 ms 防抖；外加每 1.5 秒轮询一次以更新 agent 状态。变化时推给所有网页。
+- 分隔线：`layout.set_split_ratio {tab_id, path, ratio}`，path 是从根往下的布尔数组，`false` = first，`true` = second（实测）。
+- 远程机器：`herdr machine list` 能列出；但本机装的 Herdr 0.9.0 还没有 `--machine`（0.9.5 才有），而且 Herdr 不转发终端实时流。所以远程机器暂时只显示名字。要浏览远程，需要先升级 Herdr（`herdr update`，由用户决定）。
+- 已知副作用：网页打开某个 pane 时，会把它的 PTY 调成网页里的尺寸；如果用户同时在 Herdr TUI 里看着同一个 tab，两边会按"最后操作的一方"来回调尺寸（Herdr 的多客户端规则）。
 
 ### 10.3 视觉
 

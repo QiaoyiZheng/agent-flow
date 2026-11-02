@@ -1,0 +1,10 @@
+import { Terminal } from "@xterm/headless";
+const pane = process.argv[2]!;
+const p = Bun.spawn(["herdr", "terminal", "session", "observe", pane, "--cols", "120", "--rows", "36"], { stdout: "pipe", stderr: "ignore" });
+const term = new Terminal({ cols: 120, rows: 36, allowProposedApi: true });
+let raw = "";
+(async () => { const r = (p.stdout as ReadableStream<Uint8Array>).getReader(); const d = new TextDecoder(); let b = ""; for (;;) { const { value, done } = await r.read(); if (done) break; b += d.decode(value, { stream: true }); let i; while ((i = b.indexOf("\n")) >= 0) { const m = JSON.parse(b.slice(0, i)); b = b.slice(i + 1); if (m.type === "terminal.frame") { const by = Buffer.from(m.bytes, "base64"); raw += by.toString("latin1"); term.write(by); } } } })();
+await Bun.sleep(1500);
+const dec = [...raw.matchAll(/\x1b\[\?([\d;]+)([hl])/g)].map((m) => m[1] + m[2]);
+console.log(pane, "DEC modes in stream:", [...new Set(dec)].join(" "), "| xterm mouseTrackingMode:", term.modes.mouseTrackingMode);
+p.kill(); process.exit(0);

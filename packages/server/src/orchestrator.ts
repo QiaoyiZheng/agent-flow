@@ -159,6 +159,7 @@ export class Orchestrator {
         lead: r.state.meta!.lead,
         attention: Object.keys(r.state.attention).length,
         quiescent: r.state.graph.quiescent,
+        workspace: r.state.meta!.herdrWorkspace,
       }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
@@ -289,7 +290,7 @@ export class Orchestrator {
       meta.integration = join(repo, ".agent-flow", "worktrees", id, "_main");
       git.addWorktree(repo, meta.integration, meta.branch, meta.base);
     }
-    const ws = await this.opts.backend.createWorkspace(`af ${id}`, cwd);
+    const ws = await this.opts.backend.createWorkspace(`af ${id}`, cwd, this.agentEnv(id, lead));
     meta.herdrWorkspace = ws.workspaceId;
 
     this.runs.set(id, run);
@@ -297,7 +298,8 @@ export class Orchestrator {
     if (req.prompt) run.direct.set(lead, [req.prompt]);
 
     const leadKind = team?.agents[lead]?.kind ?? req.leadKind ?? "claude";
-    const spawns = [this.spawnAgent(run, { name: lead, kind: leadKind, role: team?.agents[lead]?.role, cwd, protocol: "lead" })];
+    await this.opts.backend.renameTab(ws.tabId, lead);
+    const spawns = [this.spawnAgent(run, { name: lead, kind: leadKind, role: team?.agents[lead]?.role, cwd, protocol: "lead", pane: { paneId: ws.paneId, tabId: ws.tabId } })];
     for (const [name, a] of Object.entries(team?.agents ?? {}))
       if (name !== lead) spawns.push(this.spawnAgent(run, { name, kind: a.kind, role: a.role, cwd: meta.integration ?? cwd, protocol: "worker" }));
     await Promise.all(spawns);
@@ -332,16 +334,55 @@ export class Orchestrator {
     }
   }
 
-  async spawn(caller: Caller, req: SpawnRequest) {
+  async spawn(caller: Caller, req: SpawnRequest & { place?: { split: string; direction: "right" | "down" } }) {
     const run = this.requireRun(caller.run);
     this.requireLeadOrUser(run, caller);
     if (!AGENT_KINDS.includes(req.kind)) throw new AfError("bad_kind", `kind must be one of ${AGENT_KINDS.join(", ")}`);
     const meta = run.state.meta!;
-    await this.spawnAgent(run, { name: req.name, kind: req.kind, role: req.role, cwd: meta.integration ?? meta.cwd, protocol: "worker" });
-    return run.state.agents[req.name]!;
+    const name = req.name || this.uniqueAgentName(run, req.kind);
+    await this.spawnAgent(run, { name, kind: req.kind, role: req.role, cwd: meta.integration ?? meta.cwd, protocol: "worker", place: req.place });
+    return run.state.agents[name]!;
   }
 
-  private async spawnAgent(run: Run, a: { name: string; kind: AgentKind; role?: string; cwd: string; node?: string; protocol: Role }) {
+  /** Herdr workspace id -> run id, for runs that are not stopped first. */
+  runByWorkspace(workspaceId: string): string | undefined {
+    const runs = [...this.runs.values()].filter((r) => r.state.meta?.herdrWorkspace === workspaceId);
+    return (runs.find((r) => !r.state.stopped) ?? runs[0])?.id;
+  }
+
+  workspaceRuns(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const r of this.runs.values()) {
+      const ws = r.state.meta?.herdrWorkspace;
+      if (ws && (!out[ws] || !r.state.stopped)) out[ws] = r.id;
+    }
+    return out;
+  }
+
+  /** Run agent name -> pane id, for resolving `af read <agent>`. */
+  agentPanes(runId: string | undefined): Record<string, string | undefined> {
+    const run = runId ? this.runs.get(runId) : undefined;
+    return run ? Object.fromEntries(Object.values(run.state.agents).filter((a) => a.status !== "exited").map((a) => [a.name, a.paneId])) : {};
+  }
+
+  /** Record that someone showed a file in a run, so the node detail can list it. */
+  recordOpen(caller: Caller, target: string) {
+    const run = caller.run ? this.runs.get(caller.run) : undefined;
+    if (!run) return;
+    const by = caller.agent ?? USER;
+    const node = caller.agent && caller.agent !== run.state.meta!.lead ? this.currentLabel(run, caller.agent) : undefined;
+    const open = { id: `o${run.state.opens.length + 1}`, by, target, node, at: this.now() };
+    this.emit(run, { type: "open.requested", at: open.at, open });
+  }
+
+  private agentEnv(runId: string, agent: string) {
+    return { AF_RUN: runId, AF_AGENT: agent, AF_SOCK: this.opts.sock, PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
+  }
+
+  private async spawnAgent(
+    run: Run,
+    a: { name: string; kind: AgentKind; role?: string; cwd: string; node?: string; protocol: Role; place?: { split: string; direction: "right" | "down" }; pane?: { paneId: string; tabId: string } },
+  ) {
     if (!NODE_ID.test(a.name)) throw new AfError("bad_name", `agent name must match ${NODE_ID}`);
     if (a.name === USER || a.name === SYSTEM) throw new AfError("bad_name", `${a.name} is reserved`);
     if (run.state.agents[a.name]) throw new AfError("duplicate_agent", `agent ${a.name} already exists in run ${run.id}`);
@@ -350,8 +391,12 @@ export class Orchestrator {
     this.emit(run, { type: "agent.spawned", at: this.now(), agent: rec });
     run.starting.add(a.name);
     try {
-      const env = { AF_RUN: run.id, AF_AGENT: a.name, AF_SOCK: this.opts.sock, PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
-      const tab = await this.opts.backend.createTab(meta.herdrWorkspace!, a.cwd, a.name, env);
+      const env = this.agentEnv(run.id, a.name);
+      const tab = a.pane
+        ? a.pane
+        : a.place
+        ? await this.opts.backend.splitPane(a.place.split, a.place.direction, a.cwd, env)
+        : await this.opts.backend.createTab(meta.herdrWorkspace!, a.cwd, a.name, env);
       this.emit(run, { type: "agent.placed", at: this.now(), name: a.name, paneId: tab.paneId, tabId: tab.tabId });
       const proto = join(run.dir, "protocol", `${a.protocol}.md`);
       const res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config));
@@ -553,6 +598,11 @@ export class Orchestrator {
   // -------------------------------------------------------------------------------------------
   // UI helpers
 
+  shellWorkspace(): string | undefined {
+    const file = join(this.opts.home, "shell.json");
+    return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")).workspaceId as string | undefined) : undefined;
+  }
+
   dismiss(caller: Caller, id: string) {
     const run = this.requireRun(caller.run);
     this.requireLeadOrUser(run, caller);
@@ -560,20 +610,11 @@ export class Orchestrator {
     this.resolve(run, id);
   }
 
-  /** A plain shell tab inside the run's Herdr workspace. */
-  async newTerminal(caller: Caller, cwd?: string) {
-    const run = this.requireRun(caller.run);
-    const meta = run.state.meta!;
-    const dir = cwd && existsSync(cwd) ? cwd : (meta.integration ?? meta.cwd);
-    const env = { AF_RUN: run.id, AF_SOCK: this.opts.sock, PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
-    return this.opts.backend.createTab(meta.herdrWorkspace!, dir, "shell", env);
-  }
-
   /** The persistent shell shown in the UI's bottom drawer: one Herdr workspace that outlives runs. */
-  async shell(): Promise<{ paneId: string }> {
+  async shell(): Promise<{ paneId: string; workspaceId?: string }> {
     const file = join(this.opts.home, "shell.json");
     if (existsSync(file)) {
-      const saved = JSON.parse(readFileSync(file, "utf8")) as { paneId: string };
+      const saved = JSON.parse(readFileSync(file, "utf8")) as { paneId: string; workspaceId?: string };
       if (await this.opts.backend.paneExists(saved.paneId)) return saved;
     }
     const ws = await this.opts.backend.createWorkspace("af shell", process.env.HOME ?? "/");

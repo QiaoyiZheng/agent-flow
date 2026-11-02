@@ -3,15 +3,17 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
-import type { Caller, ClientPush, ServerPush } from "@af/core";
+import type { AgentKind, Caller, ClientPush, ServerPush, ShowRequest } from "@af/core";
+import { AGENT_KINDS } from "@af/core";
 import { AfError, type Orchestrator } from "./orchestrator.ts";
+import type { Workspaces } from "./workspaces.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
-export function makeHandler(o: Orchestrator) {
+export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBackend) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/api/, "");
@@ -43,14 +45,43 @@ export function makeHandler(o: Orchestrator) {
         case "POST /inbox":
           return json(o.inbox(caller, !!body.all));
         case "POST /open":
-          return json(o.open(caller, body.target));
+        case "POST /show": {
+          const req = body as ShowRequest;
+          const rec = await w.show(req, caller.agent ?? "user");
+          o.recordOpen(caller, req.target);
+          return json(rec);
+        }
+        case "GET /view":
+          return json(w.view(body.pane) ?? null);
+        case "GET /ls":
+          return json({ model: w.model, views: w.views, runs: o.workspaceRuns(), shellWorkspace: o.shellWorkspace() });
+        case "POST /pane/read": {
+          const pane = w.resolvePane(body.ref, o.agentPanes(caller.run));
+          return json({ pane, text: await w.read(pane, Number(body.lines) || 120) });
+        }
+        case "POST /pane/split": {
+          const direction = body.direction === "down" ? "down" : "right";
+          if (body.kind === "agent") return json(await splitAgent(o, w, backend, body.pane, direction, body.agentKind));
+          return json(await w.split(body.pane, direction, { cwd: body.cwd }));
+        }
+        case "POST /pane/close":
+          await w.close(body.pane);
+          return json({ ok: true });
+        case "POST /tab/new":
+          return json(await w.newTab(body.workspace, body.cwd));
+        case "POST /tab/close":
+          await w.closeTab(body.tab);
+          return json({ ok: true });
+        case "POST /workspace/new":
+          return json(await w.newWorkspace(body.label || "workspace", body.cwd));
+        case "POST /layout/ratio":
+          await w.setRatio(body.tab, body.path, Number(body.ratio));
+          return json({ ok: true });
         case "POST /spawn":
           return json(await o.spawn(caller, body));
         case "POST /attention/dismiss":
           o.dismiss(caller, body.id);
           return json({ ok: true });
-        case "POST /terminal":
-          return json(await o.newTerminal(caller, body.cwd));
         case "GET /shell":
           return json(await o.shell());
         case "POST /edit":
@@ -67,6 +98,24 @@ export function makeHandler(o: Orchestrator) {
       return fail("internal", (e as Error).message, 500);
     }
   };
+}
+
+/** Split a pane and start an agent in the new half. Inside a run it joins the run (protocol, env, mail); elsewhere it is a plain agent. */
+async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBackend, pane: string, direction: "right" | "down", kind: AgentKind) {
+  if (!AGENT_KINDS.includes(kind)) throw new AfError("bad_kind", `kind must be one of ${AGENT_KINDS.join(", ")}`);
+  const base = w.model.panes.find((p) => p.id === pane);
+  if (!base) throw new AfError("unknown_pane", `no Herdr pane ${pane}`, 404);
+  const run = o.runByWorkspace(base.workspaceId);
+  if (run && !o.getRun(run).stopped) {
+    const a = await o.spawn({ run }, { name: "", kind, place: { split: pane, direction } });
+    await w.refresh();
+    return { paneId: a.paneId, agent: a.name, run };
+  }
+  const { paneId } = await w.split(pane, direction);
+  const name = `${kind}-${paneId.replace(/[^a-z0-9]/gi, "").toLowerCase()}`.slice(0, 32);
+  const r = await backend.startAgent(name, kind, paneId, []);
+  await w.refresh();
+  return { paneId, agent: name, started: r.ok };
 }
 
 /** Open a file in the user's editor: VS Code when installed, else the system default. */
@@ -99,8 +148,14 @@ interface WsData {
   unsub?: () => void;
 }
 
-export function serve(o: Orchestrator, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string }) {
-  const handler = makeHandler(o);
+export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string }) {
+  const handler = makeHandler(o, w, opts.backend);
+  const clients = new Set<import("bun").ServerWebSocket<WsData>>();
+  const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views } satisfies ServerPush);
+  w.onChange(() => {
+    const msg = herdrPush();
+    for (const c of clients) c.send(msg);
+  });
 
   const unix = Bun.serve({ unix: opts.sock, fetch: handler });
 
@@ -135,6 +190,8 @@ export function serve(o: Orchestrator, opts: { sock: string; port: number; token
         const send = (m: ServerPush) => ws.send(JSON.stringify(m));
         ws.data.bridge = new TerminalBridge(opts.backend, send);
         send({ type: "hello", runs: o.listRuns() });
+        ws.send(herdrPush());
+        clients.add(ws);
       },
       message(ws, raw) {
         let msg: ClientPush;
@@ -152,7 +209,9 @@ export function serve(o: Orchestrator, opts: { sock: string; port: number; token
           }
           ws.data.unsub = o.subscribe((run, event) => {
             if (run === msg.run) ws.send(JSON.stringify({ type: "event", run, event } satisfies ServerPush));
-            else if (event.type === "run.created" || event.type === "attention.raised" || event.type === "attention.resolved")
+            if (run === msg.run && ["run.stopped", "run.quiescent", "attention.raised", "attention.resolved"].includes(event.type))
+              ws.send(JSON.stringify({ type: "hello", runs: o.listRuns() } satisfies ServerPush));
+            else if (["run.created", "run.stopped", "run.quiescent", "attention.raised", "attention.resolved"].includes(event.type))
               ws.send(JSON.stringify({ type: "hello", runs: o.listRuns() } satisfies ServerPush));
           });
           return;
@@ -160,6 +219,7 @@ export function serve(o: Orchestrator, opts: { sock: string; port: number; token
         ws.data.bridge?.handle(msg);
       },
       close(ws) {
+        clients.delete(ws);
         ws.data.unsub?.();
         ws.data.bridge?.closeAll();
       },

@@ -40,8 +40,18 @@ If a merge conflicts, you get a message. Reject with instructions or add a node 
 
 ## Talk
   af send <agent> "<text>"    af inbox    af reply <msg-id> "<text>"
-  af open <url|path>          # show a page or file to the user
   af spawn <name> --kind claude|codex|omp [--role "<role>"]
+
+## Panes and windows
+The user sees Herdr's workspaces, tabs and split panes in the web UI. You can arrange them:
+  af ls                                   # machines, workspaces, tabs, panes: agents, viewers, shells
+  af read <agent|pane> [--lines N]        # what another agent or pane is showing
+  af open <path|url> [--down]             # show a file, folder or page in a new pane next to yours
+  af open <path|url> --of <pane>          # ... next to another pane, e.g. beside a worker
+  af open <path|url> --in <viewer pane>   # ... in an existing viewer pane (reuse it, do not pile up panes)
+  af split [<pane>] [--down] [--agent claude|codex|omp]   # a shell, or a helper agent joining this run
+  af close <pane>
+Show the user what matters (a diff summary, a report, a key file) instead of describing it. The herdr CLI also works for anything else (herdr pane move, herdr tab create, ...).
 
 ## Rules
 - Keep the user informed here: what you built, what is running, and what needs them.

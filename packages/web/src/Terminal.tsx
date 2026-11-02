@@ -34,6 +34,7 @@ let seq = 0;
 
 export function Terminal({ paneId, mode = "control", autoFocus = false }: { paneId: string; mode?: "control" | "observe"; autoFocus?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
+  const termRef = useRef<XTerm | undefined>(undefined);
   const [status, setStatus] = useState<"connecting" | "live" | "closed">("connecting");
 
   useEffect(() => {
@@ -65,9 +66,13 @@ export function Terminal({ paneId, mode = "control", autoFocus = false }: { pane
       } else setStatus("closed");
     });
     send({ type: "term.open", id, paneId, mode, cols: term.cols, rows: term.rows });
+    termRef.current = term;
     if (autoFocus && mode === "control") term.focus();
 
     const input = term.onData((text) => send({ type: "term.input", id, text }));
+    // With scrollback 0, xterm would turn wheel events into Up/Down arrow keys and type them into the agent
+    // (recalling old prompts). Herdr owns the history, so the wheel goes to Herdr instead.
+    term.attachCustomWheelEventHandler(() => false);
     let wheelAcc = 0;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -98,8 +103,13 @@ export function Terminal({ paneId, mode = "control", autoFocus = false }: { pane
       off();
       send({ type: "term.close", id });
       term.dispose();
+      termRef.current = undefined;
     };
-  }, [paneId, mode, autoFocus]);
+  }, [paneId, mode]);
+
+  useEffect(() => {
+    if (autoFocus && mode === "control") termRef.current?.focus();
+  }, [autoFocus, mode]);
 
   return (
     <div className="term">

@@ -35,7 +35,8 @@ export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, co
     case "claude":
       return ["--append-system-prompt-file", protocolFile, ...extra];
     case "codex":
-      return ["-p", writeCodexProfile(role, protocolFile), "-c", "sandbox_workspace_write.network_access=true", ...extra];
+      // --no-alt-screen: in the alternate screen Herdr keeps no scrollback, so the UI could not scroll codex back
+      return ["-p", writeCodexProfile(role, protocolFile), "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];
     case "omp":
       return [`--append-system-prompt=${protocolFile}`, ...extra];
   }

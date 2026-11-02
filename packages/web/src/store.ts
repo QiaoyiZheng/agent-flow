@@ -1,7 +1,7 @@
 // Client state: one WebSocket to the af server. Run state is rebuilt with the same reducer the server uses.
 
 import { useSyncExternalStore } from "react";
-import { type ClientPush, type RunState, type RunSummary, type ServerPush, applyRun } from "@af/core";
+import { type ClientPush, type HerdrModel, type RunState, type RunSummary, type ServerPush, type ViewRec, applyRun } from "@af/core";
 
 const params = new URLSearchParams(location.search);
 export const TOKEN = params.get("token") ?? localStorage.getItem("af-token") ?? "";
@@ -16,9 +16,11 @@ interface State {
   run?: RunState;
   /** bumps on every applied event so components re-render */
   version: number;
+  herdr?: HerdrModel;
+  views: Record<string, ViewRec>;
 }
 
-let state: State = { connected: false, runs: [], version: 0 };
+let state: State = { connected: false, runs: [], version: 0, views: {} };
 const subs = new Set<() => void>();
 const termSubs = new Map<string, TermListener>();
 let ws: WebSocket | undefined;
@@ -53,10 +55,12 @@ function connect() {
     switch (m.type) {
       case "hello": {
         set({ runs: m.runs });
-        const pick = state.runId ?? params.get("run") ?? m.runs.find((r) => !r.stopped)?.id ?? m.runs[0]?.id;
-        if (pick && pick !== state.runId) watch(pick);
+        if (state.runId && !m.runs.some((r) => r.id === state.runId)) watch(undefined);
         break;
       }
+      case "herdr":
+        set({ herdr: m.model, views: m.views });
+        break;
       case "snapshot":
         if (m.run === state.runId) set({ run: m.state });
         break;
@@ -74,12 +78,11 @@ function connect() {
   };
 }
 
-export function watch(runId: string) {
+/** Follow one run's events (its graph, mail, attention). undefined stops following. */
+export function watch(runId: string | undefined) {
+  if (runId === state.runId) return;
   set({ runId, run: undefined });
-  send({ type: "watch", run: runId });
-  const u = new URL(location.href);
-  u.searchParams.set("run", runId);
-  history.replaceState(null, "", u);
+  if (runId) send({ type: "watch", run: runId });
 }
 
 export function onTerm(id: string, fn: TermListener) {

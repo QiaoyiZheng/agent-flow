@@ -20,9 +20,29 @@ const cdp = (method: string, params: object = {}) => new Promise<any>((r) => { c
 await cdp("Emulation.setDeviceMetricsOverride", { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 await cdp("Page.navigate", { url });
 await Bun.sleep(WAIT);
+const wheel = args.flatMap((a, i) => (a === "--wheel" ? [args[i + 1]!.split(",").map(Number)] : []));
+for (const [x, y, dy, times = 1] of wheel)
+  for (let k = 0; k < times!; k++) {
+    await cdp("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: dy });
+    await Bun.sleep(60);
+  }
+if (wheel.length) await Bun.sleep(800);
+for (const [i, a] of args.entries())
+  if (a === "--drag") {
+    const [x1, y1, x2, y2] = args[i + 1]!.split(",").map(Number) as [number, number, number, number];
+    await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: x1, y: y1 });
+    await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: x1, y: y1, button: "left", clickCount: 1 });
+    for (let k = 1; k <= 10; k++) {
+      await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: x1 + ((x2 - x1) * k) / 10, y: y1 + ((y2 - y1) * k) / 10, button: "left", buttons: 1 });
+      await Bun.sleep(30);
+    }
+    await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: x2, y: y2, button: "left", clickCount: 1 });
+    await Bun.sleep(1500);
+  }
 for (const js of evals) { const r = await cdp("Runtime.evaluate", { expression: js, awaitPromise: true }); if (r?.exceptionDetails) console.error("eval error:", JSON.stringify(r.exceptionDetails).slice(0, 300)); await Bun.sleep(1200); }
 const shot = await cdp("Page.captureScreenshot", { format: "png" });
 await Bun.write(out, Buffer.from(shot.data, "base64"));
+for (const [i, a] of args.entries()) if (a === "--print") console.log((await cdp("Runtime.evaluate", { expression: args[i + 1], returnByValue: true }))?.result?.value);
 const logs = await cdp("Runtime.evaluate", { expression: "document.querySelectorAll('.term-overlay').length + ' overlays; ' + document.querySelectorAll('.xterm-rows > div').length + ' xterm rows'" });
 console.log(out, "|", logs?.result?.value);
 ws.close(); chrome.kill(); process.exit(0);

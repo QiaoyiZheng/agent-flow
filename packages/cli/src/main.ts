@@ -5,14 +5,15 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import type { AgentKind, Command, GraphState, Mail, NodeSpec, RunState, RunSummary } from "@af/core";
+import type { AgentKind, Command, GraphState, HerdrModel, Mail, NodeSpec, RunState, RunSummary } from "@af/core";
 import { activeInstance, instanceLabel, latestInstance, liveEdges, liveNodes } from "@af/core";
 
 const HOME = process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const SOCK = process.env.AF_SOCK ?? join(HOME, "server.sock");
 const AGENT = process.env.AF_AGENT || undefined;
 
-const BOOL = new Set(["shared", "isolated", "hold", "no-hold", "auto-accept", "no-auto-accept", "json", "all", "stat", "help"]);
+const BOOL = new Set(["shared", "isolated", "hold", "no-hold", "auto-accept", "no-auto-accept", "json", "all", "stat", "help", "down", "right", "tab"]);
+const PANE = process.env.HERDR_PANE_ID || undefined;
 
 function parse(argv: string[]) {
   const flags: Record<string, string | true> = {};
@@ -45,7 +46,7 @@ function die(msg: string, code = 1): never {
 
 async function call<T = any>(method: "GET" | "POST", path: string, body: Record<string, unknown> = {}): Promise<T> {
   if (!existsSync(SOCK)) die(`agent-flow server is not running (no ${SOCK}). Start it with: af server`);
-  const payload = { run: RUN, agent: AGENT, ...body };
+  const payload: Record<string, unknown> = { run: RUN, agent: AGENT, ...body };
   const url = method === "GET" ? `http://af${path}?${new URLSearchParams(Object.entries(payload).filter(([, v]) => v !== undefined) as [string, string][])}` : `http://af${path}`;
   let r: Response;
   try {
@@ -114,6 +115,27 @@ function showGraph(s: RunState) {
   return lines.join("\n");
 }
 
+function formatLs(r: { model: HerdrModel; views: Record<string, { target: string }>; runs: Record<string, string>; shellWorkspace?: string }) {
+  const lines: string[] = [];
+  const { model, views, runs } = r;
+  for (const m of model.machines) {
+    lines.push(m.available ? m.label : `${m.label} (${m.target}) — ${m.note}`);
+    if (!m.available) continue;
+    for (const w of model.workspaces) {
+      if (w.id === r.shellWorkspace) continue;
+      lines.push(`  ${w.id}  ${w.label}${runs[w.id] ? `  [run ${runs[w.id]}]` : ""}`);
+      for (const t of model.tabs.filter((t) => t.workspaceId === w.id)) {
+        lines.push(`    tab ${t.id}  ${t.label}`);
+        for (const p of model.panes.filter((p) => p.tabId === t.id)) {
+          const what = views[p.id] ? `view ${views[p.id]!.target}` : p.agent ? `${p.agent}${p.agentName ? ` (${p.agentName})` : ""} ${p.agentStatus}` : "shell";
+          lines.push(`      ${p.id.padEnd(8)} ${what}${p.label && !views[p.id] ? `  "${p.label}"` : ""}  ${p.cwd}${p.id === PANE ? "   <- you" : ""}`);
+        }
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
 const fmtMail = (m: Mail) => `--- ${m.id} from ${m.from}${m.node ? ` | ${m.node}` : ""}${m.replyTo ? ` | reply to ${m.replyTo}` : ""} | ${m.kind} ---\n${m.body}${m.attachments?.length ? `\nattachments: ${m.attachments.join(", ")}` : ""}`;
 
 const HELP = `af — agent-flow CLI
@@ -134,7 +156,16 @@ Graph (lead):
 
 Messages (everyone):
   af inbox [--all] [--json]   af send <agent|user> <text...> [--attach PATH]   af reply <msg-id> <text...>
-  af done [--outcome X] [--note "..."] [--result PATH]     af open <url|path>     af whoami`;
+  af done [--outcome X] [--note "..."] [--result PATH]     af whoami
+
+Panes (everyone; Herdr owns the layout, the web UI shows it):
+  af ls [--json]                                 machines, workspaces, tabs, panes (agents, viewers, shells)
+  af read <agent|pane> [--lines N]               recent output of another agent or pane
+  af open <path|url> [--down] [--of PANE]        show a file, folder or page in a new pane next to yours (or PANE)
+  af open <path|url> --in <viewer pane>          show it in an existing viewer pane instead
+  af open <path|url> --tab [WORKSPACE]           show it in a new tab
+  af split [PANE] [--down] [--agent K]           split a pane (default yours): a shell, or an agent
+  af close <pane>`;
 
 // ---------------------------------------------------------------------------------------------
 
@@ -211,11 +242,42 @@ async function main() {
       return console.log(r.message);
     }
     case "open": {
-      await resolveRun(flags.run);
-      if (!pos[0]) die("usage: af open <url|path>");
-      const target = /^[a-z]+:\/\//i.test(pos[0]) ? pos[0] : absolute(pos[0]);
-      const o = await call("POST", "/open", { target });
-      return console.log(`opened ${o.target}${o.node ? ` (attached to ${o.node})` : ""}`);
+      if (!pos[0]) die("usage: af open <url|path> [--in <viewer pane>] [--of <pane>] [--down] [--tab]");
+      const target = /^[a-z][a-z0-9+.-]*:\/\//i.test(pos[0]) ? pos[0] : absolute(pos[0]);
+      const ls = flags.tab ? await call("GET", "/ls") : undefined;
+      const tabIn = flags.tab ? (typeof flags.tab === "string" ? flags.tab : ls.model.panes.find((p: any) => p.id === (flags.of ?? PANE))?.workspaceId) : undefined;
+      if (flags.tab && !tabIn) die("--tab needs a workspace id outside Herdr: --tab <workspace>");
+      const v = await call("POST", "/show", {
+        target,
+        in: typeof flags.in === "string" ? flags.in : undefined,
+        of: typeof flags.of === "string" ? flags.of : undefined,
+        split: flags.down ? "down" : "right",
+        tabIn,
+        pane: PANE,
+      });
+      return console.log(`showing ${v.target} in pane ${v.paneId}`);
+    }
+    case "viewer":
+      return (await import("./viewer.ts")).runViewer(call, PANE);
+    case "ls": {
+      const r = await call("GET", "/ls");
+      return out(flags, r, () => formatLs(r));
+    }
+    case "read": {
+      if (!pos[0]) die("usage: af read <agent|pane> [--lines N]");
+      const r = await call("POST", "/pane/read", { ref: pos[0], lines: typeof flags.lines === "string" ? Number(flags.lines) : 120 });
+      return console.log(r.text.trimEnd());
+    }
+    case "split": {
+      const pane = pos[0] ?? PANE;
+      if (!pane) die("usage: af split [<pane>] [--down] [--agent claude|codex|omp]");
+      const r = await call("POST", "/pane/split", { pane, direction: flags.down ? "down" : "right", kind: typeof flags.agent === "string" ? "agent" : "shell", agentKind: flags.agent });
+      return console.log(`new pane ${r.paneId}${r.agent ? ` running ${r.agent}` : ""}`);
+    }
+    case "close": {
+      if (!pos[0]) die("usage: af close <pane>");
+      await call("POST", "/pane/close", { pane: pos[0] });
+      return console.log(`closed ${pos[0]}`);
     }
     default:
       die(`unknown command ${cmd}. Run af help.`);

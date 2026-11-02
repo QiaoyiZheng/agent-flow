@@ -1,62 +1,64 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentKind, Attention } from "@af/core";
+import { useEffect, useMemo, useState } from "react";
+import type { AgentKind, Attention, HPane } from "@af/core";
 import { api, useStore, watch } from "./store";
 import { Terminal } from "./Terminal";
 import { Graph } from "./Graph";
 import { NodeDetail } from "./NodeDetail";
 import { Sidebar } from "./Sidebar";
-import { FileView, Messages, WebView } from "./Viewers";
-import { basename, kindColor } from "./view";
+import { LayoutView, type PaneCtx } from "./Layout";
+import { Messages } from "./Viewers";
+import { kindColor } from "./view";
 
-type Tab =
-  | { id: string; kind: "agent"; agent: string }
-  | { id: string; kind: "shell"; paneId: string; title: string }
-  | { id: string; kind: "file"; path: string }
-  | { id: string; kind: "web"; url: string }
-  | { id: string; kind: "inbox" };
-
-const isUrl = (s: string) => /^[a-z]+:\/\//i.test(s);
-const tabFor = (target: string): Tab => (isUrl(target) ? { id: `web:${target}`, kind: "web", url: target } : { id: `file:${target}`, kind: "file", path: target });
+const params = new URLSearchParams(location.search);
 
 export function App() {
-  const { connected, runs, runId, run } = useStore();
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [active, setActive] = useState<string>();
-  const [selected, setSelected] = useState<string>();
+  const { connected, runs, run, herdr, views } = useStore();
+  const [selectedWs, setSelectedWs] = useState<string | undefined>(params.get("ws") ?? undefined);
+  const [pastRun, setPastRun] = useState<string>();
+  const [activeTab, setActiveTab] = useState<Record<string, string>>({});
+  const [focused, setFocused] = useState<Record<string, string>>({});
+  const [selectedNode, setSelectedNode] = useState<string>();
+  const [rightView, setRightView] = useState<"graph" | "messages">("graph");
   const [drawer, setDrawer] = useState(false);
-  const [shellPane, setShellPane] = useState<string>();
-  const [newRun, setNewRun] = useState(false);
-  const seenOpens = useRef<Record<string, number>>({});
+  const [shell, setShell] = useState<{ paneId: string; workspaceId?: string }>();
+  const [shellWs, setShellWs] = useState<string>();
+  const [creating, setCreating] = useState(false);
 
-  const openTab = useCallback((t: Tab) => {
-    setTabs((ts) => (ts.some((x) => x.id === t.id) ? ts : [...ts, t]));
-    setActive(t.id);
-    setNewRun(false);
+  // the shell drawer's workspace is not listed in the tree
+  useEffect(() => {
+    api<{ shellWorkspace?: string }>("GET", "/ls").then((r) => setShellWs(r.shellWorkspace), () => {});
   }, []);
+  useEffect(() => {
+    if (drawer && !shell)
+      api<{ paneId: string; workspaceId?: string }>("GET", "/shell").then(
+        (r) => (setShell(r), r.workspaceId && setShellWs(r.workspaceId)),
+        (e) => alert(e.message),
+      );
+  }, [drawer]);
+  const hidden = useMemo(() => new Set(shellWs ? [shellWs] : []), [shellWs]);
 
-  // a new run: start with the lead's terminal
+  // pick a workspace on first load: the latest active run, else the first one
   useEffect(() => {
-    setTabs([]);
-    setSelected(undefined);
-    setActive(undefined);
-  }, [runId]);
+    if (selectedWs || !herdr?.workspaces.length) return;
+    const live = new Set(herdr.workspaces.map((w) => w.id));
+    const r = runs.find((x) => !x.stopped && x.workspace && live.has(x.workspace));
+    setSelectedWs(r?.workspace ?? herdr.workspaces.find((w) => !hidden.has(w.id))?.id);
+  }, [herdr, runs]);
   useEffect(() => {
-    if (!run?.meta) return;
-    const lead = run.meta.lead;
-    if (run.agents[lead]?.paneId && !tabs.length) openTab({ id: `agent:${lead}`, kind: "agent", agent: lead });
-  }, [run, run?.seq]);
+    if (!selectedWs) return;
+    const u = new URL(location.href);
+    u.searchParams.set("ws", selectedWs);
+    u.searchParams.delete("run");
+    history.replaceState(null, "", u);
+  }, [selectedWs]);
 
-  // af open by the lead or the user becomes a tab; workers' opens stay on their node
+  // follow the run that owns the selected workspace (or a past run picked in the tree)
+  const runIdForWs = selectedWs ? (runs.filter((r) => r.workspace === selectedWs).find((r) => !r.stopped) ?? runs.find((r) => r.workspace === selectedWs))?.id : undefined;
+  const followRun = pastRun ?? runIdForWs;
   useEffect(() => {
-    if (!run?.meta) return;
-    const seen = seenOpens.current[run.meta.id];
-    if (seen === undefined) {
-      seenOpens.current[run.meta.id] = run.opens.length;
-      return;
-    }
-    for (const o of run.opens.slice(seen)) if (!o.node) openTab(tabFor(o.target));
-    seenOpens.current[run.meta.id] = run.opens.length;
-  }, [run?.opens.length]);
+    watch(followRun);
+    setSelectedNode(undefined);
+  }, [followRun]);
 
   // ctrl+` toggles the persistent shell
   useEffect(() => {
@@ -69,29 +71,66 @@ export function App() {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
-  useEffect(() => {
-    if (drawer && !shellPane) api<{ paneId: string }>("GET", "/shell").then((r) => setShellPane(r.paneId), (e) => alert(e.message));
-  }, [drawer]);
 
+  const ws = herdr?.workspaces.find((w) => w.id === selectedWs);
+  const tabs = herdr?.tabs.filter((t) => t.workspaceId === selectedWs) ?? [];
+  // default tab: the one picked here, else the lead's tab in a run workspace, else Herdr's active tab
+  const leadTab = run?.meta && run.meta.herdrWorkspace === selectedWs ? run.agents[run.meta.lead]?.tabId : undefined;
+  const pick = [selectedWs ? activeTab[selectedWs] : undefined, leadTab, ws?.activeTabId, tabs[0]?.id].find((id) => id && tabs.some((t) => t.id === id));
+  const tabId = pick as string | undefined;
+  const layout = tabId ? herdr?.layouts[tabId] : undefined;
+  const panesById = useMemo(() => new Map<string, HPane>((herdr?.panes ?? []).map((p) => [p.id, p])), [herdr]);
+  const runAgents = useMemo(
+    () => new Map(Object.values(run?.agents ?? {}).filter((a) => a.paneId && a.status !== "exited").map((a) => [a.paneId!, { name: a.name, kind: a.kind, role: a.role }])),
+    [run, run?.seq],
+  );
+  const leadPane = run?.meta ? run.agents[run.meta.lead]?.paneId : undefined;
+  const tabPanes = herdr && tabId ? herdr.panes.filter((p) => p.tabId === tabId) : [];
+  const focusedPane = (selectedWs && focused[selectedWs] && tabPanes.some((p) => p.id === focused[selectedWs]) ? focused[selectedWs] : (layout?.focusedPaneId ?? tabPanes[0]?.id)) as string | undefined;
+
+  const selectWs = (id: string) => {
+    setPastRun(undefined);
+    setCreating(false);
+    setSelectedWs(id);
+  };
+  const selectPane = (workspaceId: string, tab: string, paneId: string) => {
+    selectWs(workspaceId);
+    setActiveTab((a) => ({ ...a, [workspaceId]: tab }));
+    setFocused((f) => ({ ...f, [workspaceId]: paneId }));
+  };
+  const goToPane = (paneId?: string) => {
+    const p = paneId ? panesById.get(paneId) : undefined;
+    if (p) selectPane(p.workspaceId, p.tabId, p.id);
+  };
   const onAttention = (a: Attention) => {
     const node = a.node?.split("#")[0];
-    if (node && run?.graph.nodes[node]) setSelected(node);
-    if (a.agent && run?.agents[a.agent]) openTab({ id: `agent:${a.agent}`, kind: "agent", agent: a.agent });
+    if (node && run?.graph.nodes[node]) setSelectedNode(node);
+    if (a.agent) goToPane(run?.agents[a.agent]?.paneId);
+  };
+  const ctx: PaneCtx = {
+    panes: panesById,
+    views,
+    focused: focusedPane,
+    onFocus: (p) => selectedWs && setFocused((f) => ({ ...f, [selectedWs]: p })),
+    runAgents,
+    leadPane,
+  };
+  const showFile = (target: string) => {
+    const of = focusedPane ?? leadPane;
+    if (of) api("POST", "/show", { target, of }).then((r) => goToPane(r.paneId), (e) => alert(e.message));
   };
 
-  const closeTab = (id: string) => {
-    setTabs((ts) => {
-      const next = ts.filter((t) => t.id !== id);
-      if (active === id) setActive(next.at(-1)?.id);
-      return next;
-    });
+  const tabTitle = (t: { id: string; label: string }) => {
+    const ps = herdr?.panes.filter((p) => p.tabId === t.id) ?? [];
+    if (!/^\d+$/.test(t.label)) return t.label;
+    const a = ps.find((p) => p.agent);
+    return a ? (runAgents.get(a.id)?.name ?? a.agentName ?? a.agent!) : (ps[0]?.cwd.split("/").at(-1) ?? t.label);
   };
-
-  const current = tabs.find((t) => t.id === active);
-  const showWelcome = newRun || (!runs.length && connected);
+  const tabKind = (t: { id: string }) => herdr?.panes.find((p) => p.tabId === t.id && p.agent)?.agent;
+  const showRight = !!run && !creating;
 
   return (
-    <div className="app" style={{ "--right-w": selected ? "460px" : "380px" } as React.CSSProperties}>
+    <div className="app" style={{ "--right-w": showRight ? (selectedNode ? "460px" : "380px") : "0px" } as React.CSSProperties}>
       <header className="topbar">
         <span className="brand">
           <span className="brand-dots">
@@ -102,10 +141,15 @@ export function App() {
           </span>
           agent-flow
         </span>
-        {run?.meta && (
+        {ws && (
           <span className="crumb">
-            / <b>{run.meta.id}</b> · {run.meta.cwd}
-            {run.meta.branch && <> · {run.meta.branch}</>}
+            / Local / <b>{ws.label}</b>
+            {run?.meta && (
+              <>
+                {" "}· run {run.meta.id}
+                {run.meta.branch && <> · {run.meta.branch}</>}
+              </>
+            )}
           </span>
         )}
         <span className="spacer" />
@@ -114,86 +158,99 @@ export function App() {
         </span>
       </header>
 
-      <Sidebar runs={runs} runId={runId} run={run} onNewRun={() => setNewRun(true)} onAttention={onAttention} onAgent={(a) => openTab({ id: `agent:${a}`, kind: "agent", agent: a })} />
+      <Sidebar
+        herdr={herdr}
+        runs={runs}
+        run={run}
+        hidden={hidden}
+        selectedWs={pastRun ? undefined : selectedWs}
+        onSelectWs={selectWs}
+        onSelectPane={selectPane}
+        onSelectRun={(id) => (setPastRun(id), setCreating(false))}
+        onNew={() => setCreating(true)}
+        onAttention={onAttention}
+      />
 
       <main className="main">
-        <div className="tabs">
-          {tabs.map((t) => {
-            const a = t.kind === "agent" ? run?.agents[t.agent] : undefined;
-            return (
-              <div key={t.id} className={`tab ${t.id === active && !newRun ? "active" : ""}`} onClick={() => (setActive(t.id), setNewRun(false))}>
-                <span className="ic" style={a ? { color: kindColor(a.kind) } : undefined}>
-                  {t.kind === "agent" ? "●" : t.kind === "shell" ? "$" : t.kind === "web" ? "◎" : t.kind === "inbox" ? "✉" : "≡"}
+        {!creating && !pastRun && ws && (
+          <div className="tabs">
+            {tabs.map((t) => (
+              <div key={t.id} className={`tab ${t.id === tabId ? "active" : ""}`} onClick={() => setActiveTab((a) => ({ ...a, [ws.id]: t.id }))}>
+                <span className="ic" style={tabKind(t) ? { color: kindColor(tabKind(t)!) } : undefined}>
+                  {tabKind(t) ? "●" : "$"}
                 </span>
-                <span className="label">
-                  {t.kind === "agent" ? `${t.agent}${t.agent === run?.meta?.lead && t.agent !== "lead" ? " · lead" : ""}` : t.kind === "shell" ? t.title : t.kind === "file" ? basename(t.path) : t.kind === "web" ? t.url.replace(/^https?:\/\//, "") : "messages"}
-                </span>
-                <button className="close" onClick={(e) => (e.stopPropagation(), closeTab(t.id))}>
+                <span className="label">{tabTitle(t)}</span>
+                <button
+                  className="close"
+                  title="Close tab"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (confirm(`Close tab "${tabTitle(t)}" and everything running in it?`)) api("POST", "/tab/close", { tab: t.id }).catch((err) => alert(err.message));
+                  }}
+                >
                   ✕
                 </button>
               </div>
-            );
-          })}
-          {run && (
-            <>
-              <button
-                className="tab-add"
-                title="New terminal in this run"
-                onClick={() => api<{ paneId: string }>("POST", "/terminal").then((r) => openTab({ id: `shell:${r.paneId}`, kind: "shell", paneId: r.paneId, title: "shell" }), (e) => alert(e.message))}
-              >
-                + terminal
-              </button>
-              <button
-                className="tab-add"
-                title="Open a URL or a file path"
-                onClick={() => {
-                  const target = prompt("URL or absolute file path");
-                  if (target) openTab(tabFor(target.trim()));
-                }}
-              >
-                + open
-              </button>
-              <button className="tab-add" title="All messages in this run" onClick={() => openTab({ id: "inbox", kind: "inbox" })}>
-                messages
-              </button>
-            </>
-          )}
-        </div>
+            ))}
+            <button className="tab-add" title="New tab with a shell" onClick={() => api("POST", "/tab/new", { workspace: ws.id }).then((r) => selectPane(ws.id, r.tabId, r.paneId), (e) => alert(e.message))}>
+              + tab
+            </button>
+          </div>
+        )}
         <div className="tab-body">
-          {showWelcome ? (
-            <Welcome onDone={() => setNewRun(false)} />
-          ) : !run ? (
+          {creating || (!herdr?.workspaces.length && connected) ? (
+            <NewDialog onDone={(wsId) => (setCreating(false), wsId && selectWs(wsId))} />
+          ) : pastRun ? (
+            <div className="welcome">This run's workspace is closed. Its graph and messages are on the right.</div>
+          ) : !herdr ? (
             <div className="welcome">{connected ? "Loading…" : "Connecting to the agent-flow server…"}</div>
+          ) : layout && tabId ? (
+            <LayoutView key={tabId} tabId={tabId} root={layout.root} zoomed={layout.zoomed} ctx={ctx} />
           ) : (
-            tabs.map((t) => (
-              <div key={t.id} style={{ position: "absolute", inset: 0, display: t.id === active ? "block" : "none" }}>
-                {t.kind === "agent" && run.agents[t.agent]?.paneId && <Terminal paneId={run.agents[t.agent]!.paneId!} autoFocus={t.id === active} />}
-                {t.kind === "shell" && <Terminal paneId={t.paneId} autoFocus />}
-                {t.kind === "file" && <FileView path={t.path} />}
-                {t.kind === "web" && <WebView url={t.url} />}
-                {t.kind === "inbox" && (
-                  <div className="viewer">
-                    <Messages run={run} />
-                  </div>
-                )}
-              </div>
-            ))
+            <div className="welcome">{ws ? "This workspace has no tabs." : "Pick a workspace on the left."}</div>
           )}
-          {run && !showWelcome && !current && <div className="welcome">Pick an agent on the left, or open a terminal.</div>}
         </div>
       </main>
 
       <section className="right">
-        <div className="panel-head">
-          Graph
-          {run && (
-            <span className="sub">
-              {Object.values(run.graph.nodes).filter((n) => !n.removed).length} nodes · {run.stopped ? "stopped" : run.graph.quiescent ? "quiescent" : "running"}
-            </span>
-          )}
-        </div>
-        <div className="graph">{run && <Graph run={run} selected={selected} onSelect={setSelected} />}</div>
-        {run && selected && <NodeDetail key={selected} run={run} nodeId={selected} onClose={() => setSelected(undefined)} onOpen={(t) => openTab(tabFor(t))} />}
+        {showRight && run && (
+          <>
+            <div className="panel-head">
+              <div className="seg" style={{ border: 0, padding: 0 }}>
+                <button className={rightView === "graph" ? "on" : ""} onClick={() => setRightView("graph")}>
+                  Graph
+                </button>
+                <button className={rightView === "messages" ? "on" : ""} onClick={() => setRightView("messages")}>
+                  Messages
+                </button>
+              </div>
+              <span className="sub">
+                {Object.values(run.graph.nodes).filter((n) => !n.removed).length} nodes · {run.stopped ? "stopped" : run.graph.quiescent ? "quiescent" : "running"}
+              </span>
+            </div>
+            {rightView === "graph" ? (
+              <>
+                <div className="graph">
+                  <Graph run={run} selected={selectedNode} onSelect={setSelectedNode} />
+                </div>
+                {selectedNode && (
+                  <NodeDetail
+                    key={selectedNode}
+                    run={run}
+                    nodeId={selectedNode}
+                    onClose={() => setSelectedNode(undefined)}
+                    onOpen={showFile}
+                    onGoTo={(paneId) => goToPane(paneId)}
+                  />
+                )}
+              </>
+            ) : (
+              <div className="detail-body">
+                <Messages run={run} />
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       <footer className="drawer">
@@ -202,51 +259,75 @@ export function App() {
           <kbd>ctrl `</kbd>
           <span style={{ marginLeft: "auto" }}>survives browser and server restarts</span>
         </div>
-        {drawer && <div className="drawer-body">{shellPane ? <Terminal paneId={shellPane} autoFocus /> : <div className="term-overlay">starting…</div>}</div>}
+        {drawer && <div className="drawer-body">{shell ? <Terminal paneId={shell.paneId} autoFocus /> : <div className="term-overlay">starting…</div>}</div>}
       </footer>
     </div>
   );
 }
 
-function Welcome({ onDone }: { onDone: () => void }) {
+function NewDialog({ onDone }: { onDone: (workspaceId?: string) => void }) {
+  const [mode, setMode] = useState<"run" | "workspace">("run");
   const [cwd, setCwd] = useState("");
+  const [label, setLabel] = useState("");
   const [kind, setKind] = useState<AgentKind>("claude");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const p =
+      mode === "run"
+        ? api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined }).then((meta) => meta.herdrWorkspace as string)
+        : api("POST", "/workspace/new", { cwd, label: label || cwd.split("/").filter(Boolean).at(-1) }).then((r) => r.workspaceId as string);
+    p.then(onDone, (err) => alert(err.message)).finally(() => setBusy(false));
+  };
   return (
     <div className="welcome">
-      <form
-        className="card"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setBusy(true);
-          api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined })
-            .then((meta) => (watch(meta.id), onDone()))
-            .catch((err) => alert(err.message))
-            .finally(() => setBusy(false));
-        }}
-      >
-        <h2>Start a run</h2>
-        <p>A lead agent starts in the directory. Tell it what you want; it builds a graph of workers.</p>
-        <div className="field">
-          <label>Directory (a git repository gives each node its own worktree)</label>
-          <input className="text" required placeholder="/path/to/repo" value={cwd} onChange={(e) => setCwd(e.target.value)} />
+      <form className="card" onSubmit={submit}>
+        <div className="seg" style={{ border: 0, padding: "0 0 12px" }}>
+          <button type="button" className={mode === "run" ? "on" : ""} onClick={() => setMode("run")}>
+            New run
+          </button>
+          <button type="button" className={mode === "workspace" ? "on" : ""} onClick={() => setMode("workspace")}>
+            New workspace
+          </button>
         </div>
+        <h2>{mode === "run" ? "Start a run" : "New workspace"}</h2>
+        <p>{mode === "run" ? "A lead agent starts in the directory. Tell it what you want; it builds a graph of workers." : "A plain Herdr workspace with a shell. Split it into terminals, agents and files."}</p>
         <div className="field">
-          <label>Lead agent</label>
-          <select value={kind} onChange={(e) => setKind(e.target.value as AgentKind)}>
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
-            <option value="omp">omp</option>
-          </select>
+          <label>Directory{mode === "run" ? " (a git repository gives each node its own worktree)" : ""}</label>
+          <input className="text" required placeholder="/path/to/project" value={cwd} onChange={(e) => setCwd(e.target.value)} />
         </div>
-        <div className="field">
-          <label>First message to the lead (optional)</label>
-          <textarea className="text" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+        {mode === "workspace" && (
+          <div className="field">
+            <label>Name</label>
+            <input className="text" placeholder="defaults to the folder name" value={label} onChange={(e) => setLabel(e.target.value)} />
+          </div>
+        )}
+        {mode === "run" && (
+          <>
+            <div className="field">
+              <label>Lead agent</label>
+              <select value={kind} onChange={(e) => setKind(e.target.value as AgentKind)}>
+                <option value="claude">claude</option>
+                <option value="codex">codex</option>
+                <option value="omp">omp</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>First message to the lead (optional)</label>
+              <textarea className="text" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+            </div>
+          </>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn primary" disabled={busy}>
+            {busy ? "Starting…" : mode === "run" ? "Start" : "Create"}
+          </button>
+          <button type="button" className="btn" onClick={() => onDone()}>
+            Cancel
+          </button>
         </div>
-        <button className="btn primary" disabled={busy}>
-          {busy ? "Starting…" : "Start"}
-        </button>
       </form>
     </div>
   );

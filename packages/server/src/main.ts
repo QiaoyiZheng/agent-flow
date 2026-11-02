@@ -8,6 +8,7 @@ import { loadConfig } from "./agents.ts";
 import { Herdr } from "./herdr.ts";
 import { Orchestrator } from "./orchestrator.ts";
 import { serve } from "./api.ts";
+import { Workspaces } from "./workspaces.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -54,7 +55,9 @@ export async function main(argv: string[]) {
   const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config: loadConfig(home) });
   const n = o.load();
   o.start(1000);
-  serve(o, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist") });
+  const w = new Workspaces({ home, backend, paneEnv: () => ({ AF_SOCK: sock, PATH: `${binDir}:${process.env.PATH ?? ""}` }) });
+  await w.start();
+  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist") });
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));
   console.log(`agent-flow server: ${n} run(s) loaded`);
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
@@ -62,6 +65,7 @@ export async function main(argv: string[]) {
   console.log(`  af CLI: ${join(binDir, "af")}  (add ${binDir} to PATH)`);
   const shutdown = () => {
     o.stop();
+    w.stop();
     rmSync(sock, { force: true });
     process.exit(0);
   };

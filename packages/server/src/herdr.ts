@@ -4,7 +4,7 @@
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentKind, AgentStatus } from "@af/core";
+import type { AgentKind, AgentStatus, HLayout, HMachine, HPane, HTab, HWorkspace, LayoutNode, SplitDirection } from "@af/core";
 
 export interface HerdrAgentInfo {
   name?: string;
@@ -16,7 +16,8 @@ export interface HerdrAgentInfo {
 export type StartResult = { ok: true } | { ok: false; code: string; message: string };
 
 export interface TerminalBackend {
-  createWorkspace(label: string, cwd: string): Promise<{ workspaceId: string; tabId: string; paneId: string }>;
+  createWorkspace(label: string, cwd: string, env?: Record<string, string>): Promise<{ workspaceId: string; tabId: string; paneId: string }>;
+  renameTab(tabId: string, label: string): Promise<void>;
   createTab(workspaceId: string, cwd: string, label: string, env: Record<string, string>): Promise<{ tabId: string; paneId: string }>;
   startAgent(name: string, kind: AgentKind, paneId: string, args: string[]): Promise<StartResult>;
   listAgents(): Promise<HerdrAgentInfo[]>;
@@ -28,6 +29,39 @@ export interface TerminalBackend {
   closeWorkspace(workspaceId: string): Promise<void>;
   /** argv for a streaming terminal session (control or observe), used by the WebSocket bridge. */
   terminalSessionArgv(paneId: string, mode: "control" | "observe", cols: number, rows: number): string[];
+
+  // layout (Herdr owns workspaces, tabs and split panes; agent-flow shows and edits them)
+  snapshot(): Promise<HerdrSnapshot>;
+  exportLayout(tabId: string): Promise<HLayout>;
+  splitPane(paneId: string, direction: SplitDirection, cwd: string | undefined, env: Record<string, string>, ratio?: number): Promise<{ paneId: string; tabId: string }>;
+  closePane(paneId: string): Promise<void>;
+  setSplitRatio(tabId: string, path: boolean[], ratio: number): Promise<void>;
+  /** Type a command into a shell pane and press Enter. */
+  runInPane(paneId: string, command: string): Promise<void>;
+  renamePane(paneId: string, label: string): Promise<void>;
+  machines(): Promise<HMachine[]>;
+  /** Call `onEvent` on any workspace/tab/pane/layout lifecycle event. Returns a stop function. */
+  watchLifecycle(onEvent: () => void): () => void;
+}
+
+export interface HerdrSnapshot {
+  workspaces: HWorkspace[];
+  tabs: HTab[];
+  panes: HPane[];
+  /** Per tab: a signature of its pane rectangles and splits, to tell when the layout tree must be re-exported. */
+  layoutSigs: Record<string, string>;
+}
+
+export const LIFECYCLE_EVENTS = [
+  "workspace.created", "workspace.closed", "workspace.renamed",
+  "tab.created", "tab.closed", "tab.renamed",
+  "pane.created", "pane.closed", "pane.moved", "pane.exited", "pane.updated", "pane.agent_detected",
+  "layout.updated",
+];
+
+function toLayoutNode(n: any): LayoutNode {
+  if (n.type === "pane") return { type: "pane", paneId: n.pane_id };
+  return { type: "split", direction: n.direction, ratio: n.ratio, first: toLayoutNode(n.first), second: toLayoutNode(n.second) };
 }
 
 export class HerdrError extends Error {
@@ -96,8 +130,9 @@ export class Herdr implements TerminalBackend {
     });
   }
 
-  async createWorkspace(label: string, cwd: string) {
-    const r = await this.cli(["workspace", "create", "--cwd", cwd, "--label", label, "--no-focus"]);
+  async createWorkspace(label: string, cwd: string, env: Record<string, string> = {}) {
+    const envArgs = Object.entries(env).flatMap(([k, v]) => ["--env", `${k}=${v}`]);
+    const r = await this.cli(["workspace", "create", "--cwd", cwd, "--label", label, ...envArgs, "--no-focus"]);
     return { workspaceId: r.workspace.workspace_id, tabId: r.tab.tab_id, paneId: r.root_pane.pane_id };
   }
 
@@ -151,6 +186,98 @@ export class Herdr implements TerminalBackend {
 
   async closeWorkspace(workspaceId: string) {
     await this.cli(["workspace", "close", workspaceId]).catch(() => {});
+  }
+
+  async snapshot(): Promise<HerdrSnapshot> {
+    const s = (await this.rpc("session.snapshot")).snapshot;
+    const names = new Map<string, string>((s.agents ?? []).filter((a: any) => a.name).map((a: any) => [a.pane_id, a.name]));
+    return {
+      workspaces: s.workspaces.map((w: any) => ({ id: w.workspace_id, label: w.label, number: w.number, activeTabId: w.active_tab_id, agentStatus: w.agent_status })),
+      tabs: s.tabs.map((t: any) => ({ id: t.tab_id, workspaceId: t.workspace_id, label: t.label, number: t.number })),
+      panes: s.panes.map((p: any) => ({
+        id: p.pane_id,
+        tabId: p.tab_id,
+        workspaceId: p.workspace_id,
+        agent: p.agent ?? undefined,
+        agentName: names.get(p.pane_id),
+        agentStatus: p.agent_status,
+        label: p.label ?? undefined,
+        title: p.terminal_title_stripped || undefined,
+        cwd: p.foreground_cwd ?? p.cwd,
+      })),
+      layoutSigs: Object.fromEntries(s.layouts.map((l: any) => [l.tab_id, JSON.stringify([l.zoomed, l.panes.map((p: any) => [p.pane_id, p.rect]), l.splits])])),
+    };
+  }
+
+  async exportLayout(tabId: string): Promise<HLayout> {
+    const l = (await this.rpc("layout.export", { tab_id: tabId })).layout;
+    return { tabId, root: toLayoutNode(l.root), zoomed: !!l.zoomed, focusedPaneId: l.focused_pane_id ?? undefined };
+  }
+
+  async splitPane(paneId: string, direction: SplitDirection, cwd: string | undefined, env: Record<string, string>, ratio?: number) {
+    const r = await this.rpc("pane.split", { target_pane_id: paneId, direction, cwd: cwd ?? null, env, ratio: ratio ?? null, focus: false });
+    return { paneId: r.pane.pane_id as string, tabId: r.pane.tab_id as string };
+  }
+
+  async closePane(paneId: string) {
+    await this.rpc("pane.close", { pane_id: paneId });
+  }
+
+  async setSplitRatio(tabId: string, path: boolean[], ratio: number) {
+    await this.rpc("layout.set_split_ratio", { tab_id: tabId, path, ratio });
+  }
+
+  async runInPane(paneId: string, command: string) {
+    await this.cli(["pane", "run", paneId, command]);
+  }
+
+  async renameTab(tabId: string, label: string) {
+    await this.cli(["tab", "rename", tabId, label]).catch(() => {});
+  }
+
+  async renamePane(paneId: string, label: string) {
+    await this.cli(["pane", "rename", paneId, label]).catch(() => {});
+  }
+
+  async machines(): Promise<HMachine[]> {
+    const local: HMachine = { id: "local", label: "Local", target: "local", available: true };
+    const p = Bun.spawnSync([this.bin, "machine", "list", "--json"], { stdout: "pipe", stderr: "pipe" });
+    let saved: any[] = [];
+    try {
+      saved = JSON.parse(p.stdout.toString());
+    } catch {}
+    const help = Bun.spawnSync([this.bin, "--help"], { stdout: "pipe" }).stdout.toString();
+    const canForward = help.includes("--machine");
+    return [
+      local,
+      ...saved
+        .filter((m) => m.enabled)
+        .map((m) => ({
+          id: m.id,
+          label: m.label,
+          target: m.target,
+          available: false,
+          note: canForward ? "remote browsing is not built yet" : "needs Herdr 0.9.5+ (herdr update) to browse remote machines",
+        })),
+    ];
+  }
+
+  watchLifecycle(onEvent: () => void) {
+    let stopped = false;
+    let sock: ReturnType<typeof connect> | undefined;
+    const open = () => {
+      if (stopped) return;
+      sock = connect(this.socket);
+      sock.on("connect", () => sock!.write(JSON.stringify({ id: "af-watch", method: "events.subscribe", params: { subscriptions: LIFECYCLE_EVENTS.map((type) => ({ type })) } }) + "\n"));
+      sock.on("data", () => onEvent());
+      sock.on("close", () => setTimeout(open, 1000));
+      sock.on("error", () => {});
+    };
+    open();
+    return () => {
+      stopped = true;
+      sock?.destroy();
+    };
   }
 
   terminalSessionArgv(paneId: string, mode: "control" | "observe", cols: number, rows: number) {

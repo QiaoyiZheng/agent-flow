@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentKind, type AgentStatus, latestInstance, instanceLabel } from "@af/core";
 import { commitAll, git } from "../src/git.ts";
-import type { HerdrAgentInfo, StartResult, TerminalBackend } from "../src/herdr.ts";
+import { FakeBackend } from "./fake.ts";
 import { DEFAULT_CONFIG } from "../src/agents.ts";
 import { AfError, Orchestrator } from "../src/orchestrator.ts";
 
@@ -15,56 +15,6 @@ const tmp = (p: string) => {
   dirs.push(d);
   return d;
 };
-
-class FakeBackend implements TerminalBackend {
-  agents = new Map<string, HerdrAgentInfo & { kind: AgentKind; args: string[]; env: Record<string, string> }>();
-  prompts: { name: string; text: string }[] = [];
-  envs = new Map<string, Record<string, string>>();
-  blockOnStart = new Set<string>();
-  failOnStart = new Set<string>();
-  closed: string[] = [];
-  private n = 0;
-  async createWorkspace() {
-    return { workspaceId: "w1", tabId: "w1:t0", paneId: "w1:p0" };
-  }
-  async createTab(_ws: string, _cwd: string, label: string, env: Record<string, string>) {
-    const k = ++this.n;
-    this.envs.set(label, env);
-    return { tabId: `w1:t${k}`, paneId: `w1:p${k}` };
-  }
-  async startAgent(name: string, kind: AgentKind, paneId: string, args: string[]): Promise<StartResult> {
-    if (this.failOnStart.has(name)) return { ok: false, code: "timeout", message: "agent did not become ready" };
-    const blocked = this.blockOnStart.has(name);
-    this.agents.set(name, { name, paneId, tabId: paneId.replace("p", "t"), status: blocked ? "blocked" : "idle", kind, args, env: {} });
-    return blocked ? { ok: false, code: "agent_not_ready", message: "blocked during startup" } : { ok: true };
-  }
-  async listAgents() {
-    return [...this.agents.values()];
-  }
-  async prompt(name: string, text: string) {
-    this.prompts.push({ name, text });
-  }
-  async readPane() {
-    return "";
-  }
-  async paneExists() {
-    return true;
-  }
-  async closeTab(tabId: string) {
-    this.closed.push(tabId);
-    for (const [k, v] of this.agents) if (v.tabId === tabId) this.agents.delete(k);
-  }
-  async closeWorkspace() {}
-  terminalSessionArgv() {
-    return [];
-  }
-  set(name: string, status: AgentStatus) {
-    this.agents.get(name)!.status = status;
-  }
-  promptsTo(name: string) {
-    return this.prompts.filter((p) => p.name === name).map((p) => p.text);
-  }
-}
 
 const clock = { ms: 0 };
 
@@ -108,8 +58,10 @@ describe("orchestrator: a full review loop in a git repo", () => {
     const hn = (a: string) => `${run}-${a}`;
 
     // lead started with the lead protocol injected, and gets the user's prompt once idle
-    expect(backend.agents.get(hn("lead"))!.args).toContain("--append-system-prompt-file");
+    expect(backend.agentPane(hn("lead"))!.agent!.args).toContain("--append-system-prompt-file");
     expect(backend.envs.get("lead")).toMatchObject({ AF_RUN: run, AF_AGENT: "lead" });
+    const tabsOfRun = [...backend.tabs.values()].filter((t) => t.workspaceId === meta.herdrWorkspace);
+    expect(tabsOfRun.map((t) => t.label)).toEqual(["lead"]); // the lead uses the workspace's root pane: no empty shell tab
     await o.flush();
     expect(backend.promptsTo(hn("lead"))).toEqual(["please build X"]);
     expect(git(repo, ["status", "--porcelain"]).out).toBe(""); // worktrees hidden from the user's status
@@ -124,7 +76,7 @@ describe("orchestrator: a full review loop in a git repo", () => {
     expect(st(o, run, "code")).toBe("code#1:running");
     const codeAgent = o.getRun(run).agents.code!;
     expect(codeAgent.cwd).toBe(join(repo, ".agent-flow/worktrees", run, "code"));
-    expect(backend.agents.get(hn("code"))!.kind).toBe("codex");
+    expect(backend.agentPane(hn("code"))!.agent!.kind).toBe("codex");
     await o.flush();
     expect(backend.promptsTo(hn("code"))).toEqual([expect.stringContaining("[agent-flow] New message")]);
     const task = o.inbox({ run, agent: "code" });
@@ -338,7 +290,7 @@ describe("orchestrator: conflicts, startup, reminders", () => {
     const { id: run } = await o.createRun({ cwd: repo });
     o.graph({ run }, { type: "node.add", id: "w", spec: { task: "work" } });
     await o.flush();
-    backend.agents.delete(`${run}-w`);
+    backend.remove(`${run}-w`);
     await o.flush();
     expect(o.getRun(run).agents.w!.status).toBe("exited");
     expect(Object.values(o.getRun(run).attention).map((a) => a.kind)).toContain("agent_exited");
@@ -392,8 +344,8 @@ describe("orchestrator: messaging and other entry points", () => {
     );
     const meta = await o.createRun({ cwd: repo, team: "team.yaml" });
     expect(meta.lead).toBe("boss");
-    expect(backend.agents.get(`${meta.id}-reviewer`)!.kind).toBe("codex");
-    const args = backend.agents.get(`${meta.id}-reviewer`)!.args;
+    expect(backend.agentPane(`${meta.id}-reviewer`)!.agent!.kind).toBe("codex");
+    const args = backend.agentPane(`${meta.id}-reviewer`)!.agent!.args;
     expect(args.slice(0, 2)).toEqual(["-p", "agent-flow-worker"]);
     expect(args.join(" ").length).toBeLessThan(200); // never the protocol itself: typed lines are capped at 1024 bytes
     expect(readFileSync(join(process.env.CODEX_HOME!, "agent-flow-worker.config.toml"), "utf8")).toContain("af done --outcome");
