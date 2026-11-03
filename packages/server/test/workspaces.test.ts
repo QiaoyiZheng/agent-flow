@@ -444,6 +444,32 @@ describe("composer: prompt with attachments, keys", () => {
   });
 });
 
+describe("controls: stop, rewind, clear, exit with each agent's own keys", () => {
+  test("claude and codex rewind with Esc Esc from an empty box, omp with /rewind; exit clears the box first", async () => {
+    const { backend, w, ws } = await setup();
+    const pane = ws.paneId;
+    const run = async (kind: "claude" | "codex" | "omp", action: string) => {
+      backend.panes.get(pane)!.agent = { name: kind, kind, args: [], status: "idle" };
+      await w.refresh();
+      backend.keys = [];
+      backend.texts = [];
+      const r = await w.control(pane, action);
+      return { keys: backend.keys.map((k) => k.keys.join("+")), texts: backend.texts.map((t) => t.text), hint: r.hint };
+    };
+    expect(await run("claude", "interrupt")).toMatchObject({ keys: ["esc"], texts: [] });
+    expect(await run("claude", "rewind")).toMatchObject({ keys: ["ctrl+c", "esc", "esc"], hint: expect.stringContaining("Restore conversation") });
+    expect(await run("codex", "rewind")).toMatchObject({ keys: ["ctrl+c", "esc", "esc"] });
+    expect(await run("omp", "rewind")).toMatchObject({ keys: ["ctrl+c", "enter"], texts: ["/rewind"] });
+    expect(await run("claude", "exit")).toMatchObject({ keys: ["ctrl+c", "ctrl+c"] });
+    for (const k of ["codex", "omp"] as const) expect(await run(k, "exit")).toMatchObject({ keys: ["ctrl+c", "ctrl+d"] });
+    expect(await run("omp", "clear")).toMatchObject({ keys: ["ctrl+c"] });
+    await expect(w.control(pane, "explode")).rejects.toThrow(/unknown action/);
+    delete backend.panes.get(pane)!.agent;
+    await w.refresh();
+    await expect(w.control(pane, "interrupt")).rejects.toThrow(/no agent/);
+  });
+});
+
 describe("the message queue and steering", () => {
   test("while the agent works a message waits for the end of its turn; steer sends it now; the queue survives a restart", async () => {
     const { home, backend, w, ws } = await setup();

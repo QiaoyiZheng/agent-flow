@@ -108,6 +108,15 @@ export function Terminal({
     if (autoFocus && mode === "control") term.focus();
 
     const input = term.onData((text) => send({ type: "term.input", id, text }));
+    // keys go to the agent as typed (Esc, Ctrl+C, Ctrl+D…), except Ctrl/Cmd+C with text selected: that copies
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C") && term.hasSelection()) {
+        void navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
+        term.clearSelection();
+        return false;
+      }
+      return true;
+    });
     // With scrollback 0, xterm would turn wheel events into Up/Down arrow keys and type them into the agent
     // (recalling old prompts). Herdr owns the history, so the wheel goes to Herdr instead.
     term.attachCustomWheelEventHandler(() => false);

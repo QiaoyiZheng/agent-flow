@@ -820,3 +820,8 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .row-actions .kebab { width: 16px; font-size: 15px; font-weight: 700; color: var(--text-3); opacity: 0.45; }
 .tree-row:hover .row-actions .kebab, .row-actions .menu-wrap:has(.menu) .kebab { opacity: 1; }
 .tree-row .row-actions .menu-wrap { display: inline-flex; }
+.agent-status .menu-wrap { position: relative; display: inline-flex; }
+.agent-status .menu.up { top: auto; bottom: calc(100% + 6px); right: 0; min-width: 260px; }
+.agent-status .menu .item { display: flex; align-items: center; gap: 8px; }
+.agent-status .menu .kbd { margin-left: auto; font: 10.5px var(--mono); color: var(--text-3); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 5px; }
+.agent-status button.stop { color: var(--s-rejected); }

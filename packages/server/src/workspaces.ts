@@ -14,6 +14,7 @@ import { AfError } from "./orchestrator.ts";
 import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
+import { REWIND_HINT, controlSteps } from "./controls.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -612,10 +613,29 @@ export class Workspaces {
     }
   }
 
+  /** Stop, rewind, clear or exit an agent, with the keys its own terminal uses for that (see controls.ts). */
+  async control(pane: string, action: string) {
+    const p = this.pane(pane);
+    const steps = controlSteps(p.agent, action);
+    const r = this.route(pane);
+    for (const st of steps) {
+      if ("wait" in st) await Bun.sleep(st.wait);
+      else if ("keys" in st) await r.backend.sendKeys(r.raw, st.keys);
+      else {
+        await r.backend.sendText(r.raw, st.text);
+        await Bun.sleep(120);
+        await r.backend.sendKeys(r.raw, ["enter"]);
+      }
+    }
+    // a rewind picker or an exit changes the screen: look again soon
+    this.lastJson = "";
+    return { action, agent: p.agent, hint: action === "rewind" ? REWIND_HINT[p.agent ?? ""] : undefined };
+  }
+
   async sendKeys(pane: string, keys: string[]) {
     this.pane(pane);
-    const ok = keys.every((k) => /^(esc|escape|enter|tab|up|down|left|right|backspace|ctrl\+[a-z])$/.test(k));
-    if (!ok || !keys.length) throw new AfError("bad_keys", "allowed keys: esc, enter, tab, arrows, backspace, ctrl+<letter>");
+    const ok = keys.every((k) => /^(esc|escape|enter|tab|shift\+tab|space|up|down|left|right|backspace|pageup|pagedown|home|end|ctrl\+[a-z])$/.test(k));
+    if (!ok || !keys.length) throw new AfError("bad_keys", "allowed keys: esc, enter, tab, shift+tab, space, arrows, backspace, page up/down, home, end, ctrl+<letter>");
     const r = this.route(pane);
     await r.backend.sendKeys(r.raw, keys);
   }

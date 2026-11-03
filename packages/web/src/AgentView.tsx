@@ -266,6 +266,32 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
       .finally(() => setForking(false));
   };
   const forkAt = (ref: number, text: string) => () => fork(ref, text);
+  const [controls, setControls] = useState(false);
+  const control = (action: "interrupt" | "rewind" | "clear" | "exit") =>
+    api<{ hint?: string }>("POST", "/pane/control", { pane: paneId, action })
+      .then((r) => {
+        // a rewind picker is the agent's own screen: show it, with what to do there
+        if (action === "rewind") {
+          setShowTerm(true);
+          if (r.hint) notify("info", `Rewind: ${r.hint}`);
+        }
+      })
+      .catch(failed("That did not work"));
+  // Esc in this view stops the agent's turn, as in its own terminal (not while typing in a field, or in a menu)
+  useEffect(() => {
+    if (!focused || status !== "working") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const t = e.target as HTMLElement;
+      if (t.closest(".xterm") || t.closest(".menu-card") || document.querySelector(".modal-back, .lightbox")) return;
+      const typing = t.tagName === "TEXTAREA" || t.tagName === "INPUT";
+      if (typing && (t as HTMLTextAreaElement).value) return; // Esc while typing keeps its meaning (close the / menu, …)
+      e.preventDefault();
+      control("interrupt");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focused, status, paneId]);
 
   // links to local files in agent output (codex writes [x.ts](/Users/…/x.ts:12)) open next to this pane
   const openLink = (e: React.MouseEvent) => {
@@ -382,10 +408,41 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
         <MetaChips meta={log.current.meta} />
         <span className="spacer" />
         {status === "working" && (
-          <button title="Interrupt (Esc)" onClick={() => api("POST", "/keys", { pane: paneId, keys: ["esc"] }).catch(failed("That did not work"))}>
+          <button className="stop" title={`Stop ${agent}'s turn (Esc). What you queued stays queued.`} onClick={() => control("interrupt")}>
             ■ Stop
           </button>
         )}
+        {source && !source.pending && (
+          <button title={`Rewind: go back to an earlier message and continue from there (${agent === "omp" ? "/rewind" : "Esc Esc"}). Opens ${agent}'s own picker.`} onClick={() => control("rewind")}>
+            ↶ Rewind
+          </button>
+        )}
+        <span className="menu-wrap">
+          <button title="More controls" onClick={() => setControls((c) => !c)}>
+            ⋯
+          </button>
+          {controls && (
+            <div className="menu up" onMouseLeave={() => setControls(false)} onClick={() => setControls(false)}>
+              <div className="item" onClick={() => control("interrupt")}>
+                ■ Stop the turn <span className="kbd">Esc</span>
+              </div>
+              <div className="item" onClick={() => control("rewind")}>
+                ↶ Rewind to an earlier message <span className="kbd">{agent === "omp" ? "/rewind" : "Esc Esc"}</span>
+              </div>
+              <div className="item" onClick={() => control("clear")}>
+                ⌫ Clear what is typed in {agent}'s own box <span className="kbd">Ctrl+C</span>
+              </div>
+              <div
+                className="item danger"
+                onClick={() => {
+                  if (confirm(`Exit ${agent}?\n\nIts conversation is saved; you can resume it later. The pane stays open with a shell.`)) control("exit");
+                }}
+              >
+                ⏻ Exit {agent} <span className="kbd">{agent === "claude" ? "Ctrl+C Ctrl+C" : "Ctrl+D"}</span>
+              </div>
+            </div>
+          )}
+        </span>
         {source && !source.pending && (
           <button disabled={forking} onClick={() => fork()} title="Fork: a new agent next to this one, with this whole conversation so far">
             {forking ? "forking…" : "⑂ Fork"}

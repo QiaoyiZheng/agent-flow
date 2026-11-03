@@ -429,3 +429,36 @@ describe("robustness", () => {
     expect(blocks(run(odd)).some((b) => (b as any).text === "subagent chatter")).toBe(false);
   });
 });
+
+describe("claude rewinds (Esc Esc, /rewind)", () => {
+  const u = (uuid: string, parentUuid: string | null, text: string) => ({ type: "user", uuid, parentUuid, message: { role: "user", content: text } });
+  const a = (uuid: string, parentUuid: string, text: string) => ({ type: "assistant", uuid, parentUuid, message: { role: "assistant", content: [{ type: "text", text }] } });
+  const r = (uuid: string, parentUuid: string, tool: string) => ({ type: "user", uuid, parentUuid, toolUseResult: {}, message: { role: "user", content: [{ type: "tool_result", tool_use_id: tool, content: "ok" }] } });
+  const shown = (lines: object[]) => {
+    const ctx = { n: 0 };
+    const view = new Map<string, string>();
+    for (const l of lines)
+      for (const op of parseClaude(l, ctx) as any[]) {
+        if (op.op === "add" && (op.entry.block.kind === "user" || op.entry.block.kind === "text")) view.set(op.entry.key, op.entry.block.text);
+        if (op.op === "remove") for (const k of op.keys) view.delete(k);
+      }
+    return [...view.values()];
+  };
+
+  test("a prompt continuing from an earlier point drops the rewound turns", () => {
+    expect(shown([u("1", null, "one"), a("2", "1", "1!"), u("3", "2", "two"), a("4", "3", "2!"), u("5", "2", "three"), a("6", "5", "3!")])).toEqual(["one", "1!", "three", "3!"]);
+    // back to the start: claude continues from the line before the first prompt (a session-start line)
+    const start = { type: "system", uuid: "0", parentUuid: null, subtype: "session_start" };
+    expect(shown([start, u("1", "0", "one"), a("2", "1", "1!"), u("3", "2", "two"), a("4", "3", "2!"), u("5", "0", "again")])).toEqual(["again"]);
+  });
+
+  test("lines sharing a parent for other reasons are kept: tool results, hooks, parallel tool calls", () => {
+    const tool = (uuid: string, parentUuid: string, id: string) => ({ type: "assistant", uuid, parentUuid, message: { role: "assistant", content: [{ type: "tool_use", id, name: "Bash", input: { command: "ls" } }] } });
+    const hook = (uuid: string, parentUuid: string) => ({ type: "attachment", uuid, parentUuid, attachment: { type: "hook_success" } });
+    expect(shown([u("1", null, "go"), tool("2", "1", "t1"), hook("h", "2"), r("3", "2", "t1"), tool("4", "3", "t2"), tool("5", "3", "t3"), r("6", "4", "t2"), r("7", "5", "t3"), a("8", "7", "done"), u("9", "8", "next")])).toEqual(["go", "done", "next"]);
+  });
+
+  test("a file opened in the middle (parents never seen) just continues", () => {
+    expect(shown([a("20", "19", "late reply"), u("21", "20", "more"), a("22", "21", "ok")])).toEqual(["late reply", "more", "ok"]);
+  });
+});

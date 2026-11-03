@@ -209,6 +209,8 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         }
         case "POST /pane/choose":
           return json(await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined));
+        case "POST /pane/control":
+          return json(await w.control(String(body.pane ?? ""), String(body.action ?? "")));
         case "POST /keys":
           await w.sendKeys(body.pane, Array.isArray(body.keys) ? body.keys.map(String) : []);
           return json({ ok: true });

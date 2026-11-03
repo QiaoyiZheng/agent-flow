@@ -33,11 +33,19 @@ interface State {
   /** A "!" bash-mode command waiting for its output. */
   bang?: string;
   meta: ChatMeta;
+  /**
+   * The conversation tree: claude records a rewind (Esc Esc, /rewind) by continuing from an earlier line
+   * (parentUuid), leaving the rewound part in the file. uuid → its parent and the entries it added.
+   */
+  tree: Map<string, { parent?: string; keys: string[]; prompt?: string }>;
+  /** The uuid of the newest line on the conversation's path. */
+  leaf?: string;
 }
 
 const state = (ctx: ParseCtx): State => {
   const s = (ctx.state ??= {}) as Partial<State>;
   s.line ??= 0;
+  s.tree ??= new Map();
   s.calls ??= new Map();
   s.tasks ??= new Map();
   s.agents ??= new Map();
@@ -54,11 +62,61 @@ function keep<K, V>(m: Map<K, V>, k: K, v: V, max: number) {
   while (m.size > max) m.delete(m.keys().next().value as K);
 }
 
+const TREE_MAX = 50_000;
+
+/** A line the user typed (not a tool result, not a harness message). */
+const isPrompt = (line: any) => {
+  if (line.type !== "user" || line.isMeta || line.isCompactSummary || line.toolUseResult !== undefined) return false;
+  const c = line.message?.content;
+  if (typeof c === "string") return true;
+  return Array.isArray(c) && !c.some((p: any) => p?.type === "tool_result");
+};
+
+/**
+ * Keep the view on the conversation's path. claude records a rewind (Esc Esc, /rewind) by writing the next prompt
+ * as a child of an earlier line, leaving the rewound part in the file. Lines often share a parent for other
+ * reasons (a hook line and the tool result after the same reply, parallel tool calls), so only this counts as a
+ * rewind: a prompt whose parent already has a prompt below it. The entries of the lines from that earlier prompt
+ * onward, on the old path, are removed.
+ */
+function branch(line: any, s: State, ops: ChatOp[]): ChatOp[] {
+  const uuid = typeof line.uuid === "string" ? line.uuid : undefined;
+  if (!uuid) return ops;
+  const parent = typeof line.parentUuid === "string" ? line.parentUuid : undefined;
+  const keys = ops.flatMap((o) => (o.op === "add" ? [o.entry.key] : []));
+  let out = ops;
+  const prompt = isPrompt(line);
+  const p = parent ? s.tree.get(parent) : undefined;
+  if (prompt && p?.prompt && s.leaf) {
+    // everything on the old path from that earlier prompt to the newest line goes
+    const gone: string[] = [];
+    const stop = parent;
+    const seen = new Set<string>();
+    for (let at: string | undefined = s.leaf; at && at !== stop && !seen.has(at); at = s.tree.get(at)?.parent) {
+      seen.add(at);
+      gone.push(...(s.tree.get(at)?.keys ?? []));
+    }
+    if (gone.length) out = [{ op: "remove", keys: gone }, ...ops];
+  }
+  if (prompt && p) p.prompt = uuid;
+  s.tree.set(uuid, { parent, keys });
+  if (s.tree.size > TREE_MAX) s.tree.delete(s.tree.keys().next().value!);
+  if (line.type === "user" || line.type === "assistant" || line.type === "system" || line.type === "attachment") s.leaf = uuid;
+  return out;
+}
+
 export function parseClaude(line: any, ctx: ParseCtx): ChatOp[] {
   if (!line || typeof line !== "object" || line.isSidechain) return [];
   try {
     const s = state(ctx);
     s.line++;
+    return branch(line, s, parseLine(line, ctx, s));
+  } catch {}
+  return [];
+}
+
+function parseLine(line: any, ctx: ParseCtx, s: State): ChatOp[] {
+  {
     switch (line.type) {
       case "user":
         return user(line, ctx, s);
@@ -73,7 +131,7 @@ export function parseClaude(line: any, ctx: ParseCtx): ChatOp[] {
       case "cost-state":
         return meta(s, { cost: typeof line.totalCostUSD === "number" ? line.totalCostUSD : undefined });
     }
-  } catch {}
+  }
   return [];
 }
 
