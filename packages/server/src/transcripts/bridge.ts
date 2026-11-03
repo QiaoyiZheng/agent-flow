@@ -12,6 +12,7 @@ interface Opts {
   panes: () => HPane[];
   knownSession: (paneId: string) => { id?: string; path?: string } | undefined;
   argv: (paneId: string) => Promise<string[][]>;
+  pids?: (paneId: string) => Promise<number[]>;
   screen: (paneId: string) => Promise<string>;
 }
 
@@ -48,6 +49,7 @@ export class ChatBridge {
       knownSession: known?.id,
       knownPath: known?.path,
       argv: () => this.opts.argv(o.paneId).catch(() => []),
+      pids: this.opts.pids ? () => this.opts.pids!(o.paneId).catch(() => []) : undefined,
       screen: () => this.opts.screen(o.paneId),
     });
     if (o.closed) return;

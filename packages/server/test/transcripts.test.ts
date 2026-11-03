@@ -217,6 +217,43 @@ describe("finding and following transcripts", () => {
     expect(await resolveTranscript(fs, { pane: a, panes: [a, b], knownPath: other, argv: async () => [], screen: async () => leadScreen })).toEqual({ source: { agent: "claude", path: other, how: "session" } });
   });
 
+  for (const [name, make] of [
+    ["local files", (root: string) => new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, ".codex/sessions") }) as TranscriptFS],
+    ["files over SSH (shell commands)", shellFs],
+  ] as const)
+    test(`the running process says which conversation is the pane's: claude's session registry, codex's open rollout — ${name}`, async () => {
+      const root = home();
+      const fs = make(root);
+      const dir = join(root, ".claude/projects/-proj");
+      const mine = join(dir, "22222222-2222-3333-4444-555555555555.jsonl");
+      writeFileSync(mine, JSON.stringify({ type: "user", cwd: "/proj", message: { content: "mine" } }) + "\n");
+      mkdirSync(join(root, ".claude/sessions"), { recursive: true });
+      writeFileSync(join(root, ".claude/sessions/4242.json"), JSON.stringify({ pid: 4242, sessionId: "22222222-2222-3333-4444-555555555555", cwd: "/proj" }));
+      writeFileSync(join(root, ".claude/sessions/4343.json"), JSON.stringify({ pid: 9999, sessionId: id })); // a stale file for another pid
+      const a = pane({ agent: "claude" });
+      const twin = pane({ id: "w1:p2", agent: "claude" });
+      const none = async () => [] as string[][];
+      // two claude agents in /proj: only the process tells them apart (no title, no screen)
+      expect(await resolveTranscript(fs, { pane: a, panes: [a, twin], argv: none, pids: async () => [4242] })).toEqual({ source: { agent: "claude", path: mine, how: "session" } });
+      expect(await resolveTranscript(fs, { pane: a, panes: [a, twin], argv: none, pids: async () => [4343] })).toMatchObject({ reason: expect.stringContaining("2 claude agents") });
+      expect(await fs.claudeSessionOfPid(-1)).toBeUndefined();
+
+      // codex: the rollout its process holds open
+      const lsof = Bun.spawnSync(["sh", "-c", "command -v lsof"]).exitCode === 0;
+      if (!lsof) return;
+      const rollout = join(root, ".codex/sessions/2026/11/02/rollout-2026-11-02T15-00-00-held-open.jsonl");
+      writeFileSync(rollout, "");
+      const holder = Bun.spawn(["sh", "-c", `exec 3>>'${rollout}'; sleep 20`]);
+      try {
+        await Bun.sleep(300);
+        const x = pane({ agent: "codex" });
+        const x2 = pane({ id: "w1:p3", agent: "codex" });
+        expect(await resolveTranscript(fs, { pane: x, panes: [x, x2], argv: none, pids: async () => [holder.pid] })).toEqual({ source: { agent: "codex", path: rollout, how: "session" } });
+      } finally {
+        holder.kill();
+      }
+    });
+
   test("several claude agents in one folder: the conversation title (the terminal title) tells which is whose", async () => {
     const root = tmp();
     const dir = join(root, ".claude/projects/-proj");

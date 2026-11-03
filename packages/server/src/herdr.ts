@@ -53,6 +53,8 @@ export interface TerminalBackend {
   removeMachine(profileId: string): Promise<void>;
   /** argv of the pane's foreground processes. */
   processArgv(paneId: string): Promise<string[][]>;
+  /** The pane's foreground processes: pid and argv. */
+  processes(paneId: string): Promise<{ pid: number; argv: string[] }[]>;
   /** Call `onEvent` on any workspace/tab/pane/layout lifecycle event. Returns a stop function. */
   watchLifecycle(onEvent: () => void): () => void;
 }
@@ -289,8 +291,12 @@ export class Herdr implements TerminalBackend {
   }
 
   async processArgv(paneId: string): Promise<string[][]> {
+    return (await this.processes(paneId)).map((p) => p.argv);
+  }
+
+  async processes(paneId: string): Promise<{ pid: number; argv: string[] }[]> {
     const r = await this.rpc("pane.process_info", { pane_id: paneId }).catch(() => undefined);
-    return (r?.process_info?.foreground_processes ?? []).map((p: any) => (Array.isArray(p.argv) ? p.argv : []));
+    return (r?.process_info?.foreground_processes ?? []).map((p: any) => ({ pid: Number(p.pid), argv: Array.isArray(p.argv) ? p.argv : [] }));
   }
 
   async addMachine(target: string, label?: string, session?: string) {

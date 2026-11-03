@@ -31,6 +31,7 @@ export function makeTranscriptAccess(o: Orchestrator, w: Workspaces) {
       knownSession: k?.id,
       knownPath: k?.path,
       argv: () => w.processArgv(paneId).catch(() => []),
+      pids: () => w.processes(paneId).then((ps) => ps.map((x) => x.pid)),
       screen: () => w.read(paneId, 400),
     });
   };

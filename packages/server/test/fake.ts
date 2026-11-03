@@ -175,6 +175,11 @@ export class FakeBackend implements TerminalBackend {
   async processArgv(): Promise<string[][]> {
     return [];
   }
+  /** pane id → its foreground processes (tests set it). */
+  procs = new Map<string, { pid: number; argv: string[] }[]>();
+  async processes(paneId: string) {
+    return this.procs.get(paneId) ?? [];
+  }
   saved: { id: string; label: string; target: string; session: string }[] = [];
   addFails?: string;
   async savedMachines() {

@@ -651,6 +651,11 @@ export class Workspaces {
     return r.backend.terminalSessionArgv(r.raw, mode, cols, rows);
   }
 
+  processes(pane: string) {
+    const r = this.route(pane);
+    return r.backend.processes(r.raw);
+  }
+
   processArgv(pane: string) {
     const r = this.route(pane);
     return r.backend.processArgv(r.raw);

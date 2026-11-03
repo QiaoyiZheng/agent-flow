@@ -10,7 +10,7 @@
 
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ChatOp, ChatSource, HPane } from "@af/core";
 import { type Agent, PARSERS, type ParseCtx } from "./parse.ts";
 import { sq } from "../remote.ts";
@@ -39,7 +39,16 @@ export interface TranscriptFS {
   copyPrefix(src: string, dst: string, bytes: number | undefined, from: string, to: string): Promise<void>;
   /** Run a shell command where the files are (to list skills). */
   sh(cmd: string): Promise<string>;
+  /** The session a running claude process is in: claude keeps <config>/sessions/<pid>.json up to date (also after /clear). */
+  claudeSessionOfPid(pid: number): Promise<string | undefined>;
+  /** The rollout file a running codex process (or its children) holds open, from lsof. */
+  codexRolloutOfPids(pids: number[]): Promise<string | undefined>;
 }
+
+const validPids = (pids: number[]) => pids.filter((p) => Number.isInteger(p) && p > 1);
+/** A shell command printing the first codex rollout that these processes or their children hold open. */
+export const openRolloutCmd = (pids: number[]) =>
+  String.raw`pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] && lsof -Fn -p "$pids" 2>/dev/null | sed -n 's/^n\(.*\/sessions\/.*rollout-.*\.jsonl\)$/\1/p' | head -n 1`;
 
 export interface Roots {
   claude: string;
@@ -65,6 +74,22 @@ function readHead(path: string, bytes = 16384) {
 export class LocalFS implements TranscriptFS {
   private cwdCache = new Map<string, { mtime: number; cwd?: string }>();
   constructor(readonly roots: Roots = defaultRoots()) {}
+
+  async claudeSessionOfPid(pid: number) {
+    if (!validPids([pid]).length) return undefined;
+    try {
+      const rec = JSON.parse(readFileSync(join(dirname(this.roots.claude), "sessions", `${pid}.json`), "utf8"));
+      return typeof rec?.sessionId === "string" && rec.pid === pid ? rec.sessionId : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async codexRolloutOfPids(pids: number[]) {
+    if (!validPids(pids).length) return undefined;
+    const p = Bun.spawnSync(["sh", "-c", openRolloutCmd(pids)], { stdout: "pipe", stderr: "ignore" });
+    return p.stdout.toString().trim().split("\n")[0] || undefined;
+  }
 
   async claudeById(id: string) {
     if (!existsSync(this.roots.claude)) return undefined;
@@ -190,6 +215,22 @@ export class SshFS implements TranscriptFS {
     return s || undefined;
   }
 
+  async claudeSessionOfPid(pid: number) {
+    if (!validPids([pid]).length) return undefined;
+    const r = await this.exec(`cat "$HOME/.claude/sessions/${pid}.json" 2>/dev/null`);
+    try {
+      const rec = JSON.parse(r.out.toString());
+      return typeof rec?.sessionId === "string" && rec.pid === pid ? rec.sessionId : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  codexRolloutOfPids(pids: number[]) {
+    if (!validPids(pids).length) return Promise.resolve(undefined);
+    return this.line(openRolloutCmd(pids));
+  }
+
   claudeById(id: string) {
     if (!/^[0-9a-f-]+$/i.test(id)) return Promise.resolve(undefined);
     return this.line(`ls -1 "$HOME"/.claude/projects/*/${id}.jsonl 2>/dev/null | head -n 1`);
@@ -257,6 +298,8 @@ export interface ResolveInput {
   screen?: () => Promise<string>;
   /** argv of the pane's foreground processes, fetched lazily. */
   argv: () => Promise<string[][]>;
+  /** pids of the pane's foreground processes, fetched lazily: the exact way to a running claude's or codex's file. */
+  pids?: () => Promise<number[]>;
 }
 
 const isAgent = (a: string | undefined): a is Agent => a === "claude" || a === "codex" || a === "omp";
@@ -348,7 +391,7 @@ export async function matchByTitle(fs: TranscriptFS, candidates: string[], paneT
   return hits.length === 1 ? hits[0] : undefined;
 }
 
-export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSession, knownPath, screen, argv }: ResolveInput): Promise<{ source: ChatSource } | { reason: string }> {
+export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSession, knownPath, screen, argv, pids }: ResolveInput): Promise<{ source: ChatSource } | { reason: string }> {
   const agent = pane.agent;
   if (!isAgent(agent)) return { reason: pane.agent ? `rendering ${pane.agent} output is not supported yet` : "no agent in this pane" };
   const byId = (id: string) => (agent === "claude" ? fs.claudeById(id) : agent === "codex" ? fs.codexById(id) : Promise.resolve(undefined));
@@ -362,6 +405,18 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
   if (pane.session?.kind === "path" && (await fs.exists(pane.session.value))) return { source: { agent, path: pane.session.value, how: "session" } };
   if (pane.session?.kind === "id") {
     const r = found(await byId(pane.session.value), "session");
+    if (r) return r;
+  }
+  // the running process says which session it is in
+  const procs = pids ? await pids().catch(() => [] as number[]) : [];
+  if (agent === "claude")
+    for (const pid of procs) {
+      const id = await fs.claudeSessionOfPid(pid).catch(() => undefined);
+      const r = id ? found(await fs.claudeById(id), "session") : undefined;
+      if (r) return r;
+    }
+  if (agent === "codex" && procs.length) {
+    const r = found(await fs.codexRolloutOfPids(procs).catch(() => undefined), "session");
     if (r) return r;
   }
   if (agent === "claude") {
