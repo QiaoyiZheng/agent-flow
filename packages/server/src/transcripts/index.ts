@@ -18,6 +18,8 @@ import { sq } from "../remote.ts";
 /** Load at most this much of a transcript when opening it; older history is skipped. */
 export const MAX_INITIAL = 8 * 1024 * 1024;
 const RECENT_DAYS = 14;
+/** How many of the last bytes read a transcript tail compares on the next read, to notice a rewritten file. */
+const TAIL_MARK = 512;
 
 /** File access for transcripts, on this machine or another one. */
 export interface TranscriptFS {
@@ -28,8 +30,11 @@ export interface TranscriptFS {
   /** Codex rollout files (last two weeks) whose session_meta cwd is `cwd`, newest first, at most `limit`. */
   codexForFolder(cwd: string, limit: number): Promise<string[]>;
   exists(path: string): Promise<boolean>;
-  /** Bytes from `offset` (at most `max`), and the file's current size. undefined if the file is gone. */
-  readFrom(path: string, offset: number, max: number): Promise<{ size: number; data: Buffer } | undefined>;
+  /**
+   * Bytes from `offset` (at most `max`), and the file's current size. undefined if the file is gone. `file` names the
+   * file itself (device and inode, when known): another one means the file was replaced (rewritten and renamed over).
+   */
+  readFrom(path: string, offset: number, max: number): Promise<{ size: number; data: Buffer; file?: string } | undefined>;
   /** Write the first `bytes` of `src` (all of it when undefined) to `dst`, replacing every `from` with `to`. */
   copyPrefix(src: string, dst: string, bytes: number | undefined, from: string, to: string): Promise<void>;
   /** Run a shell command where the files are (to list skills). */
@@ -154,18 +159,21 @@ export class LocalFS implements TranscriptFS {
 
   async readFrom(path: string, offset: number, max: number) {
     let size: number;
+    let file: string;
     try {
-      size = statSync(path).size;
+      const st = statSync(path);
+      size = st.size;
+      file = `${st.dev}:${st.ino}`;
     } catch {
       return undefined;
     }
-    if (size <= offset) return { size, data: Buffer.alloc(0) };
+    if (size <= offset) return { size, data: Buffer.alloc(0), file };
     const len = Math.min(size - offset, max);
     const fd = openSync(path, "r");
     try {
       const buf = Buffer.alloc(len);
       readSync(fd, buf, 0, len, offset);
-      return { size, data: buf };
+      return { size, data: buf, file };
     } finally {
       closeSync(fd);
     }
@@ -226,14 +234,15 @@ export class SshFS implements TranscriptFS {
   async readFrom(path: string, offset: number, max: number) {
     const o = Math.max(0, Math.floor(offset));
     const r = await this.exec(
-      `f=${sq(path)}; [ -f "$f" ] || exit 3; s=$(wc -c < "$f" | tr -d ' '); echo "$s"; if [ ${max} -gt 0 ] && [ "$s" -gt ${o} ]; then n=$((s-${o})); [ "$n" -gt ${max} ] && n=${max}; tail -c +$((${o}+1)) "$f" | head -c "$n"; fi`,
+      `f=${sq(path)}; [ -f "$f" ] || exit 3; s=$(wc -c < "$f" | tr -d ' '); i=$(ls -di "$f" | awk '{print $1}'); echo "$s $i"; if [ ${max} -gt 0 ] && [ "$s" -gt ${o} ]; then n=$((s-${o})); [ "$n" -gt ${max} ] && n=${max}; tail -c +$((${o}+1)) "$f" | head -c "$n"; fi`,
       { timeoutMs: 60_000 },
     );
     if (r.code !== 0) return undefined;
     const nl = r.out.indexOf(10);
     if (nl < 0) return undefined;
-    const size = Number(r.out.subarray(0, nl).toString());
-    return Number.isFinite(size) ? { size, data: Buffer.from(r.out.subarray(nl + 1)) } : undefined;
+    const [sizeText, file] = r.out.subarray(0, nl).toString().trim().split(/\s+/);
+    const size = Number(sizeText);
+    return Number.isFinite(size) ? { size, data: Buffer.from(r.out.subarray(nl + 1)), ...(file ? { file } : {}) } : undefined;
   }
 }
 
@@ -397,6 +406,10 @@ export class TranscriptTail {
   private offset = -1;
   private partial = Buffer.alloc(0);
   private ctx: ParseCtx = { n: 0 };
+  /** The last bytes read (up to TAIL_MARK): read again each time to notice a rewrite. */
+  private mark = Buffer.alloc(0);
+  /** The file read (device and inode), when the file access tells it. */
+  private file?: string;
   /** Bytes skipped at the start because the file was larger than MAX_INITIAL. */
   skipped = 0;
 
@@ -406,28 +419,41 @@ export class TranscriptTail {
     private maxInitial = MAX_INITIAL,
   ) {}
 
-  /** New ops since the last call. Restarts from scratch if the file shrank (rewritten). */
-  async read(): Promise<{ ops: ChatOp[]; reset: boolean }> {
-    let reset = false;
+  /**
+   * New ops since the last call. Starts over if the file was rewritten: it shrank, it is another file now (written
+   * next to it and renamed over it, as omp does when it rewrites a session, e.g. to prune old tool output: often to
+   * the same size or larger), or the bytes just before the read offset changed. Bytes further back may change in
+   * place without a restart (omp's fixed-width title line).
+   */
+  async read(again = false): Promise<{ ops: ChatOp[]; reset: boolean }> {
+    const reset = again;
     if (this.offset < 0) {
       const head = await this.fs.readFrom(this.source.path, 0, 0);
       if (!head) return { ops: [], reset };
       this.offset = Math.max(0, head.size - this.maxInitial);
       this.skipped = this.offset;
+      this.file = head.file;
     }
-    const chunk = await this.fs.readFrom(this.source.path, this.offset, 16 * 1024 * 1024);
+    const back = this.mark.length;
+    const chunk = await this.fs.readFrom(this.source.path, this.offset - back, 16 * 1024 * 1024 + back);
     if (!chunk) return { ops: [], reset };
-    if (chunk.size < this.offset) {
-      this.offset = 0;
+    const replaced = !!this.file && !!chunk.file && chunk.file !== this.file;
+    if (replaced || chunk.size < this.offset || (back && !chunk.data.subarray(0, back).equals(this.mark))) {
+      this.offset = -1; // as when first opened: the last MAX_INITIAL bytes
       this.skipped = 0;
       this.partial = Buffer.alloc(0);
+      this.mark = Buffer.alloc(0);
+      this.file = undefined;
       this.ctx = { n: 0 };
-      reset = true;
-      return { ...(await this.read()), reset };
+      if (again) return { ops: [], reset }; // rewritten again while starting over: the next read starts over once more
+      return this.read(true);
     }
-    if (!chunk.data.length) return { ops: [], reset };
+    this.file ??= chunk.file;
+    const data = chunk.data.subarray(back);
+    if (!data.length) return { ops: [], reset };
+    this.mark = Buffer.from((data.length >= TAIL_MARK ? data : Buffer.concat([this.mark, data])).subarray(-TAIL_MARK));
     // split on newline bytes, so a read that ends inside a multi-byte character cannot corrupt a line
-    let buf = this.partial.length ? Buffer.concat([this.partial, chunk.data]) : chunk.data;
+    let buf = this.partial.length ? Buffer.concat([this.partial, data]) : data;
     // byte offset in the file where buf starts: entries remember where their line starts (fork points)
     let start = this.offset - this.partial.length;
     if (this.skipped && this.offset === this.skipped && !this.partial.length) {
@@ -435,7 +461,7 @@ export class TranscriptTail {
       buf = buf.subarray(cut);
       start += cut;
     }
-    this.offset += chunk.data.length;
+    this.offset += data.length;
     const end = buf.lastIndexOf(10);
     this.partial = Buffer.from(buf.subarray(end + 1));
     const parse = PARSERS[this.source.agent];

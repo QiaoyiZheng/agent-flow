@@ -13,6 +13,24 @@
 //
 // A dialog takes the place of the agent's input box. While the input box is on screen, menu-like text above it is
 // part of the conversation (a reply that quotes a prompt, a user message with a numbered list), not a menu.
+//
+// omp (oh-my-pi) draws its dialogs as a rounded box in place of its input box. Its ask tool:
+//
+//  ╭─ Ask ──────────────────────────────────────────╮
+//  │  Format    Length    Submit                      │  <- steps, only with several questions or a multi-select
+//  │ Which output format do you prefer?               │  <- question
+//  ├──────────────────────────────────────────────────┤
+//  │ ❯ ○ Markdown                                     │  <- ❯ highlighted row; ○/◉ pick one, ☐/☑ pick many
+//  │       Plain text with headings                   │  <- description
+//  │   ○ Other (type your own)                        │  <- always last: Enter opens a text box
+//  ├──────────────────────────────────────────────────┤
+//  │ Enter select · n note · ↑/↓ move · Esc cancel    │  <- key hint
+//  ╰──────────────────────────────────────────────────╯
+//
+// Its selectors (confirmations, extension and command menus) put the title in the top edge, then message lines,
+// the options (" ❯ Yes" / "   No", descriptions deeper) and a key hint, with no ├──┤ rules. Its idle input box
+// (default "band" shape) is a status line over "╰─ " and the text typed; the "box" shape ends in "╰─ text ─╯".
+// A dialog's bottom edge is a bare rule (╰────╯), so it is not taken for the input box.
 
 export interface MenuOption {
   index: number;
@@ -24,7 +42,7 @@ export interface MenuOption {
   selected: boolean;
   /** Options that turn into a text field (claude "Type something.", codex "No, and tell Codex …"). */
   freeText: boolean;
-  /** Multi-select options: whether the box is ticked. Undefined for plain options. */
+  /** Multi-select options: whether the box is ticked (omp also ticks a single-select answer chosen earlier, ◉). Undefined for plain options. */
   checked?: boolean;
   /** Not an answer but a button: claude's multi-select "Next"/"Submit", and "Submit answers"/"Cancel" on its review page. */
   action?: "primary" | "secondary";
@@ -50,6 +68,12 @@ export interface Menu {
   tabs?: MenuTab[];
   /** claude's last step: the answers so far, and Submit answers / Cancel. */
   review?: boolean;
+  /**
+   * Keys that differ from claude's and codex's (Enter picks or ticks the highlighted option). omp's ask dialog
+   * ticks a multi-select option with Space (Enter sends the answers), and its "Other (type your own)" opens a text
+   * box on Enter: the answer is typed after that Enter and sent with another one.
+   */
+  keys?: { tick?: "space"; textAfterEnter?: boolean };
 }
 
 /** claude's multi-select button under the options. */
@@ -78,14 +102,140 @@ function screenLines(screen: string) {
  * Whether the agent's own input box is at the bottom of the screen. A dialog (a question, an approval, a notice)
  * takes its place: claude and codex draw it in the input box's area, omp swaps its editor for a selector.
  *   claude:  ──── / ❯ … / ──── / status lines        codex:  › … / model line / "? for shortcuts"
- *   omp:     ╭─ … / ╰─ …
+ *   omp:     status line / ╰─ …   or   ╭─ status ─╮ / ╰─ … ─╯   (a dialog ends in a bare ╰────╯ instead);
+ *            its other input shapes: a ❯ prompt, a filled field ▐ … ▌ or rail ▎ …, " text" between two bare rules
  */
 function inputBoxShown(lines: string[], agent: string | undefined) {
   if (!agent || !AGENTS.has(agent)) return false;
   const tail = lines.slice(-14);
   if (agent === "claude") return tail.some((l, i) => /^\s*❯(\s|$)/.test(l) && (rule(tail[i - 1]) || rule(tail[i - 2])) && tail.slice(i + 1, i + 4).some((x) => rule(x)));
   if (agent === "codex") return tail.slice(-8).some((l) => /^\s*›(\s|$)/.test(l) && !/^\s*›\s+\d+[.)]/.test(l));
-  return tail.slice(-6).some((l) => /^\s*╰─/.test(l));
+  // (omp's dialog rows all start with a box edge, so a bare ❯ is the prompt.) The "box" shape with omp's IME-safe
+  // cursor also ends in a bare ╰────╯, under a text row without its right edge.
+  const last = tail.slice(-6);
+  if (last.filter((l) => /^─{8,}$/.test(l)).length >= 2) return true;
+  return last.some((l, i) => /^\s*[❯▐▎]/.test(l) || (/^\s*╰─/.test(l) && (!OMP_BOTTOM.test(l) || (/^\s*│/.test(last[i - 1] ?? "") && !OMP_ROW.test(last[i - 1]!)))));
+}
+
+// ---- omp dialogs (see the header comment) ----
+
+const OMP_BOTTOM = /^(\s*)╰─+╯$/;
+const OMP_ROW = /^\s*│.*│$/;
+/** omp's highlight (theme nav.cursor): unicode ❯, Nerd Font chevron. omp's ASCII symbol preset is not read. */
+const OMP_CURSOR = /^(\s*)(?:❯|\uf054) (.*)$/;
+/** Option markers (theme radio.* and checkbox.*), unicode and Nerd Font. */
+const OMP_MARK = /^([◉○☑☐\uf192\uf10c\uf14a\uf096]) (.*)$/;
+const OMP_MARK_ON = /[◉☑\uf192\uf14a]/;
+const OMP_MARK_BOX = /[☑☐\uf14a\uf096]/;
+const OMP_OTHER = "Other (type your own)";
+const OMP_ASK_TITLE = /^Ask( \(\d+s\))?$/;
+
+interface OmpBox {
+  /** The text in the top edge ("Ask", a selector's title). */
+  title: string;
+  /** The rows inside, without the │ edges, split at ├──┤ rules. */
+  parts: string[][];
+}
+
+/** omp's dialog box at the bottom of the screen (a few status lines may follow it). Call when its input box is not shown. */
+function ompDialog(lines: string[]): OmpBox | undefined {
+  for (let b = lines.length - 1; b >= 0 && b >= lines.length - 8; b--) {
+    const m = OMP_BOTTOM.exec(lines[b]!);
+    if (!m) continue;
+    const left = m[1]!.length;
+    const parts: string[][] = [[]];
+    for (let j = b - 1; j >= 0 && j >= b - 80; j--) {
+      const l = lines[j]!;
+      if (indentOf(l) !== left) return undefined;
+      if (/^\s*╭─.*╮$/.test(l)) {
+        const title = l.trim().replace(/^╭─/, "").replace(/─*╮$/, "").trim();
+        parts.forEach((p) => p.reverse());
+        parts.reverse();
+        // a scrolling list draws its scrollbar (│ track, █ thumb) in the last column of every row
+        const body = parts.length === 3 ? parts[1]! : [];
+        if (body.length && body.every((r) => /[│█]$/.test(r))) parts[1] = body.map((r) => r.slice(0, -1).trimEnd());
+        return { title, parts };
+      }
+      if (/^\s*├─+┤$/.test(l)) parts.push([]);
+      else if (OMP_ROW.test(l)) parts.at(-1)!.push(l.slice(left + 1, -1).replace(/^ /, "").trimEnd());
+      else return undefined;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The menu in an omp dialog box. Rows are read relative to the highlight's column c: options start at c (the ❯,
+ * or a selector's marker in its place) or at c+2; description, preview (│ …) and wrapped label rows are deeper.
+ */
+function ompMenu(box: OmpBox): Menu | undefined {
+  const rows = box.parts.flat();
+  const section = box.parts.flatMap((p, k) => p.map(() => k));
+  let p = rows.findLastIndex((r) => OMP_CURSOR.test(r));
+  // a selector with radio markers fills the highlighted row's ◉ instead of drawing ❯
+  const radioCursor = p < 0;
+  if (radioCursor) {
+    const filled = rows.flatMap((r, i) => (/^\s*[◉\uf192] /.test(r) ? [i] : []));
+    if (filled.length !== 1 || !rows.some((r) => /^\s*[○\uf10c] /.test(r))) return undefined;
+    p = filled[0]!;
+  }
+  const c = indentOf(rows[p]!);
+  /** The option on row i (cursor and marker included), if it is one. */
+  const optionAt = (i: number) => {
+    const r = rows[i]!;
+    const text = i === p ? (radioCursor ? r.trim() : OMP_CURSOR.exec(r)![2]!) : indentOf(r) === c + 2 || (indentOf(r) === c && OMP_MARK.test(r.trim())) ? r.trim() : undefined;
+    // a selector's search line and empty result are not options
+    return text === undefined || /^\(\d+\/\d+( of \d+)?\)\s|^No matching options$/.test(text) ? undefined : text;
+  };
+  const inList = (i: number) => section[i] === section[p] && (blank(rows[i]!) || optionAt(i) !== undefined || indentOf(rows[i]!) >= c + 4);
+  let start = p;
+  while (start > 0 && inList(start - 1)) start--;
+  let end = p;
+  while (end < rows.length - 1 && inList(end + 1)) end++;
+
+  type Opt = MenuOption & { labelCol: number };
+  const options: Opt[] = [];
+  let multiSelect = false;
+  for (let i = start; i <= end; i++) {
+    const r = rows[i]!;
+    if (blank(r)) continue;
+    const text = optionAt(i);
+    if (text === undefined) {
+      const last = options.at(-1);
+      if (!last) continue; // the list started mid-description
+      const t = r.trim();
+      if (/^│/.test(t)) last.preview = (last.preview ? `${last.preview}\n` : "") + t.replace(/^│ ?/, "");
+      else if (indentOf(r) === last.labelCol) last.label += ` ${t}`;
+      else last.description = last.description ? `${last.description}\n${t}` : t;
+      continue;
+    }
+    const mark = OMP_MARK.exec(text);
+    const label = (mark ? mark[2]! : text).replace(/\s+✎ note$/, "").trim();
+    let checked: boolean | undefined;
+    if (mark && OMP_MARK_BOX.test(mark[1]!)) (checked = OMP_MARK_ON.test(mark[1]!)), (multiSelect = true);
+    else if (mark && OMP_MARK_ON.test(mark[1]!) && !radioCursor) checked = true; // ◉: the answer chosen earlier
+    const textCol = i === p && !radioCursor ? c + 2 : indentOf(r);
+    options.push({ index: options.length, label, selected: i === p, freeText: label === OMP_OTHER, ...(checked !== undefined ? { checked } : {}), labelCol: textCol + (mark ? 2 : 0) });
+  }
+  if (options.length < 2) return undefined;
+
+  const hint = rows.slice(end + 1).findLast((r) => !blank(r) && HINT.test(r))?.trim();
+  const question = [...(box.title && !OMP_ASK_TITLE.test(box.title) ? [box.title] : []), ...rows.slice(0, start).filter((r) => !blank(r)).map((r) => r.trim())];
+  // the ask dialog's steps ("Format    Length    Submit") head the question when its hint offers Tab/←/→
+  let tabs: MenuTab[] | undefined;
+  const k = hint && /\bTab\//.test(hint) ? question.findIndex((l) => /(^|\s{3})Submit$/.test(l)) : -1;
+  if (k >= 0 && k < 3)
+    tabs = question
+      .splice(0, k + 1)
+      .join("    ")
+      .split(/\s{3,}/)
+      .map((label, i, all) => (i === all.length - 1 ? { label, done: false, submit: true } : { label, done: false }));
+  const result: MenuOption[] = options.map(({ labelCol: _, ...o }) => o);
+  // a multi-select ticks with Space; Enter sends the ticked answers (on to the next question, or submits)
+  const tick = !!hint && /\bSpace toggle\b/i.test(hint);
+  if (tick) result.push({ index: result.length, label: /\bEnter next\b/i.test(hint!) ? "Next" : "Submit", selected: false, freeText: false, action: "primary" });
+  return { question, options: result, hint, multiSelect, ...(tabs?.length ? { tabs } : {}), keys: { ...(tick ? { tick: "space" as const } : {}), textAfterEnter: true } };
 }
 
 /**
@@ -113,7 +263,12 @@ function sideBoxColumn(lines: string[]) {
  * (a shell, an agent not detected yet) the whole screen is searched.
  */
 export function parseMenu(screen: string, agent?: string): Menu | undefined {
-  if (inputBoxShown(screenLines(screen), agent)) return undefined;
+  const shown = screenLines(screen);
+  if (inputBoxShown(shown, agent)) return undefined;
+  if (agent === "omp") {
+    const box = ompDialog(shown);
+    if (box) return ompMenu(box); // a box that is not a menu (a text prompt, the answers to review) is an overlay
+  }
   let raw = screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/\u00a0/g, " "));
   const side = sideBoxColumn(raw);
   if (side !== undefined) raw = raw.map((l) => (l.length > side && /\s/.test(l[side - 1] ?? " ") ? l.slice(0, side) : l));
@@ -252,8 +407,14 @@ function readAround(lines: string[], p: number, t: number, pointerText: string, 
 export function keysToChoose(menu: Menu, target: number): string[] {
   const from = menu.options.find((o) => o.selected)?.index ?? 0;
   if (target < 0 || target >= menu.options.length) throw new Error(`no option ${target + 1}`);
+  const opt = menu.options[target]!;
+  // omp's multi-select Submit/Next is not a row: Enter on any option row sends the ticks ("Other" would open its text box)
+  if (opt.action && menu.keys?.tick) return [...(menu.options[from]?.freeText ? ["up"] : []), "enter"];
   const moves = target - from;
-  return [...Array(Math.abs(moves)).fill(moves > 0 ? "down" : "up"), "enter"];
+  const arrows: string[] = Array(Math.abs(moves)).fill(moves > 0 ? "down" : "up");
+  if (opt.freeText && menu.keys?.textAfterEnter) return [...arrows, "enter", "enter"]; // the answer is typed before the last Enter
+  if (opt.checked !== undefined && menu.keys?.tick) return [...arrows, menu.keys.tick];
+  return [...arrows, "enter"];
 }
 
 /**
@@ -311,19 +472,28 @@ export function screenOverlay(screen: string, agent: string | undefined): Overla
   const lines = screenLines(screen);
   if (lines.length < 3) return undefined; // not drawn yet
   if (inputBoxShown(lines, agent)) return undefined;
-  // the panel: from the last full-width rule (if close to the bottom) to the end
-  let start = Math.max(0, lines.length - 30);
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--)
-    if (rule(lines[i])) {
-      start = i + 1;
-      break;
-    }
-  const body = lines.slice(start).map((l) => l.trim());
+  const box = agent === "omp" ? ompDialog(lines) : undefined;
+  let body: string[];
+  if (box) {
+    // omp's dialog box: its title and rows (the ask dialog's list is padded with blank rows)
+    body = [...(box.title && !OMP_ASK_TITLE.test(box.title) ? [box.title] : []), ...box.parts.flat().map((l) => l.trim())].filter((l, i, all) => l || all[i - 1]);
+    while (body.length && !body.at(-1)) body.pop();
+  } else {
+    // the panel: from the last full-width rule (if close to the bottom) to the end
+    let start = Math.max(0, lines.length - 30);
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--)
+      if (rule(lines[i])) {
+        start = i + 1;
+        break;
+      }
+    body = lines.slice(start).map((l) => l.trim());
+  }
   while (body.length && !body[0]) body.shift();
   if (!body.join("").trim()) return undefined;
   const hintIdx = body.findLastIndex((l) => HINT.test(l) && l.length < 160);
   const hint = hintIdx >= 0 ? body[hintIdx] : undefined;
   const text = hintIdx >= 0 ? body.filter((_, i) => i !== hintIdx) : body;
+  if (box) while (text.length && !text.at(-1)) text.pop();
   const k = (hint ?? "").toLowerCase();
   return { lines: text, hint, enter: !hint || /enter|continue|confirm|return/.test(k), esc: !hint || /esc/.test(k) };
 }

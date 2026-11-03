@@ -399,3 +399,161 @@ describe("claude multi-select questions: Next/Submit is a button, not an option"
     expect(m.tabs!.map((x) => [x.label, x.current])).toEqual([["Parts", true], ["Length", false], ["Submit", false]]);
   });
 });
+
+describe("omp dialogs (oh-my-pi 18.2.3): a rounded box in place of the input box", () => {
+  const W = 64;
+  // the box omp's ask dialog and selectors draw (overlay-box.ts): title in the top edge, ├──┤ between sections,
+  // every row "│ " + content + " │" at full width
+  const ompBox = (title: string, sections: string[][]) => [
+    title ? `╭─ ${title} ${"─".repeat(W - 5 - title.length)}╮` : `╭${"─".repeat(W - 2)}╮`,
+    ...sections.flatMap((rows, s) => [...(s ? [`├${"─".repeat(W - 2)}┤`] : []), ...rows.map((r) => `│ ${r.padEnd(W - 4)} │`)]),
+    `╰${"─".repeat(W - 2)}╯`,
+  ];
+  // a list longer than the box: the last column of every list row is the scrollbar (█ thumb, │ track)
+  const scrolled = (rows: string[], thumb: number) => rows.map((r, i) => r.padEnd(W - 5) + (i < thumb ? "█" : "│"));
+  const ABOVE = [" ● I need one decision before I write the report.", ""];
+
+  const SINGLE = [
+    ...ABOVE,
+    ...ompBox("Ask", [
+      ["Which output format do you prefer for the report?"],
+      ["❯ ○ Markdown", "      Plain text with headings", "  ○ LaTeX", "      For the paper", "  ○ HTML", "  ○ Other (type your own)", "", ""],
+      ["Enter select · n note · ↑/↓ move · Esc cancel"],
+    ]),
+  ];
+
+  test("ask tool, one question: radio markers stripped, descriptions, Other is free text, arrows and Enter", () => {
+    const m = parseMenu(SINGLE.join("\n"), "omp")!;
+    expect(m.question).toEqual(["Which output format do you prefer for the report?"]);
+    expect(m.options.map((o) => [o.label, o.description ?? "", o.selected, o.freeText, o.checked])).toEqual([
+      ["Markdown", "Plain text with headings", true, false, undefined],
+      ["LaTeX", "For the paper", false, false, undefined],
+      ["HTML", "", false, false, undefined],
+      ["Other (type your own)", "", false, true, undefined],
+    ]);
+    expect(m.hint).toBe("Enter select · n note · ↑/↓ move · Esc cancel");
+    expect([m.multiSelect, m.tabs]).toEqual([false, undefined]);
+    expect(keysToChoose(m, 0)).toEqual(["enter"]);
+    expect(keysToChoose(m, 2)).toEqual(["down", "down", "enter"]);
+    // Enter on Other opens omp's text box; the answer is typed before the last Enter
+    expect(keysToChoose(m, 3)).toEqual(["down", "down", "down", "enter", "enter"]);
+    // input shapes with a status bar keep it under the dialog
+    expect(parseMenu([...SINGLE, "", "  ~/proj  main  opus"].join("\n"), "omp")!.options.length).toBe(4);
+  });
+
+  test("several questions: steps, the answer chosen earlier (◉), a wrapped label, a scrollbar", () => {
+    const screen = ompBox("Ask", [
+      [" Format    Length    Submit", "How long should the talk be?"],
+      scrolled(["  ◉ 10 minutes", "      A short talk", "❯ ○ 20 minutes, with time for questions from the", "    audience", "  ○ Other (type your own)"], 2),
+      ["Enter select · n note · ↑/↓ move · Tab/←/→ · ↓ scroll · Esc cancel"],
+    ]).join("\n");
+    const m = parseMenu(screen, "omp")!;
+    expect(m.tabs).toEqual([{ label: "Format", done: false }, { label: "Length", done: false }, { label: "Submit", done: false, submit: true }]);
+    expect(m.question).toEqual(["How long should the talk be?"]);
+    expect(m.options.map((o) => [o.label, o.description ?? "", o.selected, o.checked])).toEqual([
+      ["10 minutes", "A short talk", false, true],
+      ["20 minutes, with time for questions from the audience", "", true, undefined],
+      ["Other (type your own)", "", false, undefined],
+    ]);
+    expect(m.multiSelect).toBe(false);
+    expect(keysToChoose(m, 0)).toEqual(["up", "enter"]);
+  });
+
+  test("multi-select: checkboxes, Space ticks, Submit sends the ticked answers", () => {
+    const page = (cursor: number, enter = "submit") =>
+      ompBox("Ask", [
+        [" Parts    Submit", "Which parts should the slides cover?"],
+        [`${cursor === 0 ? "❯" : " "} ☑ Background`, "      Context and background information", `${cursor === 1 ? "❯" : " "} ☐ Causes`, `${cursor === 2 ? "❯" : " "} ☐ Other (type your own)`, "", ""],
+        [`Space toggle · Enter ${enter} · ↑/↓ move · Tab/←/→ · Esc cancel`],
+      ]).join("\n");
+    const m = parseMenu(page(1), "omp")!;
+    expect(m.multiSelect).toBe(true);
+    expect(m.question).toEqual(["Which parts should the slides cover?"]);
+    expect(m.tabs).toEqual([{ label: "Parts", done: false }, { label: "Submit", done: false, submit: true }]);
+    expect(m.options.map((o) => [o.index, o.label, o.checked, o.action, o.freeText, o.selected])).toEqual([
+      [0, "Background", true, undefined, false, false],
+      [1, "Causes", false, undefined, false, true],
+      [2, "Other (type your own)", false, undefined, true, false],
+      [3, "Submit", undefined, "primary", false, false],
+    ]);
+    expect(keysToChoose(m, 0)).toEqual(["up", "space"]);
+    expect(keysToChoose(m, 1)).toEqual(["space"]);
+    expect(keysToChoose(m, 2)).toEqual(["down", "enter", "enter"]);
+    expect(keysToChoose(m, 3)).toEqual(["enter"]);
+    // Enter on Other would open its text box: step off it first
+    expect(keysToChoose(parseMenu(page(2), "omp")!, 3)).toEqual(["up", "enter"]);
+    // with more questions to come, Enter moves on
+    expect(parseMenu(page(1, "next"), "omp")!.options.at(-1)!.label).toBe("Next");
+  });
+
+  test("selectors: the title in the top edge, message lines, options with descriptions, the key hint", () => {
+    const confirm = ompBox("Delete branch?", [["", "This removes feature/x and its worktree.", "", " ❯ Yes", "   No", "", "up/down navigate  enter select  esc cancel", ""]]);
+    const m = parseMenu([...ABOVE, ...confirm].join("\n"), "omp")!;
+    expect(m.question).toEqual(["Delete branch?", "This removes feature/x and its worktree."]);
+    expect(m.options.map((o) => [o.label, o.selected])).toEqual([
+      ["Yes", true],
+      ["No", false],
+    ]);
+    expect(m.hint).toBe("up/down navigate  enter select  esc cancel");
+    expect(keysToChoose(m, 1)).toEqual(["down", "enter"]);
+
+    const paste = ompBox("Pasted 120 lines", [["", "", " ❯ Attach as a wrapped block", "     Wrap the text in tags, collapsed to a marker", "   Attach as local file", "     Save the text to a file", "   Paste inline", "", "Esc to paste inline", ""]]);
+    const p = parseMenu(paste.join("\n"), "omp")!;
+    expect(p.question).toEqual(["Pasted 120 lines"]);
+    expect(p.options.map((o) => [o.label, o.description ?? ""])).toEqual([
+      ["Attach as a wrapped block", "Wrap the text in tags, collapsed to a marker"],
+      ["Attach as local file", "Save the text to a file"],
+      ["Paste inline", ""],
+    ]);
+    expect(p.hint).toBe("Esc to paste inline");
+
+    // a selector with radio markers fills the highlighted row's marker instead of drawing ❯
+    const radio = ompBox("Which format?", [["", "", " ○ Markdown", " ◉ LaTeX", "     For the paper", "   Other (type your own)", "", "up/down navigate  enter select  esc cancel", ""]]);
+    const r = parseMenu(radio.join("\n"), "omp")!;
+    expect(r.options.map((o) => [o.label, o.description ?? "", o.selected, o.checked, o.freeText])).toEqual([
+      ["Markdown", "", false, undefined, false],
+      ["LaTeX", "For the paper", true, undefined, false],
+      ["Other (type your own)", "", false, undefined, true],
+    ]);
+    expect(keysToChoose(r, 2)).toEqual(["down", "enter", "enter"]);
+  });
+
+  test("idle input box: no menu and no overlay, even under a box in the conversation", () => {
+    const band = [" π  ~/proj  main  opus ▶────────", "╰─"];
+    const idle = [...ABOVE, ...band].join("\n");
+    expect(parseMenu(idle, "omp")).toBeUndefined();
+    expect(screenOverlay(idle, "omp")).toBeUndefined();
+    // a box in the conversation right above the input box (a tool's output, a question asked earlier)
+    const quoted = [...ompBox("Ask", [["Which format?"], ["❯ ○ Markdown", "  ○ LaTeX"], ["Enter select · n note · ↑/↓ move · Esc cancel"]]), "", " π  ~/proj ▶────────", "╰─ thanks, go on"].join("\n");
+    expect(parseMenu(quoted, "omp")).toBeUndefined();
+    expect(screenOverlay(quoted, "omp")).toBeUndefined();
+    // the "box" input shape, empty; and with the IME-safe cursor, which ends in a bare ╰────╯
+    const box = ["done.", "", `╭─ π ~/proj main ${"─".repeat(W - 19)}╮`, `╰─${" ".repeat(W - 4)}─╯`].join("\n");
+    expect([parseMenu(box, "omp"), screenOverlay(box, "omp")]).toEqual([undefined, undefined]);
+    const imeSafe = ["done.", "", `╭─ π ~/proj main ${"─".repeat(W - 19)}╮`, "│  a draft", `╰${"─".repeat(W - 2)}╯`].join("\n");
+    expect([parseMenu(imeSafe, "omp"), screenOverlay(imeSafe, "omp")]).toEqual([undefined, undefined]);
+    // omp's other input shapes (claude-like, pi, borderless, field, rail), under that box in the conversation
+    const rule = "─".repeat(W);
+    const shapes = [[`${"─".repeat(W - 8)} opus ─`, "❯ ", rule, "  ~/proj  main"], [rule, " ", rule, " ~/proj  main  opus"], ["❯ ", "~/proj  main"], [`▐ ${" ".repeat(W - 4)}▌`, "", "~/proj"], ["▎ ", "", "~/proj"]];
+    for (const shape of shapes) {
+      const screen = [...ompBox("Ask", [["Which format?"], ["❯ ○ Markdown", "  ○ LaTeX"], ["Enter select · n note · ↑/↓ move · Esc cancel"]]), ...shape].join("\n");
+      expect([parseMenu(screen, "omp"), screenOverlay(screen, "omp")]).toEqual([undefined, undefined]);
+    }
+  });
+
+  test("a box that is not a menu is an overlay: omp's text box for Other, the answers to review", () => {
+    const custom = ompBox("Custom answer: Which output format do you prefer?", [["", "> ", "", "enter or ctrl+q submit  esc cancel  ctrl+g external editor", ""]]).join("\n");
+    expect(parseMenu(custom, "omp")).toBeUndefined();
+    expect(screenOverlay(custom, "omp")).toEqual({
+      lines: ["Custom answer: Which output format do you prefer?", "", ">"],
+      hint: "enter or ctrl+q submit  esc cancel  ctrl+g external editor",
+      enter: true,
+      esc: true,
+    });
+    const review = ompBox("Ask", [[" Parts    Submit", "Review answers"], ["1. Parts: Background, Causes", "", "❯ Submit", "", ""], ["Enter submit · ↑/↓ scroll · Esc cancel"]]).join("\n");
+    expect(parseMenu(review, "omp")).toBeUndefined();
+    const o = screenOverlay(review, "omp")!;
+    expect(o.lines).toEqual(["Parts    Submit", "Review answers", "1. Parts: Background, Causes", "", "❯ Submit"]);
+    expect([o.hint, o.enter, o.esc]).toEqual(["Enter submit · ↑/↓ scroll · Esc cancel", true, true]);
+  });
+});
