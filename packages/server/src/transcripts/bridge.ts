@@ -22,6 +22,8 @@ interface Open {
   timer?: ReturnType<typeof setTimeout>;
   lastResolve: number;
   closed: boolean;
+  /** Locked to a conversation not written yet (agent:path): checked often until it is. */
+  pending?: string;
 }
 
 export class ChatBridge {
@@ -57,6 +59,15 @@ export class ChatBridge {
       if (!o.tail) this.opts.send({ type: "chat.reset", id, source: null, reason: r.reason, ops: [] });
       return;
     }
+    if (r.source.pending) {
+      // locked, nothing written yet: an empty conversation now; re-resolving soon swaps the real one in
+      const key = `${r.source.agent}:${r.source.path}`;
+      if (o.pending === key && !o.tail) return;
+      o.pending = key;
+      o.tail = undefined;
+      return this.opts.send({ type: "chat.reset", id, source: r.source, ops: [] });
+    }
+    o.pending = undefined;
     if (o.tail && o.tail.source.path === r.source.path) return;
     o.tail = new TranscriptTail(r.source, fs);
     const { ops } = await o.tail.read();
@@ -72,7 +83,7 @@ export class ChatBridge {
         remote = where.remote;
         // re-resolve now and then: the agent may start a new session (/clear, /new) or write its first file
         // (cheap when the session is known; screen matching reads candidate files, so it runs less often)
-        const every = o.tail && o.tail.source.how !== "session" ? 20_000 : remote ? 10_000 : 3_000;
+        const every = o.pending ? (remote ? 2000 : 700) : o.tail && o.tail.source.how !== "session" ? 20_000 : remote ? 10_000 : 3_000;
         if (Date.now() - o.lastResolve > every) await this.resolve(id, o, where.fs);
         if (o.tail && !o.closed) {
           const { ops, reset } = await o.tail.read();

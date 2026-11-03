@@ -254,6 +254,47 @@ describe("finding and following transcripts", () => {
       }
     });
 
+  test("a fresh agent is locked to its own conversation before writing anything, and never shown an older one", async () => {
+    const root = home(); // has an older claude transcript for /proj, and a codex rollout
+    const fs = new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, ".codex/sessions") });
+    const none = async () => [] as string[][];
+    const fresh = "33333333-2222-3333-4444-555555555555";
+    mkdirSync(join(root, ".claude/sessions"), { recursive: true });
+    writeFileSync(join(root, ".claude/sessions/5151.json"), JSON.stringify({ pid: 5151, sessionId: fresh, cwd: "/proj" }));
+    const c = pane({ agent: "claude" });
+
+    // claude alone in /proj, nothing sent: its own (empty) conversation, not the older one in the folder
+    expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: none, pids: async () => [5151] })).toEqual({ source: { agent: "claude", path: "", how: "session", pending: true } });
+    expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: none })).toMatchObject({ source: { how: "folder" } }); // without the process: the old guess
+    // ... claude --resume <id> shows that conversation until it writes its own
+    expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: async () => [["claude", "--resume", id]], pids: async () => [5151] })).toMatchObject({ source: { how: "session", path: expect.stringContaining(id) } });
+    // the first message creates the file: from then on it is that file
+    const file = join(root, ".claude/projects/-proj", `${fresh}.jsonl`);
+    writeFileSync(file, JSON.stringify({ type: "user", cwd: "/proj", message: { content: "hello" } }) + "\n");
+    expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: none, pids: async () => [5151] })).toEqual({ source: { agent: "claude", path: file, how: "session" } });
+
+    // omp: Herdr knows the path at once; the file comes with the first message
+    const later = join(root, "omp-later.jsonl");
+    const o = pane({ agent: "omp", session: { kind: "path", value: later } });
+    expect(await resolveTranscript(fs, { pane: o, panes: [o], argv: none })).toEqual({ source: { agent: "omp", path: later, how: "session", pending: true } });
+    // a session agent-flow gave the agent, not written yet
+    expect(await resolveTranscript(fs, { pane: c, panes: [c], argv: none, knownSession: "44444444-2222-3333-4444-555555555555" })).toMatchObject({ source: { pending: true } });
+
+    // codex: no rollout open means nothing sent yet (not the newest rollout in the folder)
+    const stub = (open: string | null | undefined) => Object.assign(Object.create(fs), { codexRolloutOfPids: async () => open }) as TranscriptFS;
+    const x = pane({ agent: "codex" });
+    expect(await resolveTranscript(stub(null), { pane: x, panes: [x], argv: none, pids: async () => [7] })).toEqual({ source: { agent: "codex", path: "", how: "session", pending: true } });
+    const rollout = join(root, ".codex/sessions/2026/11/02/rollout-2026-11-02T14-16-30-abc-123.jsonl");
+    expect(await resolveTranscript(stub(rollout), { pane: x, panes: [x], argv: none, pids: async () => [7] })).toEqual({ source: { agent: "codex", path: rollout, how: "session" } });
+    // codex resume <id>: that conversation, before it writes anything of its own
+    const resumed = join(root, ".codex/sessions/2026/11/02/rollout-2026-11-02T15-00-00-01a19ae6-f5c1-7b70-bf1d-6b1cd834650a.jsonl");
+    writeFileSync(resumed, "");
+    expect(await resolveTranscript(stub(null), { pane: x, panes: [x], argv: async () => [["codex", "resume", "01a19ae6-f5c1-7b70-bf1d-6b1cd834650a"]], pids: async () => [7] })).toEqual({ source: { agent: "codex", path: resumed, how: "session" } });
+    // lsof could not run: the old guesses
+    writeFileSync(rollout, JSON.stringify({ type: "session_meta", payload: { cwd: "/proj" } }) + "\n");
+    expect(await resolveTranscript(stub(undefined), { pane: x, panes: [x], argv: none, pids: async () => [7] })).toMatchObject({ source: { how: "folder" } });
+  });
+
   test("several claude agents in one folder: the conversation title (the terminal title) tells which is whose", async () => {
     const root = tmp();
     const dir = join(root, ".claude/projects/-proj");

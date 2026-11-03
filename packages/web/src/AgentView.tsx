@@ -305,7 +305,9 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
         }}
       >
         {source === undefined && <div className="chat-empty">Loading transcript…</div>}
-        {source && !segs.length && <div className="chat-empty">Nothing yet. Send a message below.</div>}
+        {source && !segs.length && !out.length && (
+          <div className="chat-empty">{source.pending ? `New conversation. Send ${agent} a message below; it shows up here as you go.` : "Nothing yet. Send a message below."}</div>
+        )}
         {segs.map((s) =>
           s.kind === "steps" ? (
             <Steps key={s.key} tools={s.tools} />
@@ -342,7 +344,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
             ■ Stop
           </button>
         )}
-        {source && (
+        {source && !source.pending && (
           <button disabled={forking} onClick={() => fork()} title="Fork: a new agent next to this one, with this whole conversation so far">
             {forking ? "forking…" : "⑂ Fork"}
           </button>

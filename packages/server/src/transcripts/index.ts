@@ -41,14 +41,23 @@ export interface TranscriptFS {
   sh(cmd: string): Promise<string>;
   /** The session a running claude process is in: claude keeps <config>/sessions/<pid>.json up to date (also after /clear). */
   claudeSessionOfPid(pid: number): Promise<string | undefined>;
-  /** The rollout file a running codex process (or its children) holds open, from lsof. */
-  codexRolloutOfPids(pids: number[]): Promise<string | undefined>;
+  /**
+   * The rollout file a running codex process (or its children) holds open, from lsof. null: checked, none open (a
+   * codex that has not been sent anything yet); undefined: could not check.
+   */
+  codexRolloutOfPids(pids: number[]): Promise<string | null | undefined>;
 }
 
 const validPids = (pids: number[]) => pids.filter((p) => Number.isInteger(p) && p > 1);
 /** A shell command printing the first codex rollout that these processes or their children hold open. */
 export const openRolloutCmd = (pids: number[]) =>
-  String.raw`pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] && lsof -Fn -p "$pids" 2>/dev/null | sed -n 's/^n\(.*\/sessions\/.*rollout-.*\.jsonl\)$/\1/p' | head -n 1`;
+  String.raw`command -v lsof >/dev/null 2>&1 || exit 0; pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] || exit 0; lsof -Fn -p "$pids" 2>/dev/null | sed -n 's/^n\(.*\/sessions\/.*rollout-.*\.jsonl\)$/\1/p' | head -n 1; echo "#checked"`;
+/** The answer of openRolloutCmd: the open rollout, null when none is open, undefined when lsof could not run. */
+export const parseOpenRollout = (out: string) => {
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.includes("#checked")) return undefined;
+  return lines.find((l) => l !== "#checked") ?? null;
+};
 
 export interface Roots {
   claude: string;
@@ -88,7 +97,7 @@ export class LocalFS implements TranscriptFS {
   async codexRolloutOfPids(pids: number[]) {
     if (!validPids(pids).length) return undefined;
     const p = Bun.spawnSync(["sh", "-c", openRolloutCmd(pids)], { stdout: "pipe", stderr: "ignore" });
-    return p.stdout.toString().trim().split("\n")[0] || undefined;
+    return parseOpenRollout(p.stdout.toString());
   }
 
   async claudeById(id: string) {
@@ -226,9 +235,10 @@ export class SshFS implements TranscriptFS {
     }
   }
 
-  codexRolloutOfPids(pids: number[]) {
-    if (!validPids(pids).length) return Promise.resolve(undefined);
-    return this.line(openRolloutCmd(pids));
+  async codexRolloutOfPids(pids: number[]) {
+    if (!validPids(pids).length) return undefined;
+    const r = await this.exec(openRolloutCmd(pids));
+    return parseOpenRollout(r.out.toString());
   }
 
   claudeById(id: string) {
@@ -395,34 +405,54 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
   const agent = pane.agent;
   if (!isAgent(agent)) return { reason: pane.agent ? `rendering ${pane.agent} output is not supported yet` : "no agent in this pane" };
   const byId = (id: string) => (agent === "claude" ? fs.claudeById(id) : agent === "codex" ? fs.codexById(id) : Promise.resolve(undefined));
-  const found = (path: string | undefined, how: ChatSource["how"]) => (path ? { source: { agent, path, how } } : undefined);
+  const found = (path: string | undefined | null, how: ChatSource["how"]) => (path ? { source: { agent, path, how } } : undefined);
+  /** Locked to a conversation the agent has not written yet. */
+  const pending = (path = "") => ({ source: { agent, path, how: "session" as const, pending: true } });
+  const procs = pids ? await pids().catch(() => [] as number[]) : [];
+  const args = procs.length || agent !== "omp" ? await argv().catch(() => [] as string[][]) : [];
+  const flat = args.flat();
 
+  // 1. what the running process says: exact, and up to date after /clear or /new
+  if (agent === "claude") {
+    for (const pid of procs) {
+      const id = await fs.claudeSessionOfPid(pid).catch(() => undefined);
+      if (!id) continue;
+      const r = found(await fs.claudeById(id), "session");
+      if (r) return r;
+      // a fresh session (its file comes with the first message) — unless it resumes one, which has its own file
+      if (!flat.some((a) => /^(--resume|-r|--continue|-c)(=|$)/.test(a))) return pending();
+    }
+  }
+  if (agent === "codex" && procs.length) {
+    const open = await fs.codexRolloutOfPids(procs).catch(() => undefined);
+    if (open) return { source: { agent, path: open, how: "session" } };
+    if (open === null) {
+      // codex resume/fork <id> shows that conversation before writing anything of its own
+      const i = flat.findIndex((a) => a === "resume" || a === "fork");
+      const id = i >= 0 ? flat.slice(i + 1).find((a) => /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(a)) : undefined;
+      const r = id ? found(await fs.codexById(id), "session") : undefined;
+      return r ?? pending();
+    }
+  }
+
+  // 2. what agent-flow or Herdr was told
   if (knownPath && (await fs.exists(knownPath))) return { source: { agent, path: knownPath, how: "session" } };
   if (knownSession) {
     const r = found(await byId(knownSession), "session");
     if (r) return r;
   }
-  if (pane.session?.kind === "path" && (await fs.exists(pane.session.value))) return { source: { agent, path: pane.session.value, how: "session" } };
+  if (pane.session?.kind === "path") return (await fs.exists(pane.session.value)) ? { source: { agent, path: pane.session.value, how: "session" } } : pending(pane.session.value);
   if (pane.session?.kind === "id") {
     const r = found(await byId(pane.session.value), "session");
     if (r) return r;
   }
-  // the running process says which session it is in
-  const procs = pids ? await pids().catch(() => [] as number[]) : [];
-  if (agent === "claude")
-    for (const pid of procs) {
-      const id = await fs.claudeSessionOfPid(pid).catch(() => undefined);
-      const r = id ? found(await fs.claudeById(id), "session") : undefined;
-      if (r) return r;
-    }
-  if (agent === "codex" && procs.length) {
-    const r = found(await fs.codexRolloutOfPids(procs).catch(() => undefined), "session");
-    if (r) return r;
-  }
+  if (knownSession || pane.session) return pending(knownPath ?? "");
+
+  // 3. guesses, for agents whose process cannot be asked
   if (agent === "claude") {
-    for (const args of await argv()) {
-      const i = args.findIndex((a) => a === "--resume" || a === "-r" || a === "--session-id");
-      const id = i >= 0 ? args[i + 1] : args.find((a) => /^--(resume|session-id)=/.test(a))?.split("=")[1];
+    for (const a of args) {
+      const i = a.findIndex((x) => x === "--resume" || x === "-r" || x === "--session-id");
+      const id = i >= 0 ? a[i + 1] : a.find((x) => /^--(resume|session-id)=/.test(x))?.split("=")[1];
       if (id && /^[0-9a-f-]{36}$/i.test(id)) {
         const r = found(await fs.claudeById(id), "session");
         if (r) return r;
@@ -443,7 +473,6 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     return { reason: "no claude transcript for this folder yet" };
   }
   if (agent === "codex") {
-    // not reported to Herdr (started before its integration, or by hand): find it by folder, like claude
     const candidates = await fs.codexForFolder(pane.cwd, 15);
     const sharing = panes.filter((p) => p.agent === "codex" && p.cwd === pane.cwd && p.machine === pane.machine).length;
     if (candidates.length && sharing <= 1) return { source: { agent, path: candidates[0]!, how: "folder" } };
@@ -453,7 +482,7 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     }
     if (candidates.length) return { reason: `${sharing} codex agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
   }
-  return { reason: knownSession || pane.session ? "the transcript file has not been written yet" : `${agent} has not reported its session to Herdr yet` };
+  return { reason: `${agent} has not reported its session to Herdr yet` };
 }
 
 /** Follows one transcript file: parses what is there (the last MAX_INITIAL bytes), then whatever gets appended. */

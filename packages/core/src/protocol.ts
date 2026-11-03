@@ -287,6 +287,12 @@ export interface ChatSource {
   path: string;
   /** How the transcript was found: exact session id/path, the screen's content, or a guess from the pane's folder. */
   how: "session" | "title" | "screen" | "folder";
+  /**
+   * Locked to this pane's conversation, but the agent has not written it yet: every agent creates its file (and
+   * codex its database row) only when the first message arrives. Shown as an empty conversation that fills in by
+   * itself. `path` is where it will be when known (omp), else "".
+   */
+  pending?: boolean;
 }
 
 /** Messages the server pushes to the web UI over WebSocket. */

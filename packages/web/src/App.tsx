@@ -178,7 +178,8 @@ export function App() {
 
   const tabTitle = (t: { id: string; label: string }) => {
     const ps = herdr?.panes.filter((p) => p.tabId === t.id) ?? [];
-    if (!/^\d+$/.test(t.label)) return t.label;
+    // Herdr's numbers and our "shell" are default names: an agent running in the tab names it better
+    if (!/^\d+$/.test(t.label) && !(t.label === "shell" && ps.some((p) => p.agent))) return t.label;
     const a = ps.find((p) => p.agent);
     return a ? (runAgents.get(a.id)?.name ?? a.agentName ?? a.agent!) : (ps[0]?.cwd.split("/").at(-1) ?? t.label);
   };
