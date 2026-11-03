@@ -10,6 +10,9 @@
 //
 // The parser finds the pointer nearest the bottom of the screen and reads the options around it.
 // Choosing an option sends arrow keys and Enter, exactly what a user would press.
+//
+// A dialog takes the place of the agent's input box. While the input box is on screen, menu-like text above it is
+// part of the conversation (a reply that quotes a prompt, a user message with a numbered list), not a menu.
 
 export interface MenuOption {
   index: number;
@@ -40,6 +43,29 @@ const INNER_RULE = /^\s*[╌┄┈]{8,}\s*$/;
 const HINT = /\b(enter|esc|escape|navigate|confirm|select|cancel)\b|↑|↓/i;
 const indentOf = (l: string) => l.length - l.replace(/^\s+/, "").length;
 const blank = (l: string) => !l.trim();
+const rule = (l?: string) => !!l && SEPARATOR.test(l);
+const AGENTS = new Set(["claude", "codex", "omp"]);
+
+/** The screen's lines, without trailing spaces and without the blank rows below the last text. */
+function screenLines(screen: string) {
+  const lines = screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/\u00a0/g, " ").replace(/\s+$/, ""));
+  while (lines.length && !lines.at(-1)!.trim()) lines.pop();
+  return lines;
+}
+
+/**
+ * Whether the agent's own input box is at the bottom of the screen. A dialog (a question, an approval, a notice)
+ * takes its place: claude and codex draw it in the input box's area, omp swaps its editor for a selector.
+ *   claude:  ──── / ❯ … / ──── / status lines        codex:  › … / model line / "? for shortcuts"
+ *   omp:     ╭─ … / ╰─ …
+ */
+function inputBoxShown(lines: string[], agent: string | undefined) {
+  if (!agent || !AGENTS.has(agent)) return false;
+  const tail = lines.slice(-14);
+  if (agent === "claude") return tail.some((l, i) => /^\s*❯(\s|$)/.test(l) && (rule(tail[i - 1]) || rule(tail[i - 2])) && tail.slice(i + 1, i + 4).some((x) => rule(x)));
+  if (agent === "codex") return tail.slice(-8).some((l) => /^\s*›(\s|$)/.test(l) && !/^\s*›\s+\d+[.)]/.test(l));
+  return tail.slice(-6).some((l) => /^\s*╰─/.test(l));
+}
 
 /**
  * claude draws a preview box to the right of a question's options (┌──┐ … └──┘ at a fixed column). Return that
@@ -61,7 +87,12 @@ function sideBoxColumn(lines: string[]) {
   return hasTop && best && best[1] >= 3 ? best[0] : undefined;
 }
 
-export function parseMenu(screen: string): Menu | undefined {
+/**
+ * `agent` is the pane's agent (claude, codex, omp): while its input box is on screen there is no menu. Without it
+ * (a shell, an agent not detected yet) the whole screen is searched.
+ */
+export function parseMenu(screen: string, agent?: string): Menu | undefined {
+  if (inputBoxShown(screenLines(screen), agent)) return undefined;
   let raw = screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/\u00a0/g, " "));
   const side = sideBoxColumn(raw);
   if (side !== undefined) raw = raw.map((l) => (l.length > side && /\s/.test(l[side - 1] ?? " ") ? l.slice(0, side) : l));
@@ -208,10 +239,9 @@ export function enrichFromTranscript(menu: Menu, transcriptTail: string): Menu {
 
 /**
  * Something the agent shows instead of its input box: a notice that waits for Enter (claude's auto-mode billing
- * notice), a panel (/status, /help), a login prompt. Each agent's idle screen ends in its own input box:
- *   claude:  ──── / ❯ … / ──── / status lines        codex:  › … / model line / "? for shortcuts"
- *   omp:     ╭─ … / ╰─ …
- * If that box is missing from the bottom of the screen, whatever is there is something the user must see.
+ * notice), a panel (/status, /help), a login prompt. Each agent's idle screen ends in its own input box
+ * (inputBoxShown). If that box is missing from the bottom of the screen, whatever is there is something the user
+ * must see.
  */
 export interface Overlay {
   lines: string[];
@@ -221,19 +251,10 @@ export interface Overlay {
 }
 
 export function screenOverlay(screen: string, agent: string | undefined): Overlay | undefined {
-  if (agent !== "claude" && agent !== "codex" && agent !== "omp") return undefined;
-  const lines = screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/ /g, " ").replace(/\s+$/, ""));
-  while (lines.length && !lines.at(-1)!.trim()) lines.pop();
+  if (!agent || !AGENTS.has(agent)) return undefined;
+  const lines = screenLines(screen);
   if (lines.length < 3) return undefined; // not drawn yet
-  const tail = lines.slice(-14);
-  const rule = (l?: string) => !!l && SEPARATOR.test(l);
-  const hasInput =
-    agent === "claude"
-      ? tail.some((l, i) => /^\s*❯(\s|$)/.test(l) && (rule(tail[i - 1]) || rule(tail[i - 2])) && tail.slice(i + 1, i + 4).some((x) => rule(x)))
-      : agent === "codex"
-        ? tail.slice(-8).some((l) => /^\s*›(\s|$)/.test(l) && !/^\s*›\s+\d+[.)]/.test(l))
-        : tail.slice(-6).some((l) => /^\s*╰─/.test(l));
-  if (hasInput) return undefined;
+  if (inputBoxShown(lines, agent)) return undefined;
   // the panel: from the last full-width rule (if close to the bottom) to the end
   let start = Math.max(0, lines.length - 30);
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--)

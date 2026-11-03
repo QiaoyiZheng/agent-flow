@@ -829,7 +829,7 @@ export class Orchestrator {
 
       // a question or approval on screen: typing a notice would answer it. Wait, and tell the user.
       const screen = a.paneId ? await this.opts.backend.readScreen(a.paneId).catch(() => "") : "";
-      if (a.paneId && (parseMenu(screen) || screenOverlay(screen, a.kind))) {
+      if (a.paneId && (parseMenu(screen, a.kind) || screenOverlay(screen, a.kind))) {
         this.raise(run, { id: `blocked:${a.name}`, kind: "blocked", agent: a.name, text: `${a.name} is waiting for an answer in its terminal (approval or question).` });
         continue;
       }

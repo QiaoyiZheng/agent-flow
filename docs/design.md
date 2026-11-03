@@ -289,6 +289,7 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 - **选项菜单渲染**（用户要求）：agent 弹出选项时（claude 的提问 AskUserQuestion、工具审批、文件夹信任框、codex 审批），server 从屏幕上读出这个菜单（`packages/server/src/menu.ts`：找最靠下的 ❯/› 指针，读同一缩进的选项、更深缩进的说明、上方的问题、下方的按键提示），渲染视图里显示成一张选项卡片：点选项、按 1–9、或 ↑/↓ 加 Enter；"Type something." 这类自由输入选项点开是一个输入框；"Cancel (Esc)"。选择时 server 重新读一次屏幕，确认选项文字没变（防止菜单已经换了），再发方向键和 Enter，和用户亲手按键完全一样。读不出菜单时照旧显示实时终端。实测：claude 的提问，点 "LaTeX"，claude 收到 `"…"="LaTeX"`。
   - **读菜单必须用 `--source visible`**（2026-11-02 修复）：`recent-unwrapped` 会把"占满整行"的行和下一行拼起来，而对话框的每一行都补齐到整行宽，结果 claude 权限提示的 4 个选项被拼成 2 个、问题里混进虚线，卡片不显示（用户报告"claude 要确认 auto mode 的时候没有显示"）。claude 真实的权限提示（2.1.316）已作为测试样本：`Bash command / 说明 / ╌╌╌ / 命令 / ╌╌╌ / Do you want to proceed? / 1. Yes / 2. Yes, and always allow … / 3. Yes, and switch to auto mode … / 4. No / Esc to cancel · Tab to amend`。╌ 虚线是对话框内部的分隔，不是边界；两条虚线之间是被询问的命令，卡片里用代码样式显示。
   - 不只在 Herdr 报 blocked 时读：平时每 4 秒也读一次屏幕，屏幕上有菜单就当作在等人回答（显示卡片、禁用输入框），因为有些对话框 Herdr 认不出来。
+  - **agent 的输入框还在屏幕底部时，不算菜单**（2026-11-03 修复）：对话框会取代 agent 的输入框（claude、codex 画在输入框的位置，omp 把编辑器换成选择框），所以输入框还在时，上面像菜单的文字只是对话内容。此前整屏都会被搜索，lead 的回复里引用了 codex 的"Trust this folder? / › 1. Trust and continue / 2. Quit"，就被当成了 lead 自己的提问（显示卡片、禁用输入框，通知也因此停发）；用户消息里的 `1.`/`2.` 编号列表同理。输入框的判断和"面板和通知"用的是同一个（`menu.ts` 的 `inputBoxShown`）。shell 或还没认出类型的 agent，照旧搜索整屏。
 - 实时终端默认隐藏，只在三种情况出现：agent 等审批或提问（blocked，自动出现，输入框禁用并提示去终端回答）；发送了以 `/` 开头的斜杠命令（可能弹菜单）；用户点状态栏的 "terminal"。agent 工作时状态栏有 "■ Stop"（发 Esc）。
 
 ### 10.2.3 远程机器（2026-11-02）

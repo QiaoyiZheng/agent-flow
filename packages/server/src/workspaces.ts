@@ -498,7 +498,7 @@ export class Workspaces {
     if (p.scrolled) return {}; // the viewport shows history
     const r = this.route(pane);
     const screen = await r.backend.readScreen(r.raw);
-    const menu = parseMenu(screen);
+    const menu = parseMenu(screen, p.agent);
     return menu ? { menu } : { overlay: screenOverlay(screen, p.agent) };
   }
 

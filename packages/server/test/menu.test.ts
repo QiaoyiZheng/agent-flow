@@ -224,6 +224,61 @@ describe("parsing agent menus", () => {
   });
 });
 
+describe("menu-like text in the conversation is not a menu while the input box is on screen", () => {
+  const rule = "─".repeat(120);
+  // captured: the lead claude quoted codex's folder-trust prompt in its reply; the card showed it as the lead's question
+  const QUOTED = [
+    "  ⎿  Allowed by auto mode",
+    "",
+    "⏺ codex 已经重开，又停在了同一个提示上，等你按键。",
+    "",
+    "  提示内容是：",
+    "",
+    "  Trust this folder?   /Users/zhengqiaoyi/agent-flow/.sandbox/demo",
+    "  › 1. Trust and continue",
+    "    2. Quit",
+    "",
+    "  你在 codex 的标签页（count-exports-3）里按 1 回车，它就会开始数导出函数。",
+    "",
+    "  codex 提交结果后，我会核对，再给你最终汇总。",
+    "",
+    "✻ Brewed for 14s · done 10:15",
+    "",
+    rule,
+    "❯",
+    rule,
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 2 agents",
+  ].join("\n");
+
+  test("claude: a reply that quotes a prompt, idle or working", () => {
+    expect(parseMenu(QUOTED, "claude")).toBeUndefined();
+    const working = QUOTED.replace("✻ Brewed for 14s · done 10:15", "✢ Churning… (12s · esc to interrupt)").replace("\n❯\n", "\n❯ 下一条消息\n");
+    expect(parseMenu(working, "claude")).toBeUndefined();
+  });
+
+  test("claude: the user's own message with a numbered list", () => {
+    const screen = ["❯ 1. fix the tests", "  2. update the docs", "", "⏺ Both done.", "", rule, "❯", rule, "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n");
+    expect(parseMenu(screen, "claude")).toBeUndefined();
+  });
+
+  test("codex and omp: a quoted prompt above their input boxes", () => {
+    const quote = ["• The dialog said:", "", "  › 1. Yes, proceed (y)", "    2. No, and tell Codex what to do differently (esc)", "", "  Press enter to confirm or esc to cancel", ""];
+    expect(parseMenu([...quote, "› Ask Codex to do anything", "", "  GPT-6-Astra xhigh · ~/proj", "  ? for shortcuts"].join("\n"), "codex")).toBeUndefined();
+    expect(parseMenu([...quote, " π > demo ▶────────", "╰─"].join("\n"), "omp")).toBeUndefined();
+  });
+
+  test("real dialogs replace the input box: still menus when the agent is known", () => {
+    expect(parseMenu(ASK, "claude")!.options.length).toBe(5);
+    const permission = [rule, " Bash command", " Write probe text to a temp file", " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "", " Esc to cancel · Tab to amend"].join("\n");
+    expect(parseMenu(permission, "claude")!.options.map((o) => o.label)).toEqual(["Yes", "No"]);
+    const trust = ["zhengqiaoyi@Mac _main % codex -p agent-flow-worker", "  Trust this folder? Codex can read, edit, and run files here.", "› 1. Trust and continue", "  2. Quit", "  enter continue · esc quit"].join("\n");
+    expect(parseMenu(trust, "codex")!.options.map((o) => o.label)).toEqual(["Trust and continue", "Quit"]);
+    // a shell, or an agent not detected yet: the whole screen is searched, as before
+    expect(parseMenu(trust, "shell")!.options.length).toBe(2);
+    expect(parseMenu(trust)!.options.length).toBe(2);
+  });
+});
+
 describe("panels and notices instead of the input box", () => {
   const rule = "─".repeat(34);
   test("claude idle, working, or showing a panel (captured /status)", () => {
