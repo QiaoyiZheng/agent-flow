@@ -4,7 +4,7 @@
 // user asks for it.
 
 import { memo, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { ChatBlock, ChatEntry, ChatOp, ChatSource, QueuedMessage } from "@af/core";
+import type { ChatBlock, ChatEntry, ChatMeta, ChatOp, ChatSource, QueuedMessage } from "@af/core";
 import { TOKEN, api, failed, fileUrl, notify, onChat, send, useStore } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
@@ -93,26 +93,32 @@ const entryTime = (at: unknown) => (typeof at === "number" ? at : typeof at === 
 class Log {
   entries: ChatEntry[] = [];
   private tools = new Map<string, Tool>();
-  private early = new Map<string, { output: string; error?: boolean }>();
+  private early = new Map<string, Partial<Tool>>();
+  meta: ChatMeta = {};
   apply(ops: ChatOp[]) {
     for (const o of ops) {
       if (o.op === "add") {
         const b = { ...o.entry.block } as ChatBlock;
         if (b.kind === "tool") {
           const r = this.early.get(b.id);
-          if (r) Object.assign(b, { output: r.output, error: r.error, done: true });
+          if (r) Object.assign(b, r);
           this.tools.set(b.id, b);
         }
         this.entries.push({ ...o.entry, block: b });
-      } else {
+      } else if (o.op === "result" || o.op === "update") {
+        const set: Partial<Tool> = o.op === "result" ? { output: o.output, error: o.error, ...(o.images?.length ? { images: o.images } : {}), ...(o.background ? { background: true } : { done: true }) } : o.set;
         const t = this.tools.get(o.id);
         if (t) {
           // replace the object so memoized rows notice the change
-          const next = { ...t, output: o.output, error: o.error, done: true };
+          const next = { ...t, ...set };
           this.tools.set(o.id, next);
           const i = this.entries.findIndex((e) => e.block === t);
           if (i >= 0) this.entries[i] = { ...this.entries[i]!, block: next };
-        } else this.early.set(o.id, { output: o.output, error: o.error });
+        } else this.early.set(o.id, { ...this.early.get(o.id), ...set });
+      } else if (o.op === "meta") this.meta = { ...this.meta, ...o.meta };
+      else if (o.op === "remove") {
+        const gone = new Set(o.keys);
+        this.entries = this.entries.filter((e) => !gone.has(e.key));
       }
     }
   }

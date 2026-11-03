@@ -177,26 +177,69 @@ export interface ShowRequest extends Caller {
 // Rendered agent output: read from each agent's own transcript file (claude, codex, omp), normalized.
 
 export type ChatBlock =
-  | { kind: "user"; text: string }
+  | {
+      kind: "user";
+      text: string;
+      /** Images the user gave the agent directly (pasted in its own terminal): data: URLs or file paths. */
+      images?: string[];
+      /** The slash command or skill the message ran ("/grill-me"): shown as a badge before the text. */
+      command?: string;
+    }
   /** Assistant prose: markdown with LaTeX math. */
   | { kind: "text"; text: string }
-  | {
-      kind: "tool";
-      id: string;
-      name: string;
-      /** One line, e.g. the shell command or the file path. */
-      summary: string;
-      /** Full input when the summary does not say everything. */
-      input?: string;
-      /** For edits: a unified-diff-like patch, or before/after text. */
-      patch?: string;
-      edit?: { path: string; before: string; after: string };
-      output?: string;
-      error?: boolean;
-      done: boolean;
-    }
-  /** Compact line: slash commands, agent-flow wake-up notices, interruptions. */
-  | { kind: "notice"; text: string };
+  /** The model's readable reasoning (claude thinking, codex reasoning summaries, omp thinking): folded by default. */
+  | { kind: "thinking"; text: string }
+  | ToolBlock
+  /**
+   * A compact line: slash command output, agent-flow wake-ups, interruptions, errors, compaction.
+   * tone: how it looks (info is the default). detail: folded text under it (a command's output, a summary).
+   * divider: drawn across the conversation (context compacted, session resumed).
+   */
+  | { kind: "notice"; text: string; tone?: "info" | "warn" | "error"; detail?: string; divider?: boolean };
+
+export interface ToolBlock {
+  kind: "tool";
+  id: string;
+  name: string;
+  /** One line, e.g. the shell command or the file path. */
+  summary: string;
+  /** Full input when the summary does not say everything. */
+  input?: string;
+  /**
+   * For edits: a unified diff. Hunk headers "@@ -12,3 +12,4 @@" give line numbers when known; several files are
+   * introduced by "--- a/<path>" + "+++ b/<path>" (or "*** Update File: <path>") lines.
+   */
+  patch?: string;
+  /** For edits when no diff is known: the text before and after. */
+  edit?: { path: string; before: string; after: string };
+  /** Files this call changed (for the folded steps label: "edited calc.js, test.js"). */
+  files?: string[];
+  output?: string;
+  /** Markdown worth reading rendered (a subagent's report, a plan, a todo list as "- [x] …"). */
+  report?: string;
+  /** Images in the result (screenshots, viewed images): data: URLs or file paths. */
+  images?: string[];
+  error?: boolean;
+  /** Ended without finishing: the user interrupted it. */
+  aborted?: boolean;
+  /** Runs in the background (claude run_in_background, a codex background terminal): done when it reports back. */
+  background?: boolean;
+  done: boolean;
+}
+
+/** What the agent's session is set to, shown in the footer. Each field is the latest value seen. */
+export interface ChatMeta {
+  model?: string;
+  /** Reasoning effort or thinking level. */
+  effort?: string;
+  /** Permission or approval mode: "auto", "plan", "acceptEdits", codex sandbox policy, … */
+  mode?: string;
+  /** Tokens in the context window after the last turn, and the window's size. */
+  contextTokens?: number;
+  contextWindow?: number;
+  /** Cost so far in USD, when the agent records it. */
+  cost?: number;
+}
 
 export interface ChatEntry {
   key: string;
@@ -228,7 +271,16 @@ export interface CommandItem {
   kind: "command" | "skill";
 }
 
-export type ChatOp = { op: "add"; entry: ChatEntry } | { op: "result"; id: string; output: string; error?: boolean };
+export type ChatOp =
+  | { op: "add"; entry: ChatEntry }
+  /** A tool call's result: marks it done (unless background), with its output. */
+  | { op: "result"; id: string; output: string; error?: boolean; images?: string[]; background?: boolean }
+  /** A later change to a tool call: a background task finished, a subagent's report arrived, the real diff is known. */
+  | { op: "update"; id: string; set: Partial<Omit<ToolBlock, "kind" | "id">> }
+  /** Session settings and usage for the footer (merged: later values win). */
+  | { op: "meta"; meta: ChatMeta }
+  /** Take entries out again (by key): an abandoned branch after a rewind, a placeholder replaced by the real thing. */
+  | { op: "remove"; keys: string[] };
 
 export interface ChatSource {
   agent: "claude" | "codex" | "omp";
