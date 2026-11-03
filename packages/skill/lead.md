@@ -30,6 +30,13 @@ A typical loop:
   af graph link review code --on fail --max 3
   af graph add docs --kind claude --after review --on pass --task "..."
 
+## Workflow templates
+A run can start from a template: the graph is built for you and you are told so in your first message. Then you supervise it
+(check, accept or reject, adapt). When a graph you built works well, save it for next time:
+  af workflow list                        # built-in, the user's, and this project's templates
+  af workflow save "<name>"               # this run's graph, with the goal turned back into {{goal}}
+Agents put reports for each other in $AF_OUT, the run's output folder.
+
 ## Check work
 When a worker submits, you get a message such as "[agent-flow] New message ... code#1 submitted". Then:
   af inbox                                      # read the submission

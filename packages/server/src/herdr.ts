@@ -247,6 +247,7 @@ export class Herdr implements TerminalBackend {
         title: p.terminal_title_stripped || undefined,
         cwd: p.foreground_cwd ?? p.cwd,
         session: sessions.get(p.pane_id),
+        scrolled: (p.scroll?.offset_from_bottom ?? 0) > 0 || undefined,
       })),
       layoutSigs: Object.fromEntries(s.layouts.map((l: any) => [l.tab_id, JSON.stringify([l.zoomed, l.panes.map((p: any) => [p.pane_id, p.rect]), l.splits])])),
     };

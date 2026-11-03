@@ -21,6 +21,11 @@ export interface RunMeta {
   integration?: string;
   lead: string;
   team?: string;
+  /** Workflow template the run was started from, and the goal it was given. */
+  workflow?: string;
+  goal?: string;
+  /** The lead is a session the user already had (af here), not one agent-flow started. */
+  attached?: boolean;
   herdrWorkspace?: string;
 }
 

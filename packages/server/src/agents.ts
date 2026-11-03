@@ -82,9 +82,9 @@ export function writeCodexProfile(role: Role, protocolFile: string, codexHome = 
 }
 
 /** The line typed into an agent's terminal to wake it up. Matches what the protocols tell agents to look for. */
-export function noticeText(count: number, latest: { id: string; from: string; node?: string }) {
+export function noticeText(count: number, latest: { id: string; from: string; node?: string }, af = "af") {
   const about = latest.node ? ` (node ${latest.node})` : "";
   return count === 1
-    ? `[agent-flow] New message ${latest.id} from ${latest.from}${about}. Run: af inbox`
-    : `[agent-flow] ${count} new messages, latest ${latest.id} from ${latest.from}${about}. Run: af inbox`;
+    ? `[agent-flow] New message ${latest.id} from ${latest.from}${about}. Run: ${af} inbox`
+    : `[agent-flow] ${count} new messages, latest ${latest.id} from ${latest.from}${about}. Run: ${af} inbox`;
 }

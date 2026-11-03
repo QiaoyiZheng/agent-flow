@@ -39,10 +39,13 @@ import {
   liveNodes,
   nodeBranch,
   replayRun,
+  step,
   undeliveredMail,
   unreadMail,
 } from "@af/core";
 import * as git from "./git.ts";
+import { parseMenu, screenOverlay } from "./menu.ts";
+import { workflowCommands } from "./workflows.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { type AgentConfig, type Role, launchArgs, noticeText } from "./agents.ts";
 
@@ -68,6 +71,8 @@ export interface OrchestratorOptions {
   /** Directory with lead.md and worker.md. */
   protocolDir: string;
   config: AgentConfig;
+  /** Workflow templates (runs can start from one). */
+  workflows?: import("./workflows.ts").WorkflowLibrary;
   now?: () => string;
   /** Wall clock in ms, for idle timing. Tests replace it. */
   clock?: () => number;
@@ -274,13 +279,26 @@ export class Orchestrator {
     const cwd = resolve(req.cwd);
     if (!existsSync(cwd)) throw new AfError("bad_cwd", `${cwd} does not exist`);
     const team = req.team ? this.loadTeam(req.team, cwd) : undefined;
+    // a workflow is checked completely before anything is created
+    let workflow: { info: import("./workflows.ts").WorkflowInfo; commands: Command[] } | undefined;
+    if (req.workflow) {
+      if (!this.opts.workflows) throw new AfError("no_workflows", "workflows are not available on this server");
+      const { info, file } = this.opts.workflows.load(req.workflow, git.repoRoot(cwd) ?? cwd);
+      const goal = (req.goal ?? "").trim();
+      if (info.needsGoal && !goal) throw new AfError("no_goal", `the workflow "${info.name}" needs a goal`);
+      const { workflowCommands, previewGraph } = await import("./workflows.ts");
+      previewGraph(file, goal || "…");
+      workflow = { info, commands: workflowCommands(file, goal) };
+      req = { ...req, leadKind: req.leadKind ?? file.lead };
+    }
     const id = this.newRunId();
     const run = this.newRun(id, emptyRun());
     mkdirSync(join(run.dir, "protocol"), { recursive: true });
     for (const f of ["lead.md", "worker.md"]) copyFileSync(join(this.opts.protocolDir, f), join(run.dir, "protocol", f));
 
     const lead = team?.entry ?? "lead";
-    const meta: RunMeta = { id, createdAt: this.now(), cwd, lead, team: team?.name };
+    const meta: RunMeta = { id, createdAt: this.now(), cwd, lead, team: team?.name, workflow: workflow?.info.id, goal: req.goal?.trim() || undefined };
+    mkdirSync(join(run.dir, "out"), { recursive: true });
     const repo = git.repoRoot(cwd);
     if (repo && git.hasCommits(repo)) {
       git.ensureExcluded(repo, ".agent-flow/");
@@ -296,6 +314,10 @@ export class Orchestrator {
     this.runs.set(id, run);
     this.emit(run, { type: "run.created", at: this.now(), meta });
     if (req.prompt) run.direct.set(lead, [req.prompt]);
+    if (workflow) {
+      for (const cmd of workflow.commands) this.exec(run, cmd);
+      this.mail(run, { from: SYSTEM, to: lead, kind: "system", body: this.workflowBrief(run, workflow.info.name, meta.goal) });
+    }
 
     const leadKind = team?.agents[lead]?.kind ?? req.leadKind ?? "claude";
     await this.opts.backend.renameTab(ws.tabId, lead);
@@ -304,6 +326,73 @@ export class Orchestrator {
       if (name !== lead) spawns.push(this.spawnAgent(run, { name, kind: a.kind, role: a.role, cwd: meta.integration ?? cwd, protocol: "worker" }));
     await Promise.all(spawns);
     return meta;
+  }
+
+  /**
+   * Make a session the user already has (any claude, codex or omp pane) the lead of a new run in its own
+   * workspace: `af here`. Workers then start as new tabs of that workspace, and the UI shows the run's graph
+   * next to it. Calling it again from the same pane returns the same run.
+   */
+  async attachRun(a: { paneId: string; tabId: string; workspaceId: string; cwd: string; kind: AgentKind }): Promise<RunMeta> {
+    if (!AGENT_KINDS.includes(a.kind)) throw new AfError("bad_kind", `the pane runs ${a.kind}; af here works for ${AGENT_KINDS.join(", ")}`);
+    for (const r of this.runs.values()) {
+      if (r.state.stopped || r.state.meta?.herdrWorkspace !== a.workspaceId) continue;
+      const lead = r.state.agents[r.state.meta.lead];
+      if (lead?.paneId === a.paneId) return r.state.meta;
+      throw new AfError("workspace_has_run", `this workspace already has run ${r.id} (led by ${lead?.name} in pane ${lead?.paneId}). Stop it first (af run stop --run ${r.id}) or use it from that pane.`, 409);
+    }
+    const cwd = resolve(a.cwd);
+    const id = this.newRunId();
+    const run = this.newRun(id, emptyRun());
+    mkdirSync(join(run.dir, "protocol"), { recursive: true });
+    mkdirSync(join(run.dir, "out"), { recursive: true });
+    for (const f of ["lead.md", "worker.md"]) copyFileSync(join(this.opts.protocolDir, f), join(run.dir, "protocol", f));
+    const meta: RunMeta = { id, createdAt: this.now(), cwd, lead: "lead", attached: true, herdrWorkspace: a.workspaceId };
+    const repo = git.repoRoot(cwd);
+    if (repo && git.hasCommits(repo)) {
+      git.ensureExcluded(repo, ".agent-flow/");
+      meta.repo = repo;
+      meta.base = git.headCommit(repo);
+      meta.branch = integrationBranch(id);
+      meta.integration = join(repo, ".agent-flow", "worktrees", id, "_main");
+      git.addWorktree(repo, meta.integration, meta.branch, meta.base);
+    }
+    this.runs.set(id, run);
+    this.emit(run, { type: "run.created", at: this.now(), meta });
+    const rec: AgentRec = { name: "lead", kind: a.kind, herdrName: a.paneId, paneId: a.paneId, tabId: a.tabId, cwd, status: "idle", spawnedAt: this.now() };
+    this.emit(run, { type: "agent.spawned", at: this.now(), agent: rec });
+    return meta;
+  }
+
+  /** The run agent living in a pane (for CLI calls from sessions that were attached, which have no AF_* env). */
+  agentByPane(paneId: string): { run: string; agent: string } | undefined {
+    for (const r of this.runs.values()) {
+      if (r.state.stopped) continue;
+      for (const a of Object.values(r.state.agents)) if (a.paneId === paneId && a.status !== "exited") return { run: r.id, agent: a.name };
+    }
+    return undefined;
+  }
+
+  /** Add a workflow template's nodes to a running graph (af graph apply). Checked as a whole before anything changes. */
+  applyWorkflow(caller: Caller, workflowId: string, goal: string | undefined) {
+    const run = this.requireRun(caller.run);
+    this.requireLeadOrUser(run, caller, "change the graph");
+    if (!this.opts.workflows) throw new AfError("no_workflows", "workflows are not available on this server");
+    const meta = run.state.meta!;
+    const { info, file } = this.opts.workflows.load(workflowId, meta.repo ?? meta.cwd);
+    if (info.needsGoal && !goal?.trim()) throw new AfError("no_goal", `the workflow "${info.name}" needs a goal (--goal "...")`);
+    const cmds = workflowCommands(file, (goal ?? "").trim());
+    let g = structuredClone(run.state.graph);
+    for (const cmd of cmds) {
+      try {
+        g = step(g, cmd, this.now()).state;
+      } catch (e) {
+        if (e instanceof GraphError) throw new AfError(e.code, `${info.name}: ${e.message}`);
+        throw e;
+      }
+    }
+    for (const cmd of cmds) this.exec(run, cmd);
+    return { workflow: info.id, nodes: cmds.flatMap((c) => (c.type === "node.add" ? [c.id] : [])) };
   }
 
   stopRun(caller: Caller) {
@@ -382,7 +471,29 @@ export class Orchestrator {
   }
 
   private agentEnv(runId: string, agent: string) {
-    return { AF_RUN: runId, AF_AGENT: agent, AF_SOCK: this.opts.sock, PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
+    // AF_OUT: where agents put reports and other results they hand on (outside the repo)
+    return { AF_RUN: runId, AF_AGENT: agent, AF_SOCK: this.opts.sock, AF_OUT: join(this.opts.home, "runs", runId, "out"), PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
+  }
+
+  /** What the lead of a workflow run is told when it starts. */
+  private workflowBrief(run: Run, name: string, goal?: string) {
+    const g = run.state.graph;
+    const nodes = liveNodes(g).map((n) => {
+      const after = liveEdges(g).filter((e) => !e.back && e.to === n.id).map((e) => `${e.from}${e.on ? ` on ${e.on}` : ""}`);
+      const ex = "kind" in n.spec.executor ? n.spec.executor.kind : `@${n.spec.executor.agent}`;
+      return `- ${n.id} (${ex}${n.spec.isolation === "shared" ? ", shared" : ""}${n.spec.autoAccept ? ", auto-accept" : ""})${after.length ? ` after ${after.join(", ")}` : ""}`;
+    });
+    const loops = liveEdges(g).filter((e) => e.back).map((e) => `- ${e.from} -> ${e.to} on ${e.on}, at most ${e.max} times`);
+    return [
+      `This run follows the workflow "${name}".${goal ? ` Goal: ${goal}` : ""}`,
+      "The graph is already built, and its first nodes are being dispatched now:",
+      ...nodes,
+      ...(loops.length ? ["Loops:", ...loops] : []),
+      "",
+      "Your job: check each submission you are told about (af inbox, af diff <node>) and accept or reject it with concrete reasons;",
+      "change the graph if the plan needs to change (af graph add / edit / link / rm); keep the user informed here.",
+      "When the graph is quiescent, report the result. Run af graph show at any time.",
+    ].join("\n");
   }
 
   private async spawnAgent(
@@ -415,7 +526,12 @@ export class Orchestrator {
         : await this.opts.backend.createTab(meta.herdrWorkspace!, a.cwd, a.name, env);
       this.emit(run, { type: "agent.placed", at: this.now(), name: a.name, paneId: tab.paneId, tabId: tab.tabId });
       const proto = join(run.dir, "protocol", `${a.protocol}.md`);
-      const res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config, rec.session));
+      // a new tab's shell takes a moment to be ready; until then Herdr says the pane is busy
+      let res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config, rec.session));
+      for (let i = 0; i < 12 && !res.ok && /busy/.test(res.code); i++) {
+        await Bun.sleep(500);
+        res = await this.opts.backend.startAgent(rec.herdrName, a.kind, tab.paneId, launchArgs(a.kind, a.protocol, proto, this.opts.config, rec.session));
+      }
       if (res.ok) this.setStatus(run, a.name, "idle");
       else if (res.code !== "agent_not_ready") {
         // the agent never came up (e.g. timeout); do not leave a half-started process behind
@@ -654,7 +770,8 @@ export class Orchestrator {
     try {
       const active = [...this.runs.values()].filter((r) => r.state.meta && !r.state.stopped);
       if (!active.length) return;
-      const seen = new Map((await this.opts.backend.listAgents()).filter((a) => a.name).map((a) => [a.name!, a]));
+      // by Herdr name (agents agent-flow started) and by pane id (sessions attached with af here)
+      const seen = new Map((await this.opts.backend.listAgents()).flatMap((a) => [...(a.name ? [[a.name, a] as const] : []), [a.paneId, a] as const]));
       for (const run of active) {
         await this.trackAgents(run, seen);
         this.dispatchReady(run);
@@ -710,6 +827,13 @@ export class Orchestrator {
         else this.raise(run, { id: `nosubmit:${a.name}`, kind: "no_submit", agent: a.name, node: label, text: `${a.name} has been idle without submitting ${label}.` });
       }
 
+      // a question or approval on screen: typing a notice would answer it. Wait, and tell the user.
+      const screen = a.paneId ? await this.opts.backend.readScreen(a.paneId).catch(() => "") : "";
+      if (a.paneId && (parseMenu(screen) || screenOverlay(screen, a.kind))) {
+        this.raise(run, { id: `blocked:${a.name}`, kind: "blocked", agent: a.name, text: `${a.name} is waiting for an answer in its terminal (approval or question).` });
+        continue;
+      }
+      this.resolve(run, `blocked:${a.name}`);
       const direct = run.direct.get(a.name);
       if (direct?.length) {
         await this.opts.backend.prompt(a.herdrName, direct.shift()!);
@@ -717,7 +841,8 @@ export class Orchestrator {
       }
       const pending = undeliveredMail(run.state, a.name);
       if (pending.length) {
-        await this.opts.backend.prompt(a.herdrName, noticeText(pending.length, pending.at(-1)!));
+        const af = run.state.meta!.attached && a.name === run.state.meta!.lead ? join(this.opts.binDir, "af") : "af";
+        await this.opts.backend.prompt(a.herdrName, noticeText(pending.length, pending.at(-1)!, af));
         this.emit(run, { type: "mail.delivered", at: this.now(), agent: a.name, ids: pending.map((m) => m.id) });
       }
     }

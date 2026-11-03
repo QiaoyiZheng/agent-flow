@@ -324,6 +324,18 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
   - 实现：claude 和 omp 复制对话文件到新的 session id（到这条消息所在行的起始字节为止），再 `--resume` 新文件；原对话不动。两个 CLI 都实测过：恢复后只记得分叉点之前的内容。fork 点只放在用户消息前，因为在一轮中间切断会留下没有结果的工具调用（omp 实测会提示）。codex 用 `codex fork <id>`，只能整段 fork。远程 pane 的复制在那台机器上做（`head -c | sed`）。
   - 新 agent 启动时的提示（如 codex 的"信任此文件夹"）在渲染视图里也显示成选项卡片，即使还没有对话记录。
 
+### 10.2.5 workflow 模板、`af here` 和 agent-flow skill（2026-11-03）
+
+- **workflow 模板**（用户选的形式）：一张事先画好的图（YAML：节点、agent 类型、依赖、环），任务里的 `{{goal}}` 在开 run 时换成目标。来源依次覆盖：内置 `packages/skill/workflows/`、用户的 `~/.agent-flow/workflows/`、项目的 `<repo>/.agent-flow/workflows/`。内置 4 个：实现 + 审查循环、修 bug、两个方案择优再实现、调研 → 写作 → 审稿。开 run 时选模板 → 图立刻建好并派发，lead 收到一条说明（图的结构、它的职责）；模板在创建任何东西之前整体校验（YAML、依赖、图引擎规则）。`af graph apply <模板> --goal` 把模板加进已在跑的图；"save as workflow" / `af workflow save` 把一个 run 的图存成模板（目标还原成 `{{goal}}`）。实现 `server/src/workflows.ts`，用法见 `docs/usage.md`。
+- **`$AF_OUT`**：每个 run 的输出目录（`~/.agent-flow/runs/<run>/out`，不在仓库里），agent 之间交接报告用。
+- **`af here`**（用户要求："直接说让别的 session 同时做…"）：任何已有的 claude / codex / omp session 都能成为 run 的 lead，run 挂在它所在的 workspace 上（每个 workspace 同时只有一个活动 run），右侧显示图，worker 作为这个 workspace 的新 tab 启动。这类 session 没有 AF_* 环境变量：CLI 带上 `HERDR_PANE_ID`，server 按 pane 认出它是哪个 run 的 lead；发给它的通知里写 af 的完整路径。
+- **agent-flow skill**：server 启动时写进 `~/.claude/skills/agent-flow/SKILL.md` 和 `~/.codex/skills/agent-flow/SKILL.md`（omp 读 claude 的目录），内容含本 server 的 af 路径（af shim 里带默认 AF_SOCK）。实测：新开的 claude 收到"让一个 codex 和一个 omp 同时做…"后自己加载 skill、执行 `af here`、建两个并行节点、校验 omp 的结果；codex 卡在"信任此文件夹"时它停下来问用户，没有替用户选。
+- **面板和通知**：除了选项菜单，agent 的屏幕底部如果不是它平常的输入框（claude 的 ──/❯/── 框、codex 的 `›` 行、omp 的 `╰─` 行），就是开着一个面板或通知（如 claude 的 auto mode 计费通知，它要回车确认）。渲染视图把它显示成一张卡片（文字、链接、Continue / Esc 按钮）；pane 往上滚动时不判断。**agent-flow 绝不往开着菜单或面板的 agent 里打字**（输入框、通知投递都检查屏幕）：Herdr 有时认不出这些对话框，此前一次通知就这样误答了 claude 的提问。
+- 问题预览：claude 在选项右边画预览框，屏幕上只有当前高亮那项的预览；卡片从 claude 自己的对话记录里取每个选项的预览和说明，显示在旁边（窄 pane 时在下方）。
+- codex 没向 Herdr 报告 session 时，按目录找它的 rollout 文件（session_meta 里有 cwd），同目录多个 codex 时用屏幕内容比对，和 claude 一样。
+- 中文 Markdown 里 `**位置：**main.tex` 这类粗体按 CommonMark 不成立，agent 自己的界面却显示为粗体；渲染时按 agent 的写法处理。
+- 侧栏的 workspace 下不再列出 agent（用户要求）。
+
 ### 10.3 视觉
 
 - Linear / Raycast 风格：深色为主，低饱和，细边框，只用一个强调色。

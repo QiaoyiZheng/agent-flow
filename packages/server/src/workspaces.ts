@@ -13,7 +13,7 @@ import type { TerminalBackend } from "./herdr.ts";
 import { AfError } from "./orchestrator.ts";
 import { saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
-import { type Menu, keysToChoose, parseMenu } from "./menu.ts";
+import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -449,6 +449,9 @@ export class Workspaces {
   async prompt(pane: string, text: string) {
     this.pane(pane);
     const r = this.route(pane);
+    // typed text + Enter would answer a question, approval or notice on screen (Herdr does not always see them)
+    const st = await this.screenState(pane);
+    if (st.menu || st.overlay) throw new AfError("agent_asking", "the agent is showing a question or a notice; answer it first", 409);
     await r.backend.prompt(r.raw, text);
   }
 
@@ -473,10 +476,18 @@ export class Workspaces {
 
   /** The option menu an agent is showing (a question, an approval), if any. */
   async menu(pane: string): Promise<Menu | undefined> {
+    return (await this.screenState(pane)).menu;
+  }
+
+  /** What the agent shows besides its conversation: an option menu, or a panel/notice instead of its input box. */
+  async screenState(pane: string): Promise<{ menu?: Menu; overlay?: Overlay }> {
     // the visible screen: "recent-unwrapped" joins full-width rows, and dialog rows are padded to full width
-    this.pane(pane);
+    const p = this.pane(pane);
+    if (p.scrolled) return {}; // the viewport shows history
     const r = this.route(pane);
-    return parseMenu(await r.backend.readScreen(r.raw));
+    const screen = await r.backend.readScreen(r.raw);
+    const menu = parseMenu(screen);
+    return menu ? { menu } : { overlay: screenOverlay(screen, p.agent) };
   }
 
   /**

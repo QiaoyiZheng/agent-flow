@@ -117,7 +117,7 @@ export function Graph({ run, selected, onSelect }: { run: RunState; selected?: s
           look: nodeLook(n),
           inst: i ? `#${i.n}` : undefined,
           loop: loopBadge(run, n.id),
-          opens: run.opens.filter((o) => o.node?.startsWith(`${n.id}#`)).length,
+          opens: (run.opens ?? []).filter((o) => o.node?.startsWith(`${n.id}#`)).length,
           selected: n.id === selected,
         },
       };

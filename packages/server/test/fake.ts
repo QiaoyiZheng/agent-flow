@@ -22,6 +22,8 @@ export class FakeBackend implements TerminalBackend {
   envs = new Map<string, Record<string, string>>();
   blockOnStart = new Set<string>();
   failOnStart = new Set<string>();
+  /** name -> how many start attempts report a busy pane first */
+  busyStarts = new Map<string, number>();
   closed: string[] = [];
   ratios: { tabId: string; path: boolean[]; ratio: number }[] = [];
   private n = 0;
@@ -99,6 +101,10 @@ export class FakeBackend implements TerminalBackend {
   }
   async startAgent(name: string, kind: AgentKind, paneId: string, args: string[]): Promise<StartResult> {
     if (this.failOnStart.has(name)) return { ok: false, code: "timeout", message: "agent did not become ready" };
+    if ((this.busyStarts.get(name) ?? 0) > 0) {
+      this.busyStarts.set(name, this.busyStarts.get(name)! - 1);
+      return { ok: false, code: "agent_pane_busy", message: "the shell is not ready" };
+    }
     const blocked = this.blockOnStart.has(name);
     const p = this.panes.get(paneId)!;
     p.agent = { name, kind, args, status: blocked ? "blocked" : "idle" };

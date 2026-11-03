@@ -15,9 +15,14 @@ import { ChatBridge } from "./transcripts/bridge.ts";
 import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
 import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
+import { enrichFromTranscript } from "./menu.ts";
 import type { Notices } from "./notices.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+const repoRootOf = (cwd: string) => {
+  const r = Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "ignore" });
+  return r.exitCode === 0 ? r.stdout.toString().trim() : undefined;
+};
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
 export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w)) {
@@ -27,6 +32,11 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
     const path = url.pathname.replace(/^\/api/, "");
     const body: any = req.method === "POST" ? await req.json().catch(() => ({})) : Object.fromEntries(url.searchParams);
     const caller: Caller = { run: body.run || undefined, agent: body.agent || undefined };
+    // a session attached with `af here` has no AF_* env: its Herdr pane says who it is
+    if (!caller.agent && body.callerPane) {
+      const hit = o.agentByPane(String(body.callerPane));
+      if (hit && (!caller.run || caller.run === hit.run)) Object.assign(caller, hit);
+    }
     try {
       switch (`${req.method} ${path}`) {
         case "GET /health":
@@ -37,6 +47,28 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           return json(await o.createRun(body));
         case "GET /run":
           return json(o.getRun(caller.run));
+        case "GET /whoami":
+          return json(caller.agent ? { run: caller.run, agent: caller.agent } : null);
+        case "POST /runs/attach": {
+          const p = w.model.panes.find((x) => x.id === String(body.pane ?? ""));
+          if (!p) throw new AfError("unknown_pane", "af here must run inside a Herdr pane (HERDR_PANE_ID)", 400);
+          if (p.machine !== "local") throw new AfError("remote_run", "runs on remote machines are not supported yet");
+          if (!p.agent) throw new AfError("no_agent", `pane ${p.id} has no agent Herdr recognizes`);
+          return json(await o.attachRun({ paneId: p.id, tabId: p.tabId, workspaceId: p.workspaceId, cwd: p.cwd, kind: p.agent as AgentKind }));
+        }
+        case "POST /graph/apply":
+          return json(o.applyWorkflow(caller, String(body.workflow ?? ""), body.goal ? String(body.goal) : undefined));
+        case "GET /workflows": {
+          if (!o.opts.workflows) return json([]);
+          const cwd = body.cwd ? String(body.cwd) : undefined;
+          return json(o.opts.workflows.list(cwd ? (repoRootOf(cwd) ?? cwd) : undefined));
+        }
+        case "POST /workflows/save": {
+          if (!o.opts.workflows) throw new AfError("no_workflows", "workflows are not available on this server");
+          const name = String(body.name ?? "").trim();
+          if (!name) throw new AfError("no_name", "give the workflow a name");
+          return json(o.opts.workflows.saveFromRun(o.getRun(caller.run), name, body.description ? String(body.description) : undefined));
+        }
         case "POST /run/stop":
           o.stopRun(caller);
           return json({ ok: true });
@@ -147,8 +179,21 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           await w.refresh();
           return json({ paneId, agent: name, started: started.ok, session: plan.session });
         }
-        case "GET /pane/menu":
-          return json({ menu: (await w.menu(String(body.pane ?? ""))) ?? null });
+        case "GET /pane/menu": {
+          const pane = String(body.pane ?? "");
+          const st = await w.screenState(pane);
+          let menu = st.menu;
+          if (menu && w.model.panes.find((p) => p.id === pane)?.agent === "claude") {
+            const r = await access.resolve(pane).catch(() => undefined);
+            if (r && "source" in r) {
+              const fs = access.fsFor(pane).fs;
+              const head = await fs.readFrom(r.source.path, 0, 0);
+              const tail = head ? await fs.readFrom(r.source.path, Math.max(0, head.size - 512 * 1024), 512 * 1024) : undefined;
+              if (tail) menu = enrichFromTranscript(menu, tail.data.toString("utf8"));
+            }
+          }
+          return json({ menu: menu ?? null, overlay: st.overlay ?? null });
+        }
         case "POST /pane/choose":
           return json(await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined));
         case "POST /keys":

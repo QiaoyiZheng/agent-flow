@@ -1,0 +1,51 @@
+name: 两个方案择优再实现
+description: codex 和 claude 各自独立出一份方案，第三个 agent 比较后定稿（由 lead 确认），再实现并审查。适合有多种做法、想先比较的改动。
+lead: claude
+nodes:
+  - id: plan-a
+    kind: codex
+    shared: true
+    task: |
+      目标：{{goal}}
+
+      不要修改仓库里的文件。为这个目标设计一份实现方案：要改哪些文件、怎么改、风险和取舍、怎么测试。
+      另一个 agent 也在独立出方案，之后会比较，所以请把理由写清楚。
+      方案写进 $AF_OUT/plan-a.md，用 --result 提交，outcome pass。
+  - id: plan-b
+    kind: claude
+    shared: true
+    task: |
+      目标：{{goal}}
+
+      不要修改仓库里的文件。为这个目标设计一份实现方案：要改哪些文件、怎么改、风险和取舍、怎么测试。
+      另一个 agent 也在独立出方案，之后会比较，所以请把理由写清楚。
+      方案写进 $AF_OUT/plan-b.md，用 --result 提交，outcome pass。
+  - id: choose
+    kind: claude
+    after: [plan-a, plan-b]
+    shared: true
+    task: |
+      目标：{{goal}}
+
+      输入里有两份方案（result 文件）。比较它们：哪份更可靠、改动更小、更好测试。选一份，或者合并两份的优点，
+      写出最终方案到 $AF_OUT/final-plan.md，用 --result 提交，outcome pass，note 用一句话写选择理由。
+  - id: implement
+    kind: codex
+    after: [choose]
+    task: |
+      目标：{{goal}}
+
+      按 $AF_OUT/final-plan.md 里的最终方案实现。改动保持在方案范围内；能跑的测试都跑一遍。
+      如果这是新一轮，先逐条处理审查意见。提交 outcome pass，note 写改了什么、怎么验证的。
+  - id: review
+    kind: claude
+    after: [implement]
+    shared: true
+    autoAccept: true
+    task: |
+      目标：{{goal}}
+
+      对照 $AF_OUT/final-plan.md 审查集成分支上的改动（git log / git diff）。不要修改文件。
+      实现符合方案、没有明显问题、测试通过，就提交 outcome pass；否则 outcome fail，note 写具体修改意见。
+loops:
+  - { from: review, to: implement, on: fail, max: 3 }

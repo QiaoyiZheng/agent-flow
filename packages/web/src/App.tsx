@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import type { AgentKind, Attention, HPane } from "@af/core";
-import { api, useStore, watch, failed } from "./store";
+import type { AgentKind, Attention, GraphState, HPane, RunState } from "@af/core";
+
+interface WorkflowInfo {
+  id: string;
+  name: string;
+  description: string;
+  source: "built-in" | "yours" | "project";
+  path: string;
+  lead?: AgentKind;
+  needsGoal: boolean;
+  preview?: GraphState;
+  error?: string;
+}
+import { api, useStore, watch, failed, notify } from "./store";
 import { Terminal } from "./Terminal";
 import { Graph } from "./Graph";
 import { NodeDetail } from "./NodeDetail";
@@ -208,7 +220,25 @@ export function App() {
               </div>
               <span className="sub">
                 {Object.values(run.graph.nodes).filter((n) => !n.removed).length} nodes · {run.stopped ? "stopped" : run.graph.quiescent ? "quiescent" : "running"}
+                {run.meta?.workflow && <> · {run.meta.workflow}</>}
               </span>
+              <span className="spacer" />
+              {Object.values(run.graph.nodes).some((n) => !n.removed) && (
+                <button
+                  className="c-more"
+                  title="Save this graph as a workflow template you can start runs from"
+                  onClick={() => {
+                    const name = prompt("Name for the new workflow template", run.meta?.goal ? `${run.meta.goal.slice(0, 30)}` : "");
+                    if (name?.trim())
+                      api<{ id: string; path: string }>("POST", "/workflows/save", { name: name.trim() }).then(
+                        (w) => notify("info", `Saved as workflow "${name.trim()}"`, w.path),
+                        failed("Could not save the workflow"),
+                      );
+                  }}
+                >
+                  save as workflow
+                </button>
+              )}
             </div>
             {rightView === "graph" ? (
               <>
@@ -283,12 +313,25 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
   const [kind, setKind] = useState<AgentKind>("claude");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
+  const [workflow, setWorkflow] = useState("");
+  const [goal, setGoal] = useState("");
+  // templates: built-in, yours, and the project's (.agent-flow/workflows in the repo)
+  useEffect(() => {
+    if (mode !== "run") return;
+    const t = setTimeout(() => api<WorkflowInfo[]>("GET", "/workflows", { cwd: cwd || undefined }).then(setWorkflows, () => {}), 300);
+    return () => clearTimeout(t);
+  }, [mode, cwd]);
+  const wf = workflows.find((w) => w.id === workflow);
+  useEffect(() => {
+    if (wf?.lead) setKind(wf.lead);
+  }, [wf?.id]);
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     const p =
       mode === "run"
-        ? api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined }).then((meta) => meta.herdrWorkspace as string)
+        ? api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined, workflow: workflow || undefined, goal: goal || undefined }).then((meta) => meta.herdrWorkspace as string)
         : api("POST", "/workspace/new", { cwd: cwd || undefined, machine, label }).then((r) => r.workspaceId as string);
     p.then(onDone, failed("That did not work")).finally(() => setBusy(false));
   };
@@ -330,6 +373,36 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
         {mode === "run" && (
           <>
             <div className="field">
+              <label>Workflow</label>
+              <select value={workflow} onChange={(e) => setWorkflow(e.target.value)}>
+                <option value="">None — tell the lead what you want; it builds the graph</option>
+                {workflows.map((w) => (
+                  <option key={w.id} value={w.id} disabled={!!w.error}>
+                    {w.name}
+                    {w.source !== "built-in" ? ` (${w.source})` : ""}
+                    {w.error ? " — invalid" : ""}
+                  </option>
+                ))}
+              </select>
+              {wf && (
+                <div className="wf-card">
+                  <div className="wf-desc">{wf.description}</div>
+                  {wf.preview && (
+                    <div className="wf-graph">
+                      <Graph run={{ graph: wf.preview, agents: {}, opens: [], seq: 0 } as unknown as RunState} onSelect={() => {}} />
+                    </div>
+                  )}
+                  <div className="wf-path">{wf.path}</div>
+                </div>
+              )}
+            </div>
+            {wf && (
+              <div className="field">
+                <label>Goal{wf.needsGoal ? "" : " (optional)"} — goes into every node's task</label>
+                <textarea className="text" rows={3} required={wf.needsGoal} placeholder="e.g. 给登录页加验证码" value={goal} onChange={(e) => setGoal(e.target.value)} />
+              </div>
+            )}
+            <div className="field">
               <label>Lead agent</label>
               <select value={kind} onChange={(e) => setKind(e.target.value as AgentKind)}>
                 <option value="claude">claude</option>
@@ -337,10 +410,12 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
                 <option value="omp">omp</option>
               </select>
             </div>
-            <div className="field">
-              <label>First message to the lead (optional)</label>
-              <textarea className="text" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-            </div>
+            {!wf && (
+              <div className="field">
+                <label>First message to the lead (optional)</label>
+                <textarea className="text" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+              </div>
+            )}
           </>
         )}
         <div style={{ display: "flex", gap: 8 }}>

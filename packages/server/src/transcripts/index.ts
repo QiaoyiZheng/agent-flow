@@ -25,6 +25,8 @@ export interface TranscriptFS {
   codexById(id: string): Promise<string | undefined>;
   /** Claude transcripts (last two weeks) whose recorded cwd is `cwd`, newest first, at most `limit`. */
   claudeForFolder(cwd: string, limit: number): Promise<string[]>;
+  /** Codex rollout files (last two weeks) whose session_meta cwd is `cwd`, newest first, at most `limit`. */
+  codexForFolder(cwd: string, limit: number): Promise<string[]>;
   exists(path: string): Promise<boolean>;
   /** Bytes from `offset` (at most `max`), and the file's current size. undefined if the file is gone. */
   readFrom(path: string, offset: number, max: number): Promise<{ size: number; data: Buffer } | undefined>;
@@ -109,6 +111,32 @@ export class LocalFS implements TranscriptFS {
     return hits.sort((a, b) => b.mtime - a.mtime).slice(0, limit).map((h) => h.path);
   }
 
+  async codexForFolder(cwd: string, limit: number) {
+    const root = this.roots.codex;
+    if (!existsSync(root)) return [];
+    const cutoff = Date.now() - RECENT_DAYS * 86400_000;
+    const hits: { path: string; mtime: number }[] = [];
+    const desc = (d: string) => (existsSync(d) ? readdirSync(d).sort().reverse() : []);
+    for (const y of desc(root))
+      for (const m of desc(join(root, y)))
+        for (const d of desc(join(root, y, m))) {
+          const dir = join(root, y, m, d);
+          for (const f of readdirSync(dir).filter((x) => x.endsWith(".jsonl"))) {
+            const path = join(dir, f);
+            const mtime = statSync(path).mtimeMs;
+            if (mtime < cutoff) continue;
+            let c = this.cwdCache.get(path);
+            if (!c || c.mtime !== mtime) {
+              const m2 = readHead(path, 8192).match(/"cwd":"((?:[^"\\]|\\.)*)"/);
+              c = { mtime, cwd: m2 ? JSON.parse(`"${m2[1]}"`) : undefined };
+              this.cwdCache.set(path, c);
+            }
+            if (c.cwd === cwd) hits.push({ path, mtime });
+          }
+        }
+    return hits.sort((a, b) => b.mtime - a.mtime).slice(0, limit).map((h) => h.path);
+  }
+
   async exists(path: string) {
     return existsSync(path);
   }
@@ -172,6 +200,14 @@ export class SshFS implements TranscriptFS {
     return r.out.toString().split("\n").map((l) => l.trim()).filter(Boolean);
   }
 
+  async codexForFolder(cwd: string, limit: number) {
+    const needle = sq(`"cwd":${JSON.stringify(cwd)}`);
+    const r = await this.exec(
+      `find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -mtime -${RECENT_DAYS} 2>/dev/null | xargs ls -t 2>/dev/null | head -n 120 | while IFS= read -r f; do head -c 8192 "$f" | grep -qF ${needle} && echo "$f"; done | head -n ${Math.max(1, Math.floor(limit))}`,
+    );
+    return r.out.toString().split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
   async exists(path: string) {
     return (await this.line(`test -f ${sq(path)} && echo yes`)) === "yes";
   }
@@ -223,7 +259,7 @@ export const norm = (t: string) => t.replace(/[\s*_`#>|$\\~•●⏺❯›⎿]+/
 export function screenSnippets(screen: string) {
   const out = new Set<string>();
   for (const line of screen.split("\n")) {
-    const m = line.match(/^\s*(?:❯|>|●|⏺)\s*(.+)$/);
+    const m = line.match(/^\s*(?:❯|›|>|●|⏺|•)\s*(.+)$/);
     if (!m) continue;
     const n = norm(m[1]!);
     if (n.length >= 10) out.add(n.slice(0, 24));
@@ -231,8 +267,8 @@ export function screenSnippets(screen: string) {
   return [...out];
 }
 
-/** Normalized user text, assistant text and tool lines of a claude transcript's last part. */
-async function transcriptText(fs: TranscriptFS, path: string) {
+/** Normalized user text, assistant text and tool lines of a transcript's last part. */
+async function transcriptText(fs: TranscriptFS, path: string, agent: Agent) {
   const head = await fs.readFrom(path, 0, 0);
   if (!head) return "";
   const from = Math.max(0, head.size - 2 * 1024 * 1024);
@@ -242,7 +278,7 @@ async function transcriptText(fs: TranscriptFS, path: string) {
   const parts: string[] = [];
   for (const l of r.data.toString("utf8").split("\n")) {
     try {
-      for (const op of PARSERS.claude(JSON.parse(l), ctx))
+      for (const op of PARSERS[agent](JSON.parse(l), ctx))
         if (op.op === "add") {
           const b = op.entry.block;
           parts.push(b.kind === "tool" ? `${b.name}(${b.summary}` : "text" in b ? b.text : "");
@@ -253,12 +289,12 @@ async function transcriptText(fs: TranscriptFS, path: string) {
 }
 
 /** Of several candidate transcripts, the one whose content the pane's screen shows, if that is clear. */
-export async function matchByScreen(fs: TranscriptFS, candidates: string[], screen: string) {
+export async function matchByScreen(fs: TranscriptFS, candidates: string[], screen: string, agent: Agent = "claude") {
   const snippets = screenSnippets(screen);
   if (!snippets.length || !candidates.length) return undefined;
   const scored = await Promise.all(
     candidates.map(async (path) => {
-      const text = await transcriptText(fs, path);
+      const text = await transcriptText(fs, path, agent);
       return { path, score: snippets.filter((s) => text.includes(s)).length };
     }),
   );
@@ -303,6 +339,17 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     const r = found((await fs.claudeForFolder(pane.cwd, 1))[0], "folder");
     if (r) return r;
     return { reason: "no claude transcript for this folder yet" };
+  }
+  if (agent === "codex") {
+    // not reported to Herdr (started before its integration, or by hand): find it by folder, like claude
+    const candidates = await fs.codexForFolder(pane.cwd, 15);
+    const sharing = panes.filter((p) => p.agent === "codex" && p.cwd === pane.cwd && p.machine === pane.machine).length;
+    if (candidates.length && sharing <= 1) return { source: { agent, path: candidates[0]!, how: "folder" } };
+    if (candidates.length && screen) {
+      const hit = await matchByScreen(fs, candidates, await screen().catch(() => ""), "codex");
+      if (hit) return { source: { agent, path: hit, how: "screen" } };
+    }
+    if (candidates.length) return { reason: `${sharing} codex agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
   }
   return { reason: knownSession || pane.session ? "the transcript file has not been written yet" : `${agent} has not reported its session to Herdr yet` };
 }

@@ -51,6 +51,23 @@ const marked = new Marked({ gfm: true, breaks: false });
 marked.use({
   extensions: [
     {
+      // CommonMark does not close **bold** when the closing ** follows punctuation and precedes a letter, which is
+      // everywhere in Chinese ("**位置：**main.tex", "**扯皮案例墙**砍掉"). Agents' own apps render these as bold.
+      name: "strongLoose",
+      level: "inline",
+      start: (src) => {
+        const i = src.indexOf("**");
+        return i < 0 ? undefined : i;
+      },
+      tokenizer(src) {
+        const m = src.match(/^\*\*(?![\s*])((?:\\.|`[^`\n]*`|[^*\n]|\*(?!\*))+?)(?<![\s\\])\*\*(?!\*)/);
+        if (m) return { type: "strongLoose", raw: m[0], text: m[1]!, tokens: this.lexer.inlineTokens(m[1]!) };
+      },
+      renderer(t) {
+        return `<strong>${this.parser.parseInline(t.tokens!)}</strong>`;
+      },
+    },
+    {
       name: "mathBlock",
       level: "block",
       start: (src) => src.match(/\$\$|\\\[/)?.index,

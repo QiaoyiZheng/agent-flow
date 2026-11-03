@@ -20,6 +20,9 @@ export interface CreateRunRequest {
   leadKind?: AgentKind;
   /** First message for the lead, typed into its terminal once it is ready. */
   prompt?: string;
+  /** Start from a workflow template (its id) with this goal: the graph is built at once. */
+  workflow?: string;
+  goal?: string;
 }
 
 export interface GraphRequest extends Caller {
@@ -108,6 +111,8 @@ export interface HPane {
   cwd: string;
   /** Session the agent's Herdr integration reported: a transcript path (omp) or a session id (codex). */
   session?: { kind: "path" | "id"; value: string };
+  /** Scrolled up: the visible screen is history, not what the agent shows now. */
+  scrolled?: boolean;
 }
 
 export interface HLayout {

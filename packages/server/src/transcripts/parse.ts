@@ -176,6 +176,12 @@ export function parseCodex(line: any, ctx: ParseCtx): ChatOp[] {
       const cmd = p.name === "exec" ? codexExecCommand(input) : undefined;
       return add(ctx, tool(p.call_id ?? p.id, cmd ? "bash" : (p.name ?? "tool"), cmd ? { command: cmd } : input), at);
     }
+    case "agent_message": {
+      // a message between codex's own subagents (its payload is encrypted)
+      const from = typeof p.author === "string" ? p.author : "a subagent";
+      const to = typeof p.recipient === "string" ? p.recipient : "";
+      return add(ctx, { kind: "notice", text: `subagent message ${from}${to ? ` → ${to}` : ""}` }, at);
+    }
     case "local_shell_call":
       return add(ctx, tool(p.call_id ?? p.id, "bash", { command: p.action?.command }), at);
     case "function_call_output":

@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { Attention, HerdrModel, RunState, RunSummary } from "@af/core";
 import { api, failed, notify } from "./store";
-import { kindColor } from "./view";
 
 const KIND_LABEL: Record<Attention["kind"], string> = {
   blocked: "waiting for an answer",
@@ -152,20 +151,10 @@ export function Sidebar({
                   const r = runOf.get(w.id);
                   const panes = herdr.panes.filter((p) => p.workspaceId === w.id);
                   const agents = panes.filter((p) => p.agent);
-                  const wsOpen = !(collapsed[w.id] ?? w.id !== selectedWs);
                   return (
                     <div key={w.id} className={!m.local && m.state !== "online" ? "stale" : ""}>
                       <div className={`tree-row ws ${w.id === selectedWs ? "active" : ""}`} onClick={() => onSelectWs(w.id)}>
-                        <span
-                          className="caret"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggle(w.id, w.id !== selectedWs);
-                          }}
-                        >
-                          {wsOpen ? "▾" : "▸"}
-                        </span>
-                        <span className={`dot ${statusDot(w.agentStatus)}`} />
+                        <span className={`dot ${statusDot(w.agentStatus)}`} title={`${agents.length} agent${agents.length === 1 ? "" : "s"} · ${w.agentStatus}`} />
                         <span className="name">{w.label}</span>
                         {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
                         {r && r.attention > 0 ? <span className="count">{r.attention}</span> : <span className="meta">{agents.length || ""}</span>}
@@ -184,16 +173,7 @@ export function Sidebar({
                           </RowMenu>
                         </span>
                       </div>
-                      {wsOpen &&
-                        agents.map((p) => (
-                          <div key={p.id} className="tree-row agent" onClick={() => onSelectPane(w.id, p.tabId, p.id)}>
-                            <span className={`dot ${statusDot(p.agentStatus)}`} />
-                            <span className="name mono">{p.agentName?.replace(r ? `${r.id}-` : "\u0000", "") ?? p.label ?? p.agent}</span>
-                            <span className="meta" style={{ color: kindColor(p.agent!) }}>
-                              {p.agent}
-                            </span>
-                          </div>
-                        ))}
+
                     </div>
                   );
                 })}

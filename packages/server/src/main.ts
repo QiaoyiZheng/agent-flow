@@ -11,6 +11,8 @@ import { serve } from "./api.ts";
 import { Workspaces } from "./workspaces.ts";
 import { RemoteMachine } from "./remote.ts";
 import { Notices } from "./notices.ts";
+import { WorkflowLibrary } from "./workflows.ts";
+import { installSkill } from "./skills.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -20,7 +22,8 @@ function installShim(home: string) {
   const bin = join(home, "bin");
   mkdirSync(bin, { recursive: true });
   const shim = join(bin, "af");
-  writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${join(repoRoot, "packages/cli/src/main.ts")}" "$@"\n`);
+  // the server's socket is the default, so sessions started outside agent-flow (af here) reach this server
+  writeFileSync(shim, `#!/bin/sh\nexport AF_SELF="$0"\nexport AF_SOCK="\${AF_SOCK:-${join(home, "server.sock")}}"\nexec "${process.execPath}" "${join(repoRoot, "packages/cli/src/main.ts")}" "$@"\n`);
   chmodSync(shim, 0o755);
   return bin;
 }
@@ -55,7 +58,8 @@ export async function main(argv: string[]) {
   });
   const binDir = installShim(home);
   const config = { ...loadConfig(home), claudeSettings: writeClaudeSettings(home, sock, join(binDir, "af")) };
-  const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config });
+  const workflows = new WorkflowLibrary(join(repoRoot, "packages/skill/workflows"), join(home, "workflows"));
+  const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config, workflows });
   const n = o.load();
   o.start(1000);
   const notices = new Notices();
@@ -76,6 +80,7 @@ export async function main(argv: string[]) {
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
   console.log(`  socket: ${sock}`);
   console.log(`  af CLI: ${join(binDir, "af")}  (add ${binDir} to PATH)`);
+  for (const f of installSkill(join(binDir, "af"))) console.log(`  skill:  ${f}`);
   const shutdown = () => {
     o.stop();
     w.stop();

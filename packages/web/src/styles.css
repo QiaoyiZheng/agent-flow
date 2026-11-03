@@ -632,3 +632,21 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
   .pane-head .view-toggle button:not(.on) { display: none; }
   .pane-head .kind { display: none; }
 }
+
+.menu-body.with-preview { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(0, 1.3fr); gap: 10px; align-items: start; }
+.menu-preview { margin: 0; padding: 10px 12px; min-height: 100%; background: var(--bg); border: 1px solid var(--line-2); border-radius: 7px; font: 12px/1.45 var(--mono); color: var(--text); white-space: pre; overflow: auto; font-variant-ligatures: none; }
+@container (max-width: 560px) { .menu-body.with-preview { grid-template-columns: 1fr; } }
+.agent-view { container-type: inline-size; }
+
+/* ---------- workflow picker ---------- */
+.welcome .card { width: 560px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.wf-card { margin-top: 8px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); overflow: hidden; }
+.wf-desc { padding: 8px 10px; color: var(--text-2); font-size: 12.5px; line-height: 1.5; }
+.wf-graph { height: 220px; border-top: 1px solid var(--line); }
+.wf-path { padding: 4px 10px; font: 10.5px var(--mono); color: var(--text-3); border-top: 1px solid var(--line); }
+.panel-head .spacer { flex: 1; }
+
+.overlay-card { border-color: rgba(124, 131, 247, 0.5); background: rgba(124, 131, 247, 0.05); }
+.overlay-card .menu-tab { color: var(--accent); background: var(--accent-dim); }
+.overlay-text { font-size: 13.5px; line-height: 1.55; color: var(--text); margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
+.overlay-text a { color: var(--accent); }

@@ -199,9 +199,9 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     return () => ro.disconnect();
   }, []);
 
-  const menu = useMenu(paneId, status === "blocked");
-  // a dialog on screen means the agent waits for an answer, whatever Herdr's status says
-  const blocked = status === "blocked" || !!menu;
+  const { menu, overlay } = useMenu(paneId, status === "blocked");
+  // a dialog or notice on screen means the agent waits for the user, whatever Herdr's status says
+  const blocked = status === "blocked" || !!menu || !!overlay;
   // claude and omp can fork at a message; codex forks the whole conversation
   const forkable = source?.agent === "claude" || source?.agent === "omp";
   const [forking, setForking] = useState(false);
@@ -224,7 +224,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [version, source, showTerm, out.length, !!menu]);
   // the live terminal is only needed for prompts we cannot draw ourselves
-  const termVisible = (blocked && !menu) || showTerm;
+  const termVisible = (blocked && !menu && !overlay) || showTerm;
   const stripH = Math.round(Math.min(height * 0.7, Math.max(180, height * (blocked ? 0.55 : 0.4))));
   const segs = useMemo(() => segments(log.current.entries), [version]);
 
@@ -233,6 +233,11 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
       <div ref={box} className="agent-view">
         <div className="agent-banner">Showing the plain terminal: {reason ?? "no transcript found"}.</div>
         {/* a startup prompt (folder trust, update, login) before there is any transcript: answer it here too */}
+        {!menu && overlay && (
+          <div style={{ padding: "0 16px", flex: "none" }}>
+            <OverlayCard pane={paneId} overlay={overlay} onTerminal={() => {}} />
+          </div>
+        )}
         {blocked && menu && (
           <div style={{ padding: "0 16px", flex: "none" }}>
             <MenuCard key={menu.options.map((o) => o.label).join("|")} pane={paneId} menu={menu} focused={focused} />
@@ -272,6 +277,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
           <OutgoingMessage key={o.id} o={o} pane={paneId} working={status === "working"} stale={o.state === "sent" && now - o.at > 30_000 && status !== "working"} onTerminal={() => setShowTerm(true)} />
         ))}
         {menu && blocked && <MenuCard key={menu.options.map((o) => o.label).join("|")} pane={paneId} menu={menu} focused={focused} />}
+        {!menu && overlay && <OverlayCard pane={paneId} overlay={overlay} onTerminal={() => setShowTerm(true)} />}
         {source?.how === "folder" && <div className="chat-note">Transcript matched by folder: {source.path}</div>}
         {source?.how === "screen" && <div className="chat-note">Transcript matched by screen content: {source.path}</div>}
       </div>
@@ -282,7 +288,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
       )}
       <div className={`agent-status ${status ?? ""}`}>
         <span className={`live-dot ${status ?? ""}`} />
-        <span>{blocked ? (menu ? "waiting for your choice" : "waiting for your answer in the terminal") : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
+        <span>{blocked ? (menu ? "waiting for your choice" : overlay ? "the agent shows a notice above" : "waiting for your answer in the terminal") : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
         <span className="spacer" />
         {status === "working" && (
           <button title="Interrupt (Esc)" onClick={() => api("POST", "/keys", { pane: paneId, keys: ["esc"] }).catch(failed("That did not work"))}>
@@ -300,7 +306,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
           </button>
         )}
       </div>
-      <Composer paneId={paneId} agent={agent} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : undefined} onSlash={() => setShowTerm(true)} />
+      <Composer paneId={paneId} agent={agent} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => setShowTerm(true)} />
     </div>
   );
 }
@@ -684,6 +690,7 @@ interface MenuOption {
   number?: number;
   label: string;
   description?: string;
+  preview?: string;
   selected: boolean;
   freeText: boolean;
 }
@@ -699,19 +706,28 @@ interface AgentMenu {
  * Read the menu on the agent's screen: every second while Herdr says it is blocked, and every 4 seconds
  * otherwise, because some dialogs are not recognized as blocked (a menu on screen means the agent waits).
  */
+interface AgentOverlay {
+  lines: string[];
+  hint?: string;
+  enter: boolean;
+  esc: boolean;
+}
+
 function useMenu(pane: string, blocked: boolean) {
   const [menu, setMenu] = useState<AgentMenu | undefined>();
+  const [overlay, setOverlay] = useState<AgentOverlay | undefined>();
   useEffect(() => {
     let alive = true;
     let last = "";
     const poll = () =>
-      api<{ menu: AgentMenu | null }>("GET", "/pane/menu", { pane })
+      api<{ menu: AgentMenu | null; overlay: AgentOverlay | null }>("GET", "/pane/menu", { pane })
         .then((r) => {
           if (!alive) return;
-          const key = JSON.stringify(r.menu);
+          const key = JSON.stringify([r.menu, r.overlay]);
           if (key !== last) {
             last = key;
             setMenu(r.menu ?? undefined);
+            setOverlay(r.overlay ?? undefined);
           }
         })
         .catch(() => {});
@@ -722,7 +738,7 @@ function useMenu(pane: string, blocked: boolean) {
       clearInterval(t);
     };
   }, [pane, blocked]);
-  return menu;
+  return { menu, overlay };
 }
 
 function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focused: boolean }) {
@@ -779,6 +795,7 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
           ))}
         </div>
       )}
+      <div className={`menu-body ${menu.options.some((o) => o.preview) ? "with-preview" : ""}`}>
       <div className="menu-options">
         {menu.options.map((o) =>
           typing === o.index ? (
@@ -807,6 +824,10 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
             </button>
           ),
         )}
+      </div>
+      {menu.options.some((o) => o.preview) && (
+        <pre className="menu-preview">{menu.options[hi]?.preview ?? "(no preview for this option)"}</pre>
+      )}
       </div>
       <div className="menu-foot">
         <span>{menu.multiSelect ? "Toggle options, then choose the submit option" : "Click, or press 1–9 · ↑/↓ and Enter"}</span>
@@ -906,6 +927,58 @@ function CommandMenu({ items, hi, loading, onHover, onPick }: { items: CommandIt
           <div className="cmd-preview-keys">Tab or Enter to insert · ↑/↓ to choose · Esc to close</div>
         </div>
       )}
+    </div>
+  );
+}
+
+const URL_RE = /(https?:\/\/[^\s)>\]]+)/g;
+
+/** A notice or panel the agent shows instead of its input box, with the keys it asks for. */
+function OverlayCard({ pane, overlay, onTerminal }: { pane: string; overlay: AgentOverlay; onTerminal: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const press = (key: string) => {
+    setBusy(true);
+    api("POST", "/keys", { pane, keys: [key] })
+      .catch(failed("Could not send the key"))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div className="menu-card overlay-card">
+      <div className="menu-tab">The agent is showing this in its terminal</div>
+      <div className="overlay-text">
+        {overlay.lines.map((l, i) => (
+          <div key={i}>
+            {l
+              ? l.split(URL_RE).map((part, k) =>
+                  URL_RE.test(part) ? (
+                    <a key={k} href={part} target="_blank" rel="noopener noreferrer">
+                      {part}
+                    </a>
+                  ) : (
+                    <span key={k}>{part}</span>
+                  ),
+                )
+              : "\u00a0"}
+          </div>
+        ))}
+      </div>
+      <div className="menu-foot">
+        {overlay.enter && (
+          <button className="btn primary" disabled={busy} onClick={() => press("enter")}>
+            Continue (Enter)
+          </button>
+        )}
+        {overlay.esc && (
+          <button className="btn" disabled={busy} onClick={() => press("esc")}>
+            Esc
+          </button>
+        )}
+        <button className="c-more" onClick={onTerminal}>
+          show terminal
+        </button>
+        <span className="spacer" />
+        {overlay.hint && <span>{overlay.hint}</span>}
+      </div>
     </div>
   );
 }

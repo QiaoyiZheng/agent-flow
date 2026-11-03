@@ -2,7 +2,7 @@
 // af: the agent-flow CLI. Used by the human and by agents. Agents get AF_RUN, AF_AGENT and AF_SOCK from
 // the environment agent-flow starts them in; the human passes --run or relies on the only/latest run.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type { AgentKind, Command, GraphState, HerdrModel, Mail, NodeSpec, RunState, RunSummary } from "@af/core";
@@ -46,7 +46,7 @@ function die(msg: string, code = 1): never {
 
 async function call<T = any>(method: "GET" | "POST", path: string, body: Record<string, unknown> = {}): Promise<T> {
   if (!existsSync(SOCK)) die(`agent-flow server is not running (no ${SOCK}). Start it with: af server`);
-  const payload: Record<string, unknown> = { run: RUN, agent: AGENT, ...body };
+  const payload: Record<string, unknown> = { run: RUN, agent: AGENT, ...(AGENT ? {} : { callerPane: PANE }), ...body };
   const url = method === "GET" ? `http://af${path}?${new URLSearchParams(Object.entries(payload).filter(([, v]) => v !== undefined) as [string, string][])}` : `http://af${path}`;
   let r: Response;
   try {
@@ -64,6 +64,11 @@ let RUN: string | undefined = process.env.AF_RUN || undefined;
 async function resolveRun(flag: string | true | undefined) {
   if (typeof flag === "string") return (RUN = flag);
   if (RUN) return RUN;
+  // a session that ran `af here`: its pane leads a run
+  if (PANE && !AGENT) {
+    const me = await call<{ run: string; agent: string } | null>("GET", "/whoami");
+    if (me?.run) return (RUN = me.run);
+  }
   const runs = (await call<RunSummary[]>("GET", "/runs")).filter((r) => !r.stopped);
   if (!runs.length) die("no active run. Start one with: af up");
   if (runs.length > 1) console.error(`af: several runs are active; using the latest (${runs[0]!.id}). Pass --run to choose.`);
@@ -142,6 +147,11 @@ const HELP = `af — agent-flow CLI
 Run and server:
   af server [--port N]                      start the agent-flow server
   af up [team] [--kind claude|codex|omp] [--prompt "..."] [--cwd DIR]
+  af up --workflow <id> --goal "..."         start from a workflow template (af workflow list)
+  af here                                   make this session (any claude/codex/omp pane) the lead of a run here
+  af graph apply <workflow> --goal "..."    add a template's nodes to the current run
+  af guide lead|worker                      how to lead a run / how workers submit
+  af workflow list | save "<name>"          templates; save the current run's graph as one
   af run list | show | stop                 (--run ID to pick a run)
   af spawn <name> --kind K [--role "..."]
 
@@ -189,6 +199,8 @@ async function main() {
         team: pos[0],
         leadKind: typeof flags.kind === "string" ? flags.kind : undefined,
         prompt: typeof flags.prompt === "string" ? flags.prompt : undefined,
+        workflow: typeof flags.workflow === "string" ? flags.workflow : undefined,
+        goal: typeof flags.goal === "string" ? flags.goal : undefined,
       });
       return out(flags, meta, () => `run ${meta.id} started; lead "${meta.lead}" is starting${meta.branch ? `; work goes to branch ${meta.branch}` : ""}`);
     }
@@ -211,6 +223,43 @@ async function main() {
     }
     case "graph":
       return graph(pos, flags);
+    case "here": {
+      if (!PANE) die("af here makes the session in this Herdr pane the lead of a run; run it inside Herdr");
+      const meta = await call("POST", "/runs/attach", { pane: PANE });
+      const self = process.env.AF_SELF ?? "af";
+      return console.log(
+        [
+          `This session now leads run ${meta.id}; its graph shows on the right of the agent-flow UI for this workspace.`,
+          meta.branch ? `Code changes from workers are merged into branch ${meta.branch} (worktree ${meta.integration}), not into your checkout.` : `Workers work in ${meta.cwd}.`,
+          `Next: ${self} graph add <id> --kind codex|claude|omp --task "..."   (nodes without --after run in parallel)`,
+          `      ${self} graph apply <workflow> --goal "..."               (a template; ${self} workflow list)`,
+          `When a worker submits, "[agent-flow] New message ..." is typed here: run ${self} inbox, check, then ${self} graph accept|reject <node>.`,
+          `Full guide: ${self} guide lead`,
+        ].join("\n"),
+      );
+    }
+    case "guide": {
+      const which = pos[0] === "worker" ? "worker" : "lead";
+      return process.stdout.write(readFileSync(join(import.meta.dir, `../../skill/${which}.md`), "utf8"));
+    }
+    case "workflow": {
+      const sub = pos[0] ?? "list";
+      if (sub === "list") {
+        const list = await call("GET", "/workflows", { cwd: process.cwd() });
+        return out(flags, list, () =>
+          (list as any[])
+            .map((w) => `${w.id.padEnd(24)} ${w.source.padEnd(9)} ${w.error ? `ERROR ${w.error}` : `${w.name} — ${w.description}`}`)
+            .join("\n") + "\n\nStart one: af up --workflow <id> --goal \"...\"",
+        );
+      }
+      if (sub === "save") {
+        await resolveRun(flags.run);
+        if (!pos[1]) die('usage: af workflow save "<name>" [--description "..."]');
+        const w = await call("POST", "/workflows/save", { name: pos.slice(1).join(" "), description: flags.description });
+        return console.log(`saved as workflow ${w.id}: ${w.path}`);
+      }
+      return die(`unknown: af workflow ${sub}`);
+    }
     case "diff": {
       await resolveRun(flags.run);
       if (!pos[0]) die("usage: af diff <node> [--stat]");
@@ -322,6 +371,11 @@ async function graph(pos: string[], flags: Record<string, string | true>) {
     case "show": {
       const s = await call<RunState>("GET", "/run");
       return out(flags, s.graph, () => showGraph(s));
+    }
+    case "apply": {
+      need(a, 'af graph apply <workflow> --goal "..."');
+      const r = await call("POST", "/graph/apply", { workflow: a, goal: typeof flags.goal === "string" ? flags.goal : undefined });
+      return console.log(`added ${r.nodes.join(", ")} from workflow ${r.workflow}`);
     }
     case "add": {
       need(a, "af graph add <id> --kind K --task ...");
