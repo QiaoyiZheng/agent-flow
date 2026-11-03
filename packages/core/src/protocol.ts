@@ -238,9 +238,19 @@ export interface ChatSource {
 }
 
 /** Messages the server pushes to the web UI over WebSocket. */
+/** A message for an agent, held by agent-flow while the agent works; sent when its turn ends, or now when steered. */
+export interface QueuedMessage {
+  id: string;
+  /** What the user typed. */
+  body: string;
+  /** Attachment paths, read before the message. */
+  files: string[];
+  at: string;
+}
+
 export type ServerPush =
   | { type: "hello"; runs: RunSummary[] }
-  | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec> }
+  | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec>; queue: Record<string, QueuedMessage[]> }
   | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[] }
   | { type: "chat.ops"; id: string; ops: ChatOp[] }
   | { type: "notices"; list: Notice[] }

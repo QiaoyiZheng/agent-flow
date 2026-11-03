@@ -1,7 +1,7 @@
 // Client state: one WebSocket to the af server. Run state is rebuilt with the same reducer the server uses.
 
 import { useSyncExternalStore } from "react";
-import { type ClientPush, type HerdrModel, type Notice, type RunState, type RunSummary, type ServerPush, type ViewRec, applyRun } from "@af/core";
+import { type ClientPush, type HerdrModel, type Notice, type QueuedMessage, type RunState, type RunSummary, type ServerPush, type ViewRec, applyRun } from "@af/core";
 
 const params = new URLSearchParams(location.search);
 export const TOKEN = params.get("token") ?? localStorage.getItem("af-token") ?? "";
@@ -24,13 +24,15 @@ interface State {
   version: number;
   herdr?: HerdrModel;
   views: Record<string, ViewRec>;
+  /** Messages waiting for their agent's turn to end, by pane. */
+  queue: Record<string, QueuedMessage[]>;
   /** Errors and warnings from the server and from actions in this page, oldest first. */
   notices: Notice[];
   /** Notices seen in the list (for the unread badge). */
   seenNotices: number;
 }
 
-let state: State = { connected: false, runs: [], version: 0, views: {}, notices: [], seenNotices: 0 };
+let state: State = { connected: false, runs: [], version: 0, views: {}, queue: {}, notices: [], seenNotices: 0 };
 const subs = new Set<() => void>();
 const termSubs = new Map<string, TermListener>();
 let ws: WebSocket | undefined;
@@ -76,7 +78,7 @@ function connect() {
         addNotice(m.notice);
         break;
       case "herdr":
-        set({ herdr: m.model, views: m.views });
+        set({ herdr: m.model, views: m.views, queue: m.queue ?? {} });
         break;
       case "snapshot":
         if (m.run === state.runId) set({ run: m.state });

@@ -8,10 +8,10 @@
 
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { type HLayout, type HMachine, type HPane, type HTab, type HWorkspace, type HerdrModel, type LayoutNode, type ShowRequest, type SplitDirection, type ViewRec, MACHINE_SEP, splitId } from "@af/core";
+import { type HLayout, type HMachine, type HPane, type HTab, type HWorkspace, type HerdrModel, type LayoutNode, type QueuedMessage, type ShowRequest, type SplitDirection, type ViewRec, MACHINE_SEP, splitId } from "@af/core";
 import type { TerminalBackend } from "./herdr.ts";
 import { AfError } from "./orchestrator.ts";
-import { saveLocal, stamp } from "./attachments.ts";
+import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
 
@@ -61,6 +61,14 @@ const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
 export class Workspaces {
   model: HerdrModel = { machines: [], workspaces: [], tabs: [], panes: [], layouts: {} };
   views: Record<string, ViewRec> = {};
+  /** Messages waiting for their agent's turn to end, by pane. Saved, so they survive a restart. */
+  queue: Record<string, QueuedMessage[]> = {};
+  private queueFile: string;
+  /** When a queued message was last delivered to a pane (the next waits until the agent has taken it up). */
+  private queueSentAt = new Map<string, number>();
+  private draining = new Set<string>();
+  /** When agent-flow last typed a prompt into each pane. Herdr takes a few seconds to see the agent start. */
+  private promptedAt = new Map<string, number>();
   /** Sessions by pane: given at launch (claude --session-id) or reported by claude's SessionStart hook. */
   sessions: Record<string, { id: string; path?: string }> = {};
   private machines = new Map<string, Machine>();
@@ -78,6 +86,10 @@ export class Workspaces {
 
   constructor(private opts: WorkspacesOptions) {
     this.viewsFile = join(opts.home, "views.json");
+    this.queueFile = join(opts.home, "queue.json");
+    try {
+      if (existsSync(this.queueFile)) this.queue = JSON.parse(readFileSync(this.queueFile, "utf8"));
+    } catch {}
     this.now = opts.now ?? (() => new Date().toISOString());
     if (existsSync(this.viewsFile)) this.views = JSON.parse(readFileSync(this.viewsFile, "utf8"));
     this.autoFile = join(opts.home, "machines.json");
@@ -271,6 +283,7 @@ export class Workspaces {
           this.again = false;
           await Promise.all([...this.machines.values()].map((m) => this.refreshMachine(m)));
           this.publish();
+          void this.drainQueues();
         } while (this.again);
       } finally {
         this.refreshing = undefined;
@@ -346,7 +359,7 @@ export class Workspaces {
       panes: ms.flatMap((m) => m.panes),
       layouts: Object.assign({}, ...ms.map((m) => m.layouts)),
     };
-    const json = JSON.stringify([this.model, this.views]);
+    const json = JSON.stringify([this.model, this.views, this.queue]);
     if (force || json !== this.lastJson) {
       this.lastJson = json;
       for (const l of this.listeners) l();
@@ -476,6 +489,100 @@ export class Workspaces {
     const st = await this.screenState(pane);
     if (st.menu || st.overlay) throw new AfError("agent_asking", "the agent is showing a question or a notice; answer it first", 409);
     await r.backend.prompt(r.raw, text);
+    this.promptedAt.set(pane, Date.now());
+  }
+
+  /** Working, asking, or just given a prompt that Herdr has not seen it start on yet. */
+  private busy(p: HPane) {
+    if (p.agentStatus === "working" || p.agentStatus === "blocked") return true;
+    const at = this.promptedAt.get(p.id);
+    return !!at && Date.now() - at < 15_000 && !(p.statusAt && Date.parse(p.statusAt) >= at);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // the message queue: what the user sends while an agent works waits here, and goes out when the turn ends.
+  // Steering sends it at once: each agent takes text typed during a turn into that turn (claude and omp after
+  // the current tool call, codex right away).
+
+  /** Send now if the agent is free, else queue it for the end of its turn (or steer: send now regardless). */
+  async send(pane: string, body: string, files: string[], mode: "auto" | "queue" | "steer" = "auto") {
+    const p = this.pane(pane);
+    if (!p.agent) throw new AfError("no_agent", `pane ${pane} has no agent to prompt`);
+    const text = composePrompt(body, files);
+    if (!text) throw new AfError("empty", "nothing to send");
+    const busy = this.busy(p) || (this.queue[pane]?.length ?? 0) > 0;
+    if (mode === "queue" || (mode === "auto" && busy)) {
+      const item: QueuedMessage = { id: Math.random().toString(36).slice(2, 10), body: body.trim(), files, at: this.now() };
+      (this.queue[pane] ??= []).push(item);
+      this.saveQueue();
+      return { queued: item };
+    }
+    await this.prompt(pane, text);
+    return { sent: text };
+  }
+
+  /** Send a queued message now, into the agent's current turn. */
+  async steer(pane: string, id: string) {
+    const list = this.queue[pane] ?? [];
+    const i = list.findIndex((x) => x.id === id);
+    if (i < 0) throw new AfError("not_queued", "that message is not in the queue any more", 404);
+    const item = list[i]!;
+    const text = composePrompt(item.body, item.files);
+    await this.prompt(pane, text); // throws (and keeps it queued) if the agent is asking something
+    list.splice(i, 1);
+    this.saveQueue();
+    return { sent: text };
+  }
+
+  /** Take a message out of the queue (to delete it, or to edit it in the composer). */
+  unqueue(pane: string, id: string) {
+    const list = this.queue[pane] ?? [];
+    const i = list.findIndex((x) => x.id === id);
+    if (i < 0) throw new AfError("not_queued", "that message is not in the queue any more", 404);
+    const [item] = list.splice(i, 1);
+    this.saveQueue();
+    return item!;
+  }
+
+  private saveQueue() {
+    for (const k of Object.keys(this.queue)) if (!this.queue[k]!.length) delete this.queue[k];
+    writeFileSync(this.queueFile, JSON.stringify(this.queue, null, 2));
+    this.publish(true);
+  }
+
+  /** Deliver the next queued message to each agent that has finished its turn. */
+  private async drainQueues() {
+    for (const [pane, list] of Object.entries(this.queue)) {
+      if (!list.length || this.draining.has(pane)) continue;
+      const p = this.model.panes.find((x) => x.id === pane);
+      if (!p) {
+        // the pane is gone (not just out of sight on a disconnected machine): its queue has no one to go to
+        const m = this.machines.get(splitId(pane).machine);
+        if (m?.backend && m.lastPoll > 0 && m.failedPolls === 0 && (m.meta.local || m.meta.state === "online")) {
+          delete this.queue[pane];
+          this.saveQueue();
+        }
+        continue;
+      }
+      if (!p.agent || this.busy(p)) continue;
+      // after a delivery (or a failed try), wait until the agent has taken it up (its status changed since), or 30 s
+      const last = Math.max(this.queueSentAt.get(pane) ?? 0, this.promptedAt.get(pane) ?? 0);
+      if (last && Date.now() - last < 30_000 && !(p.statusAt && Date.parse(p.statusAt) >= last && p.agentStatus !== "unknown")) continue;
+      this.draining.add(pane);
+      try {
+        const item = list[0]!;
+        await this.prompt(pane, composePrompt(item.body, item.files));
+        this.queueSentAt.set(pane, Date.now());
+        if (this.queue[pane]?.[0]?.id === item.id) this.queue[pane]!.shift();
+        this.saveQueue();
+      } catch (e) {
+        // asking something, or unreachable: try again later
+        this.queueSentAt.set(pane, Date.now());
+        if ((e as AfError).code !== "agent_asking") this.opts.notify?.("warn", `queue:${pane}`, `A queued message for ${pane} could not be sent yet`, (e as Error).message);
+      } finally {
+        this.draining.delete(pane);
+      }
+    }
   }
 
   async sendKeys(pane: string, keys: string[]) {

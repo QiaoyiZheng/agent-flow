@@ -148,13 +148,15 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         case "POST /spawn":
           return json(await o.spawn(caller, body));
         case "POST /prompt": {
-          const pane = w.model.panes.find((p) => p.id === body.pane);
-          if (!pane?.agent) throw new AfError("no_agent", `pane ${body.pane} has no agent to prompt`);
-          const text = composePrompt(String(body.text ?? ""), Array.isArray(body.attachments) ? body.attachments.map(String) : []);
-          if (!text) throw new AfError("empty", "nothing to send");
-          await w.prompt(body.pane, text);
-          return json({ ok: true, sent: text });
+          // mode auto (default): send now if the agent is free, else queue for the end of its turn; steer: now
+          const mode = body.mode === "steer" || body.mode === "queue" ? body.mode : "auto";
+          const files = Array.isArray(body.attachments) ? body.attachments.map(String) : [];
+          return json({ ok: true, ...(await w.send(String(body.pane ?? ""), String(body.text ?? ""), files, mode)) });
         }
+        case "POST /queue/steer":
+          return json({ ok: true, ...(await w.steer(String(body.pane ?? ""), String(body.id ?? ""))) });
+        case "POST /queue/remove":
+          return json({ ok: true, item: w.unqueue(String(body.pane ?? ""), String(body.id ?? "")) });
         case "GET /pane/commands": {
           const pane = String(body.pane ?? "");
           const p = w.model.panes.find((x) => x.id === pane);
@@ -294,7 +296,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
   const access = makeTranscriptAccess(o, w);
   const handler = makeHandler(o, w, opts.backend, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
-  const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views } satisfies ServerPush);
+  const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue } satisfies ServerPush);
   w.onChange(() => {
     const msg = herdrPush();
     for (const c of clients) c.send(msg);

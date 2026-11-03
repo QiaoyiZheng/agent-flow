@@ -430,6 +430,104 @@ describe("composer: prompt with attachments, keys", () => {
   });
 });
 
+describe("the message queue and steering", () => {
+  test("while the agent works a message waits for the end of its turn; steer sends it now; the queue survives a restart", async () => {
+    const { home, backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    backend.set("a1", "working");
+    await w.refresh();
+    const pane = ws.paneId;
+    backend.prompts = [];
+
+    // working: queued, not typed into the agent
+    const q1 = await w.send(pane, " first ", []);
+    const q2 = await w.send(pane, "second", ["/x/a.png"]);
+    expect("queued" in q1 && "queued" in q2).toBe(true);
+    expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first", "second"]);
+    expect(backend.prompts).toEqual([]);
+
+    // steer: the second goes into the running turn at once, the first keeps waiting
+    const id2 = w.queue[pane]![1]!.id;
+    expect(await w.steer(pane, id2)).toEqual({ sent: "Read these attached files first:\n- /x/a.png\n\nsecond" });
+    expect(backend.prompts.map((p) => p.text)).toEqual(["Read these attached files first:\n- /x/a.png\n\nsecond"]);
+    expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first"]);
+    await expect(w.steer(pane, id2)).rejects.toThrow(/not in the queue/);
+    // steer mode sends at once even while working; queue mode holds even when idle
+    expect(await w.send(pane, "now", [], "steer")).toEqual({ sent: "now" });
+    await w.send(pane, "third", []);
+    expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first", "third"]);
+
+    // a restart keeps the queue
+    const w2 = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    expect(w2.queue[pane]!.map((q) => q.body)).toEqual(["first", "third"]);
+
+    // remove (also used to edit: it goes back to the message box)
+    expect(w.unqueue(pane, w.queue[pane]![1]!.id).body).toBe("third");
+    expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first"]);
+
+    // the turn ends: the next queued message goes out by itself
+    backend.prompts = [];
+    backend.set("a1", "done");
+    await w.refresh();
+    await Bun.sleep(10);
+    expect(backend.prompts.map((p) => p.text)).toEqual(["first"]);
+    expect(w.queue[pane]).toBeUndefined();
+  });
+
+  test("right after a prompt, before Herdr sees the agent start, the next message still waits", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    backend.set("a1", "idle");
+    await w.refresh();
+    await Bun.sleep(5);
+    expect(await w.send(ws.paneId, "go", [])).toEqual({ sent: "go" });
+    expect("queued" in (await w.send(ws.paneId, "and then this", []))).toBe(true); // Herdr still says idle
+    await Bun.sleep(5);
+    backend.set("a1", "working");
+    await w.refresh();
+    backend.set("a1", "done");
+    await w.refresh();
+    await Bun.sleep(10);
+    expect(backend.promptsTo(ws.paneId).slice(-2)).toEqual(["go", "and then this"]);
+  });
+
+  test("one queued message per turn; nothing is typed while the agent asks a question", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    backend.set("a1", "working");
+    await w.refresh();
+    const pane = ws.paneId;
+    await w.send(pane, "one", []);
+    await w.send(pane, "two", []);
+    backend.prompts = [];
+
+    // the turn ends with a question on screen: hold
+    backend.set("a1", "idle");
+    backend.screens.set(pane, ["Which format?", "", "❯ 1. Markdown", "  2. LaTeX", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n"));
+    await w.refresh();
+    await Bun.sleep(10);
+    expect(backend.prompts).toEqual([]);
+    await expect(w.steer(pane, w.queue[pane]![0]!.id)).rejects.toThrow(/answer it first/);
+    expect(w.queue[pane]!.length).toBe(2);
+
+    // answered; the agent is free: "one" goes, "two" waits for the turn "one" starts
+    backend.screens.set(pane, "done\n❯ ");
+    (w as any).queueSentAt.clear();
+    (w as any).promptedAt.clear();
+    await w.refresh();
+    await Bun.sleep(10);
+    await w.refresh();
+    await Bun.sleep(10);
+    expect(backend.prompts.map((p) => p.text)).toEqual(["one"]);
+    backend.set("a1", "working");
+    await w.refresh();
+    backend.set("a1", "done");
+    await w.refresh();
+    await Bun.sleep(10);
+    expect(backend.prompts.map((p) => p.text)).toEqual(["one", "two"]);
+  });
+});
+
 describe("workspaces: API used by agents", () => {
   test("af read resolves run agents by name; split → agent joins the run when the workspace is a run", async () => {
     const home = tmp("af-api-home-");

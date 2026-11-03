@@ -478,6 +478,22 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .composer { flex: none; padding: 8px 12px 12px; background: var(--bg-1); position: relative; }
 .composer.drag::after { content: "Drop to attach"; position: absolute; inset: 4px; border: 1px dashed var(--accent); border-radius: 10px; display: grid; place-items: center; color: var(--accent); background: rgba(124, 131, 247, 0.06); pointer-events: none; }
 .composer-files { margin: 0 0 8px; }
+.queue { margin: 0 0 8px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-2); overflow: hidden; }
+.queue-head { display: flex; align-items: center; padding: 5px 10px; font-size: 11px; color: var(--text-3); border-bottom: 1px solid var(--line); }
+.queue-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px 6px 10px; }
+.queue-item + .queue-item { border-top: 1px solid var(--line); }
+.queue-item.busy { opacity: 0.55; }
+.queue-n { flex: none; width: 16px; height: 16px; margin-top: 1px; border-radius: 4px; background: var(--bg-3); color: var(--text-3); font: 600 10px/16px var(--mono); text-align: center; }
+.queue-body { flex: 1; min-width: 0; }
+.queue-body .c-files { margin-bottom: 4px; }
+.queue-text { color: var(--text); font-size: 13px; white-space: pre-wrap; word-break: break-word; max-height: 4.6em; overflow: hidden; }
+.queue-actions { flex: none; display: flex; gap: 2px; }
+.queue-actions button { border: 0; background: none; color: var(--text-3); cursor: pointer; font-size: 12px; padding: 2px 7px; border-radius: 5px; }
+.queue-actions button:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.queue-actions .queue-steer { color: var(--accent); font-weight: 600; }
+.queue-actions .queue-steer:hover:not(:disabled) { background: var(--accent-dim); color: var(--accent); }
+.composer-steer { flex: none; align-self: flex-end; height: 30px; padding: 0 10px; margin-right: 6px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent-dim); color: var(--accent); font: 600 12px var(--sans, inherit); cursor: pointer; }
+.composer-steer:disabled { opacity: 0.4; cursor: default; }
 .composer-row { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg); padding: 6px 6px 6px 8px; transition: border-color 120ms; }
 .composer-row:focus-within { border-color: var(--accent); }
 .composer.disabled .composer-row { opacity: 0.55; }

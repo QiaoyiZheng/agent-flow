@@ -4,8 +4,8 @@
 // user asks for it.
 
 import { memo, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { ChatBlock, ChatEntry, ChatOp, ChatSource } from "@af/core";
-import { TOKEN, api, failed, fileUrl, notify, onChat, send } from "./store";
+import type { ChatBlock, ChatEntry, ChatOp, ChatSource, QueuedMessage } from "@af/core";
+import { TOKEN, api, failed, fileUrl, notify, onChat, send, useStore } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
 import { basename } from "./view";
@@ -69,14 +69,21 @@ interface Outgoing {
   at: number;
   state: "sending" | "sent" | "failed";
   error?: string;
+  /** Sent into the agent's running turn instead of waiting for it to end. */
+  steer?: boolean;
 }
 const outbox = paneStore<Outgoing[]>(() => []);
 let outSeq = 0;
 
-function sendOutgoing(pane: string, o: Outgoing) {
+/** auto: now if the agent is free, else into agent-flow's queue for the end of its turn. steer: now, into the turn. */
+function sendOutgoing(pane: string, o: Outgoing, mode: "auto" | "steer" = o.steer ? "steer" : "auto") {
   outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sending", error: undefined } : x)));
-  api<{ sent: string }>("POST", "/prompt", { pane, text: o.body, attachments: o.files })
-    .then((r) => outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sent", prompt: r.sent, at: Date.now() } : x))))
+  api<{ sent?: string; queued?: unknown }>("POST", "/prompt", { pane, text: o.body, attachments: o.files, mode })
+    .then((r) =>
+      r.queued
+        ? outbox.update(pane, (list) => list.filter((x) => x.id !== o.id)) // the queue panel shows it now
+        : outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sent", prompt: r.sent ?? o.body, at: Date.now() } : x))),
+    )
     .catch((e) => outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "failed", error: e.message } : x))));
 }
 
@@ -307,7 +314,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
           </button>
         )}
       </div>
-      <Composer paneId={paneId} agent={agent} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => setShowTerm(true)} />
+      <Composer paneId={paneId} agent={agent} working={status === "working"} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => setShowTerm(true)} />
     </div>
   );
 }
@@ -389,7 +396,7 @@ function OutgoingMessage({ o, pane, working, stale, onTerminal }: { o: Outgoing;
       : o.state === "failed"
         ? `not sent: ${o.error}`
         : working
-          ? "queued — the agent reads it after its current step"
+          ? "steered into the current turn — the agent reads it after its current step"
           : stale
             ? "sent, but the agent has not picked it up yet"
             : "sent";
@@ -537,6 +544,7 @@ function Composer({
   disabled,
   disabledHint,
   onSlash,
+  working,
 }: {
   paneId: string;
   agent: string;
@@ -544,6 +552,7 @@ function Composer({
   disabled: boolean;
   disabledHint?: string;
   onSlash: () => void;
+  working: boolean;
 }) {
   const draft = drafts.use(paneId);
   const { text, files } = draft;
@@ -592,10 +601,10 @@ function Composer({
   const ready = files.filter((f) => f.path);
   const canSend = !disabled && !uploading && (text.trim().length > 0 || ready.length > 0);
 
-  const submit = () => {
+  const submit = (steer = false) => {
     if (!canSend) return;
     const body = text.trim();
-    const o: Outgoing = { id: ++outSeq, body, files: ready.map((f) => f.path!), prompt: body, at: Date.now(), state: "sending" };
+    const o: Outgoing = { id: ++outSeq, body, files: ready.map((f) => f.path!), prompt: body, at: Date.now(), state: "sending", steer: steer && working };
     outbox.update(paneId, (l) => [...l, o]);
     drafts.update(paneId, () => ({ text: "", files: [] }));
     sendOutgoing(paneId, o);
@@ -620,6 +629,7 @@ function Composer({
         upload(e.dataTransfer.files);
       }}
     >
+      <QueuePanel paneId={paneId} agent={agent} working={working} onEdit={(q) => drafts.update(paneId, (d) => ({ text: d.text ? `${d.text}\n${q.body}` : q.body, files: [...d.files, ...q.files.map((p) => ({ id: ++fileSeq, name: basename(p), path: p }))] }))} />
       {files.length > 0 && (
         <div className="c-files composer-files">
           {files.map((f) => (
@@ -649,7 +659,13 @@ function Composer({
           rows={1}
           value={text}
           disabled={disabled}
-          placeholder={disabled ? (disabledHint ?? "Answer the question in the terminal above") : `Message ${agent} — Enter to send, Shift+Enter for a new line, paste or drop images and files`}
+          placeholder={
+            disabled
+              ? (disabledHint ?? "Answer the question in the terminal above")
+              : working
+                ? `${agent} is working — Enter queues for after this turn, ⌘/Ctrl+Enter steers it now`
+                : `Message ${agent} — Enter to send, Shift+Enter for a new line, paste or drop images and files`
+          }
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
             const fl = e.clipboardData.files;
@@ -671,14 +687,69 @@ function Composer({
             }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
               e.preventDefault();
-              submit();
+              submit(e.metaKey || e.ctrlKey);
             }
           }}
         />
-        <button className="composer-send" disabled={!canSend} onClick={submit} title="Send (Enter)">
+        {working && (
+          <button className="composer-steer" disabled={!canSend} onClick={() => submit(true)} title={`Steer: send into ${agent}'s current turn now (⌘/Ctrl+Enter)`}>
+            Steer
+          </button>
+        )}
+        <button className="composer-send" disabled={!canSend} onClick={() => submit()} title={working ? `Queue: send when ${agent} finishes this turn (Enter)` : "Send (Enter)"}>
           ↑
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Messages agent-flow holds until the agent's turn ends. Each can be steered into the running turn instead. */
+function QueuePanel({ paneId, agent, working, onEdit }: { paneId: string; agent: string; working: boolean; onEdit: (q: QueuedMessage) => void }) {
+  const { queue } = useStore();
+  const list = queue[paneId] ?? [];
+  const [busy, setBusy] = useState<string>();
+  if (!list.length) return null;
+  const act = (q: QueuedMessage, path: string, then?: (r: any) => void) => {
+    setBusy(q.id);
+    api("POST", path, { pane: paneId, id: q.id })
+      .then((r) => then?.(r))
+      .catch(failed(path.endsWith("steer") ? "Could not steer" : "That did not work"))
+      .finally(() => setBusy(undefined));
+  };
+  return (
+    <div className="queue">
+      <div className="queue-head">
+        <span>
+          Queued · {list.length} · {working ? `sent when ${agent} finishes this turn` : `sending to ${agent}…`}
+        </span>
+      </div>
+      {list.map((q, i) => (
+        <div key={q.id} className={`queue-item ${busy === q.id ? "busy" : ""}`}>
+          <span className="queue-n">{i + 1}</span>
+          <div className="queue-body">
+            {q.files.length > 0 && (
+              <div className="c-files">
+                {q.files.map((f) => (
+                  <AttachmentChip key={f} path={f} />
+                ))}
+              </div>
+            )}
+            {q.body && <div className="queue-text">{q.body}</div>}
+          </div>
+          <div className="queue-actions">
+            <button className="queue-steer" disabled={!!busy} onClick={() => act(q, "/queue/steer", (r) => r.sent && outbox.update(paneId, (l) => [...l, { id: ++outSeq, body: q.body, files: q.files, prompt: r.sent, at: Date.now(), state: "sent", steer: true }]))} title={`Send it into ${agent}'s current turn now, instead of after it`}>
+              Steer
+            </button>
+            <button disabled={!!busy} onClick={() => act(q, "/queue/remove", () => onEdit(q))} title="Take it out of the queue and back into the message box">
+              Edit
+            </button>
+            <button disabled={!!busy} onClick={() => act(q, "/queue/remove")} title="Delete it">
+              ✕
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
