@@ -17,6 +17,7 @@ import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
 import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
 import { rewindTo } from "./rewind.ts";
+import { type Remote, fileKind, installedApps, openWith } from "./open-with.ts";
 import { enrichFromTranscript } from "./menu.ts";
 import type { Notices } from "./notices.ts";
 import { checkReadable, findFiles, listDir, readableRoots, statPath } from "./files.ts";
@@ -210,6 +211,58 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         }
         case "POST /pane/choose":
           return json(await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined));
+        // documents handed over by agents, and opening files in VS Code / Obsidian / their app
+        case "POST /deliver": {
+          const pane = String(body.pane ?? body.callerPane ?? "") || undefined;
+          const p = pane ? w.model.panes.find((x) => x.id === pane) : undefined;
+          const file = String(body.path ?? "");
+          if (!file.startsWith("/")) throw new AfError("bad_path", "give the file's absolute path");
+          if (!existsSync(file) || statSync(file).isDirectory()) throw new AfError("not_found", `${file} is not a file`, 404);
+          const d = access.deliveries;
+          // shown next to the agent that wrote it: in the viewer its last document went to, else a new one
+          let viewer: string | undefined;
+          if (p && p.machine === "local" && body.show !== false) {
+            const last = [...d.list].reverse().find((x) => x.pane === pane && x.viewer && w.views[x.viewer]);
+            const rec = last ? await w.show({ target: file, in: last.viewer }, caller.agent ?? "agent") : await w.show({ target: file, of: pane, split: "right" }, caller.agent ?? "agent");
+            viewer = rec.paneId;
+          }
+          let opened: string | undefined;
+          if (d.settings.auto) {
+            const app = d.appFor(file);
+            opened = (await openWith(app, file).catch(() => undefined))?.app;
+          }
+          const rec = d.add({
+            path: file,
+            machine: "local",
+            pane,
+            workspace: p?.workspaceId,
+            agent: caller.agent,
+            title: body.title ? String(body.title).slice(0, 200) : undefined,
+            note: body.note ? String(body.note).slice(0, 1000) : undefined,
+            viewer,
+            opened,
+            done: !!opened,
+          });
+          return json({ delivery: rec, kind: fileKind(file), app: d.appFor(file) });
+        }
+        case "POST /deliver/done":
+          return json({ ok: !!access.deliveries.done(String(body.id ?? "")) });
+        case "GET /open-settings":
+          return json({ settings: access.deliveries.settings, apps: installedApps() });
+        case "POST /open-settings":
+          return json({ settings: access.deliveries.setSettings(body.settings ?? {}) });
+        case "POST /open-with": {
+          // a file on a remote machine (a pane there names it): only VS Code, over Remote-SSH
+          const pane = body.pane ? String(body.pane) : undefined;
+          const machine = pane ? w.model.panes.find((x) => x.id === pane)?.machine : body.machine ? String(body.machine) : undefined;
+          const m = machine && machine !== "local" ? w.model.machines.find((x) => x.id === machine) : undefined;
+          const remote: Remote | undefined = m ? { target: m.target, label: m.label, home: w.remoteOf(`${m.id}~x`)?.home } : undefined;
+          const file = String(body.path ?? "");
+          const app = String(body.app || (remote ? "vscode" : access.deliveries.appFor(file)));
+          const r = await openWith(app, file, remote);
+          if (body.delivery) access.deliveries.done(String(body.delivery));
+          return json(r);
+        }
         case "POST /pane/rewind":
           return json(
             await rewindTo(w, access, {
@@ -237,7 +290,7 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         case "GET /shell":
           return json(await o.shell());
         case "POST /edit":
-          return json(openInEditor(body.path));
+          return json(await openInEditor(body.path));
         case "POST /flush":
           await o.flush();
           return json({ ok: true });
@@ -283,11 +336,7 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
 /** Open a file in the user's editor: VS Code when installed, else the system default. */
 function openInEditor(path: string) {
   if (!path || !existsSync(path)) throw new AfError("not_found", `${path} does not exist`);
-  const code = Bun.which("code");
-  const argv = code ? [code, path] : process.platform === "darwin" ? ["open", "-a", "Visual Studio Code", path] : ["xdg-open", path];
-  const r = Bun.spawnSync(argv, { stdout: "ignore", stderr: "pipe" });
-  if (r.exitCode !== 0 && process.platform === "darwin") Bun.spawnSync(["open", "-t", path]);
-  return { ok: true };
+  return openWith("vscode", path).then(() => ({ ok: true }));
 }
 
 /** Run events that change the run list the UI shows (and its "Needs you" items). */
@@ -333,6 +382,11 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue } satisfies ServerPush);
   w.onChange(() => {
     const msg = herdrPush();
+    for (const c of clients) c.send(msg);
+  });
+  const deliveriesPush = (): ServerPush => ({ type: "deliveries", list: access.deliveries.list.slice(-100), settings: access.deliveries.settings, apps: installedApps() });
+  access.deliveries.onChange(() => {
+    const msg = JSON.stringify(deliveriesPush());
     for (const c of clients) c.send(msg);
   });
   opts.notices.subscribe((notice) => {
@@ -412,6 +466,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           if (RUN_LIST_EVENTS.has(event.type)) send({ type: "hello", runs: o.listRuns() });
         });
         send({ type: "notices", list: opts.notices.list });
+        send(deliveriesPush());
         ws.send(herdrPush());
         clients.add(ws);
       },

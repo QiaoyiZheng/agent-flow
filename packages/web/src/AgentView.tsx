@@ -5,7 +5,7 @@
 
 import { memo, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ChatBlock, ChatEntry, ChatMeta, ChatOp, ChatSource, QueuedMessage } from "@af/core";
-import { TOKEN, api, failed, fileUrl, notify, onChat, send, useStore } from "./store";
+import { TOKEN, api, failed, fileUrl, notify, onChat, openIn, send, useStore } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
 import { basename } from "./view";
@@ -336,6 +336,8 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     const a = (e.target as HTMLElement).closest("a[data-path]") as HTMLAnchorElement | null;
     if (!a) return;
     e.preventDefault();
+    // a remote agent's file: VS Code over Remote-SSH (preview panes are local only)
+    if (paneId.includes("~")) return void openIn("vscode", a.dataset.path!, { pane: paneId });
     api("POST", "/show", { target: a.dataset.path, of: paneId }).catch(failed("Could not open the file"));
   };
 

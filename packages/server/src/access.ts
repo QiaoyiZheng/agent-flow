@@ -6,6 +6,7 @@ import type { Workspaces } from "./workspaces.ts";
 import { join } from "node:path";
 import { LocalFS, SshFS, type TranscriptFS, resolveTranscript } from "./transcripts/index.ts";
 import { Cuts } from "./rewind.ts";
+import { Deliveries } from "./deliveries.ts";
 
 export type TranscriptAccess = ReturnType<typeof makeTranscriptAccess>;
 
@@ -39,5 +40,7 @@ export function makeTranscriptAccess(o: Orchestrator, w: Workspaces) {
   };
   /** Turns rewound away that the transcript does not show yet (see rewind.ts). */
   const cuts = new Cuts(o.opts.home ? join(o.opts.home, "cuts.json") : undefined);
-  return { fsFor, known, resolve, cuts };
+  /** Documents handed over by agents (af deliver), and how they open. */
+  const deliveries = new Deliveries(o.opts.home);
+  return { fsFor, known, resolve, cuts, deliveries };
 }

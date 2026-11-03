@@ -138,10 +138,15 @@ describe("af here: a session the user already has leads a run", () => {
     const home = tmp();
     for (const d of [".claude", ".codex"]) require("node:fs").mkdirSync(join(home, d));
     const files = installSkill("/srv/af/bin/af", home);
-    expect(files).toEqual([join(home, ".claude/skills/agent-flow/SKILL.md"), join(home, ".codex/skills/agent-flow/SKILL.md")]);
+    expect(files).toEqual(
+      [".claude", ".codex"].flatMap((d) => [join(home, d, "skills/agent-flow/SKILL.md"), join(home, d, "skills/deliver-document/SKILL.md")]),
+    );
     const text = readFileSync(files[0]!, "utf8");
     expect(text).toStartWith("---\nname: agent-flow\ndescription: ");
     expect(text).toContain("/srv/af/bin/af here");
     expect(skillText("X")).not.toContain("undefined");
+    const deliver = readFileSync(files[1]!, "utf8");
+    expect(deliver).toStartWith("---\nname: deliver-document\ndescription: ");
+    expect(deliver).toContain("/srv/af/bin/af deliver <file>");
   });
 });

@@ -444,6 +444,40 @@ describe("composer: prompt with attachments, keys", () => {
   });
 });
 
+describe("af deliver: a finished document handed to the user", () => {
+  test("shown next to the agent, then in the same viewer; listed until done; bad paths refused", async () => {
+    const { home, backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    await w.refresh();
+    const h = makeHandler(new Orchestrator({ home, backend, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG }), w, backend);
+    const post = async (path: string, body: object) => {
+      const r = await h(new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+      return { status: r.status, body: (await r.json()) as any };
+    };
+    const report = join(home, "report.md");
+    const deck = join(home, "deck.pptx");
+    writeFileSync(report, "# Report\n");
+    writeFileSync(deck, "PK");
+    const first = await post("/deliver", { path: report, title: "Weekly report", pane: ws.paneId });
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ kind: "markdown", app: "obsidian", delivery: { path: report, title: "Weekly report", pane: ws.paneId, machine: "local", done: false } });
+    const viewer = first.body.delivery.viewer;
+    expect(w.views[viewer]?.target).toBe(report); // a viewer pane split off the agent's pane
+    const second = await post("/deliver", { path: deck, pane: ws.paneId });
+    expect(second.body.delivery.viewer).toBe(viewer); // the same viewer, not a pile of panes
+    expect(second.body).toMatchObject({ kind: "document", app: "default" });
+    expect(w.views[viewer]?.target).toBe(deck);
+    expect((await post("/deliver/done", { id: first.body.delivery.id })).body.ok).toBe(true);
+    expect((await post("/deliver", { path: "relative.md", pane: ws.paneId })).status).toBe(400);
+    expect((await post("/deliver", { path: join(home, "nope.md"), pane: ws.paneId })).status).toBe(404);
+    // outside Herdr (no pane): listed, not shown
+    const loose = await post("/deliver", { path: report });
+    expect(loose.body.delivery.viewer).toBeUndefined();
+    // a file that is not there is refused before any app starts
+    expect((await post("/open-with", { path: "/x/a.md", app: "obsidian" })).status).toBe(404);
+  });
+});
+
 describe("controls: stop, rewind, clear, exit with each agent's own keys", () => {
   test("claude and codex rewind with Esc Esc from an empty box, omp with /rewind; exit clears the box first", async () => {
     const { backend, w, ws } = await setup();

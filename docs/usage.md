@@ -71,6 +71,13 @@ loops:
 
 写任务时让一个**没看过这段对话的新 agent** 也能照着做：目标、涉及的文件、怎么验证、可以交哪些 outcome。长的结果让它写到 `$AF_OUT`（这个 run 的输出目录，不在仓库里），用 `--result` 交上来。
 
+## 打开文件、交付文档
+
+- **打开文件**：pane 的 ＋ → "open a file, folder or page…"，在弹出的框里点选或搜索，不用手输路径。预览顶栏有 Obsidian / VS Code / Open（默认程序）/ Finder 按钮。
+- **agent 写完文档会自动交给你**：装了 `deliver-document` skill（服务器启动时写进 claude 和 codex 的 skill 目录）。agent 写完报告、文档、幻灯片这类给你看的东西后会执行 `af deliver <文件>`：文件显示在它旁边，Needs you 里出现 "ready · 文件名" 和打开按钮。
+- **设置**（Needs you 旁边的 ⚙）：点一下才打开，或者交付时直接打开；按文件类型选应用：.md 用 Obsidian，文字/代码/LaTeX 用 VS Code，PPT/Word/PDF 用默认程序。
+- **远程机器上的文件**只能用 VS Code 打开（Remote-SSH，改的就是远程原文件）。
+
 ## 常用命令速查
 
 | 做什么 | 命令 |
@@ -83,5 +90,7 @@ loops:
 | 看结果 / 通过 / 打回 | `af inbox` · `af diff <node>` · `af graph accept <node>` · `af graph reject <node> --reason "…"` |
 | 改图 | `af graph edit / rm / cancel / retry <node>` |
 | 结束 | `af run stop` |
+| 交付一份文档给用户 | `af deliver <文件> --title "…"` |
+| 在应用里打开文件 | `af open <文件> --app obsidian\|vscode\|default\|finder` |
 | 改 workspace 名字 | 左栏双击名字（或 ⋯ → Rename…），或 `af workspace rename <workspace> "名字"` |
 | 完整说明 | `af guide lead` |

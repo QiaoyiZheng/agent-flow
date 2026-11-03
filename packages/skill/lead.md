@@ -58,7 +58,7 @@ The user sees Herdr's workspaces, tabs and split panes in the web UI. You can ar
   af open <path|url> --in <viewer pane>   # ... in an existing viewer pane (reuse it, do not pile up panes)
   af split [<pane>] [--down] [--agent claude|codex|omp]   # a shell, or a helper agent joining this run
   af close <pane>
-Show the user what matters (a diff summary, a report, a key file) instead of describing it. The herdr CLI also works for anything else (herdr pane move, herdr tab create, ...).
+Show the user what matters (a diff summary, a report, a key file) instead of describing it. A finished document for the user: af deliver <file> --title "<what>" (preview next to you, one click to open it in Obsidian / VS Code / its app). The herdr CLI also works for anything else (herdr pane move, herdr tab create, ...).
 
 ## Rules
 - Keep the user informed here: what you built, what is running, and what needs them.

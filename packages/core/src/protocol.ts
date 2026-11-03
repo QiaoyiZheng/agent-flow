@@ -296,6 +296,38 @@ export interface ChatSource {
 }
 
 /** Messages the server pushes to the web UI over WebSocket. */
+/** A document an agent handed over to the user (af deliver). */
+export interface Delivery {
+  id: string;
+  /** Absolute path on `machine`. */
+  path: string;
+  machine: string;
+  /** The pane of the agent that handed it over, and its workspace. */
+  pane?: string;
+  workspace?: string;
+  /** The agent's name in its run, when it is in one. */
+  agent?: string;
+  title?: string;
+  note?: string;
+  /** The viewer pane it is shown in. */
+  viewer?: string;
+  /** The app it was opened in by itself (settings: auto). */
+  opened?: string;
+  /** Opened or dismissed by the user: no longer in "Needs you". */
+  done?: boolean;
+  at: string;
+}
+
+export type OpenAppName = "vscode" | "obsidian" | "default" | "finder";
+
+/** How handed-over documents open: by themselves or with a click, and in which app per kind of file. */
+export interface OpenSettings {
+  auto: boolean;
+  markdown: OpenAppName;
+  text: OpenAppName;
+  document: OpenAppName;
+}
+
 /** A message for an agent, held by agent-flow while the agent works; sent when its turn ends, or now when steered. */
 export interface QueuedMessage {
   id: string;
@@ -314,6 +346,7 @@ export type ServerPush =
   | { type: "chat.prepend"; id: string; ops: ChatOp[]; more: boolean }
   | { type: "chat.ops"; id: string; ops: ChatOp[] }
   | { type: "notices"; list: Notice[] }
+  | { type: "deliveries"; list: Delivery[]; settings: OpenSettings; apps: Record<OpenAppName, boolean> }
   | { type: "notice"; notice: Notice }
   | { type: "snapshot"; run: string; state: RunState }
   | { type: "event"; run: string; event: RunEvent }

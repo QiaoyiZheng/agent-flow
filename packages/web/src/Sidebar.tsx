@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Attention, HPane, HerdrModel, RunState, RunSummary } from "@af/core";
-import { api, failed, notify as notifyUser } from "./store";
+import { APP_LABEL, api, failed, notify as notifyUser, useStore } from "./store";
+import { OpenButtons } from "./Viewers";
 
 const KIND_LABEL: Record<Attention["kind"], string> = {
   blocked: "waiting for an answer",
@@ -301,7 +302,11 @@ function RenameInput({ value, onDone }: { value: string; onDone: (label: string 
 /** One thing waiting on the user, from any run, workspace or machine. */
 export interface Need {
   key: string;
-  kind: "attention" | "blocked" | "finished";
+  kind: "attention" | "blocked" | "finished" | "delivery";
+  /** delivery: the document and its record. */
+  path?: string;
+  deliveryId?: string;
+  agentPane?: string;
   label: string;
   where: string;
   text: string;
@@ -331,6 +336,8 @@ function NeedsYou({
   onNeed: (n: Need) => void;
 }) {
   const [questions, setQuestions] = useState<Record<string, string>>({});
+  const { deliveries } = useStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const online = (p: HPane) => {
     const m = herdr?.machines.find((x) => x.id === p.machine);
     return !!m && (m.local || m.state === "online");
@@ -390,7 +397,29 @@ function NeedsYou({
     if ((seen[p.id] ?? "") >= p.statusAt) continue;
     const r = runWorkspaces.get(p.workspaceId);
     if (r && r.leadPane !== p.id) continue; // a run's workers report to its lead
+    if (deliveries.some((d) => !d.done && d.pane === p.id)) continue; // its document is listed: that says it finished
     needs.push({ key: `f:${p.id}`, kind: "finished", label: `finished · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: p.title ?? "", at: p.statusAt, paneId: p.id, workspace: p.workspaceId, statusAt: p.statusAt });
+  }
+  // documents agents handed over (af deliver) and not yet opened or dismissed
+  for (const d of deliveries) {
+    if (d.done) continue;
+    const name = d.path.split("/").at(-1) ?? d.path;
+    const ag = d.pane ? herdr?.panes.find((p) => p.id === d.pane) : undefined;
+    needs.push({
+      key: `d:${d.id}`,
+      kind: "delivery",
+      label: `ready · ${name}`,
+      where: [wsLabel(d.workspace), d.agent ?? ag?.agentName ?? ag?.agent].filter(Boolean).join(" · "),
+      text: [d.title, d.note].filter(Boolean).join(" — "),
+      at: d.at,
+      paneId: d.viewer && herdr?.panes.some((p) => p.id === d.viewer) ? d.viewer : d.pane,
+      workspace: d.workspace,
+      path: d.path,
+      deliveryId: d.id,
+      // opening or dismissing it counts as having seen the agent that wrote it
+      agentPane: d.pane,
+      statusAt: ag?.statusAt,
+    });
   }
   const rank = (n: Need) => (n.kind === "finished" ? 1 : 0);
   needs.sort((a, b) => rank(a) - rank(b) || b.at.localeCompare(a.at));
@@ -434,6 +463,12 @@ function NeedsYou({
       <div className="section-title">
         <span>Needs you</span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span className="menu-wrap">
+            <button className="bell gear" title="How documents agents hand over open (Obsidian, VS Code, by themselves or with a click)" onClick={() => setSettingsOpen((v) => !v)}>
+              ⚙
+            </button>
+            {settingsOpen && <OpenSettingsMenu onClose={() => setSettingsOpen(false)} />}
+          </span>
           <button className={`bell ${notify ? "on" : ""}`} onClick={bell} title={notify ? "Desktop notifications are on: when an agent finishes or asks while you are elsewhere. Click to turn off." : "Turn on desktop notifications: when an agent finishes or asks while you are elsewhere"}>
             {notify ? "🔔" : "🔕"}
           </button>
@@ -453,6 +488,10 @@ function NeedsYou({
                   onClick={(e) => {
                     e.stopPropagation();
                     if (n.kind === "finished") onSeen(n.paneId!, n.statusAt!);
+                    else if (n.kind === "delivery") {
+                      if (n.agentPane && n.statusAt) onSeen(n.agentPane, n.statusAt);
+                      api("POST", "/deliver/done", { id: n.deliveryId, run: undefined }).catch(failed("That did not work"));
+                    }
                     else api("POST", "/attention/dismiss", { id: n.attentionId, run: n.runId }).catch(failed("That did not work"));
                   }}
                 >
@@ -462,9 +501,53 @@ function NeedsYou({
             </div>
             {n.where && <div className="w">{n.where}</div>}
             {n.text && <div className="t">{n.text}</div>}
+            {n.kind === "delivery" && n.path && (
+              <div className="needs-open" onClick={(e) => e.stopPropagation()} onClickCapture={() => n.agentPane && n.statusAt && onSeen(n.agentPane, n.statusAt)}>
+                <OpenButtons path={n.path} delivery={n.deliveryId} />
+              </div>
+            )}
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** How documents agents hand over open: by themselves or with a click, and in which app for each kind of file. */
+function OpenSettingsMenu({ onClose }: { onClose: () => void }) {
+  const { openSettings: s, apps } = useStore();
+  const set = (patch: Record<string, unknown>) => api("POST", "/open-settings", { settings: patch, run: undefined }).catch(failed("Could not save the setting"));
+  if (!s) return null;
+  const choice = (key: "markdown" | "text" | "document", label: string, options: ("vscode" | "obsidian" | "default")[]) => (
+    <label className="os-row">
+      <span>{label}</span>
+      <select value={s[key]} onChange={(e) => set({ [key]: e.target.value })}>
+        {options
+          .filter((o) => apps[o] !== false)
+          .map((o) => (
+            <option key={o} value={o}>
+              {o === "default" ? "its default app" : APP_LABEL[o]}
+            </option>
+          ))}
+      </select>
+    </label>
+  );
+  return (
+    <div className="menu open-settings" onMouseLeave={onClose}>
+      <div className="os-title">When an agent hands over a document</div>
+      <label className="os-row radio">
+        <input type="radio" checked={!s.auto} onChange={() => set({ auto: false })} />
+        <span>Show it next to the agent; I open it with a click</span>
+      </label>
+      <label className="os-row radio">
+        <input type="radio" checked={s.auto} onChange={() => set({ auto: true })} />
+        <span>Open it in its app right away</span>
+      </label>
+      <div className="os-sep" />
+      {choice("markdown", "Markdown (.md)", ["obsidian", "vscode", "default"])}
+      {choice("text", "Text, code, LaTeX", ["vscode", "default"])}
+      {choice("document", "Slides, Word, PDF…", ["default", "vscode"])}
+      <div className="os-hint">Files on a remote machine open in VS Code (Remote-SSH).</div>
     </div>
   );
 }

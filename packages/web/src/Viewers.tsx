@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { type DocHeading, drawMermaid, onHighlighterReady, renderDoc } from "./markdown";
 import { FileBrowser } from "./Files";
 import type { Mail, RunState } from "@af/core";
-import { TOKEN, api, fileUrl, failed } from "./store";
+import { APP_LABEL, TOKEN, api, appsFor, fileUrl, failed, openIn, useStore } from "./store";
 import { ago } from "./view";
 
 const LANG: Record<string, string> = {
@@ -78,6 +78,8 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
   const isImage = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].includes(ext);
   const isPdf = ext === "pdf";
   const isMd = ["md", "markdown", "mdx"].includes(ext);
+  // slides, Word, Excel…: no preview here, the app opens them
+  const isOffice = /^(pptx?|key|docx?|pages|xlsx?|numbers|od[tps]|rtf|epub|zip|mp4|mov|mp3|wav)$/.test(ext);
   useEffect(() => (isMd ? onHighlighterReady(() => setHl((n) => n + 1)) : undefined), [isMd]);
 
   // the file's change time, every 2 s: a change reloads the view (keeping the scroll position)
@@ -96,7 +98,7 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
   }, [path]);
 
   useEffect(() => {
-    if (isImage || isPdf || stamp === undefined) return;
+    if (isImage || isPdf || isOffice || stamp === undefined) return;
     let alive = true;
     const scroll = box.current?.scrollTop ?? 0;
     fetch(fileUrl(path))
@@ -172,9 +174,7 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
             ↑ Folder
           </button>
         )}
-        <button className="btn" onClick={() => api("POST", "/edit", { path }).catch(failed("That did not work"))}>
-          Open in editor
-        </button>
+        <OpenButtons path={path} />
       </Bar>
       {err && <div className="empty" style={{ padding: 16 }}>{err}</div>}
       {isImage && (
@@ -183,6 +183,14 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
         </div>
       )}
       {isPdf && <iframe className="web" src={fileUrl(path)} title={path} />}
+      {isOffice && (
+        <div className="no-preview">
+          <div className="np-icon">{/^pptx?|key$/.test(ext) ? "▤" : /^xlsx?|numbers$/.test(ext) ? "▦" : "▣"}</div>
+          <div className="np-name">{path.split("/").at(-1)}</div>
+          <div className="np-hint">There is no preview for .{ext} files here. Open it in its app:</div>
+          <OpenButtons path={path} big />
+        </div>
+      )}
       {html && (
         <div className={`doc-wrap ${showOutline ? "with-outline" : ""}`}>
           <div onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />
@@ -280,5 +288,20 @@ export function Messages({ run, agent, node }: { run: RunState; agent?: string; 
         </form>
       )}
     </div>
+  );
+}
+
+/** Open buttons for a file: its app first (from the settings), then the others that fit. */
+export function OpenButtons({ path, remote, pane, delivery, big }: { path: string; remote?: boolean; pane?: string; delivery?: string; big?: boolean }) {
+  useStore(); // re-render when the settings or the apps arrive
+  const apps = appsFor(path, remote);
+  return (
+    <span className={`open-btns ${big ? "big" : ""}`}>
+      {apps.map((a, i) => (
+        <button key={a} className={`btn ${i === 0 ? "primary" : ""} ${a === "finder" ? "subtle" : ""}`} title={a === "finder" ? "Show it in Finder" : a === "default" ? "Open it in its default app" : `Open it in ${APP_LABEL[a]}`} onClick={(e) => (e.stopPropagation(), openIn(a, path, { pane, delivery }))}>
+          {a === "default" ? "Open" : a === "finder" ? "Finder" : APP_LABEL[a]}
+        </button>
+      ))}
+    </span>
   );
 }
