@@ -129,29 +129,49 @@ export class Herdr implements TerminalBackend {
     return json.result ?? json;
   }
 
+  /**
+   * One request over Herdr's socket. Bun's own socket API, writing as soon as the connection opens: Herdr reads a new
+   * connection once at once and, if nothing is there yet, only again ~100 ms later. node:net wrote one event-loop
+   * turn late and paid those 100 ms on every call (measured: 106 ms per call against 0.3 ms).
+   */
   private rpc(method: string, params: object = {}): Promise<any> {
     return new Promise((resolve, reject) => {
-      const s = connect(this.socket);
       let buf = "";
-      const timer = setTimeout(() => {
-        s.destroy();
-        reject(new HerdrError("timeout", `herdr ${method} timed out`));
-      }, 10_000);
-      s.on("connect", () => s.write(JSON.stringify({ id: "af", method, params }) + "\n"));
-      s.on("data", (d) => {
-        buf += d;
-        const i = buf.indexOf("\n");
-        if (i < 0) return;
+      let settled = false;
+      const done = (f: () => void) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        s.end();
-        const r = JSON.parse(buf.slice(0, i));
-        if (r.error) reject(new HerdrError(r.error.code, r.error.message));
-        else resolve(r.result);
-      });
-      s.on("error", (e) => {
-        clearTimeout(timer);
-        reject(new HerdrError("socket", `cannot reach Herdr at ${this.socket}: ${e.message}. Is Herdr running?`));
-      });
+        f();
+      };
+      const timer = setTimeout(() => done(() => reject(new HerdrError("timeout", `herdr ${method} timed out`))), 10_000);
+      Bun.connect({
+        unix: this.socket,
+        socket: {
+          open: (sock) => {
+            sock.write(JSON.stringify({ id: "af", method, params }) + "\n");
+          },
+          data: (sock, d) => {
+            buf += d.toString();
+            const i = buf.indexOf("\n");
+            if (i < 0) return;
+            // settle before closing: end() runs the close handler at once
+            done(() => {
+              try {
+                const r = JSON.parse(buf.slice(0, i));
+                if (r.error) reject(new HerdrError(r.error.code, r.error.message));
+                else resolve(r.result);
+              } catch (e) {
+                reject(new HerdrError("bad_reply", `herdr ${method}: ${(e as Error).message}`));
+              }
+            });
+            sock.end();
+          },
+          close: () => done(() => reject(new HerdrError("socket", `herdr ${method}: the connection closed without a reply`))),
+          error: (_sock, e) => done(() => reject(new HerdrError("socket", `cannot reach Herdr at ${this.socket}: ${e.message}. Is Herdr running?`))),
+          connectError: (_sock, e) => done(() => reject(new HerdrError("socket", `cannot reach Herdr at ${this.socket}: ${e.message}. Is Herdr running?`))),
+        },
+      }).catch((e) => done(() => reject(new HerdrError("socket", `cannot reach Herdr at ${this.socket}: ${(e as Error).message}. Is Herdr running?`))));
     });
   }
 
@@ -200,18 +220,15 @@ export class Herdr implements TerminalBackend {
   }
 
   async readScreen(paneId: string) {
-    const p = Bun.spawn([this.bin, "pane", "read", paneId, "--source", "visible"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HERDR_SOCKET_PATH: this.socket } });
-    const out = await new Response(p.stdout).text();
-    await p.exited;
-    return out;
+    const r = await this.rpc("pane.read", { pane_id: paneId, source: "visible" });
+    return String(r?.read?.text ?? "");
   }
 
   async readPane(paneId: string, lines: number) {
-    const p = Bun.spawn([this.bin, "pane", "read", paneId, "--source", "recent-unwrapped", "--lines", String(lines)], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HERDR_SOCKET_PATH: this.socket } });
-    const out = await new Response(p.stdout).text();
-    await p.exited;
-    return out;
+    const r = await this.rpc("pane.read", { pane_id: paneId, source: "recent_unwrapped", lines });
+    return String(r?.read?.text ?? "");
   }
+
 
   async paneExists(paneId: string) {
     return this.cli(["pane", "get", paneId]).then(
