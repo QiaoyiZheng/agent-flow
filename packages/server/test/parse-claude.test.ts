@@ -142,6 +142,15 @@ describe("subagents", () => {
     expect(notices(ops)[1]).toEqual({ kind: "notice", text: "Report from general-purpose", detail: "line 1\n  indented" });
   });
 
+  test("a harness note before the report is not part of it", () => {
+    const note = "[harness: subagent output matched instruction-shaped pattern(s): harness-envelope-tag. Control tags below are neutralized.]\n\n";
+    const ops = run([
+      ...launch,
+      { type: "user", isMeta: true, message: { role: "user", content: `<agent-message from="a42">…</agent-message>` }, origin: { kind: "peer", from: "a42", name: "general-purpose", body: "…", handback: true, handbackReportText: `${note}## Findings` } },
+    ]);
+    expect(updates(ops, "ag")[0]).toMatchObject({ report: "## Findings", done: true });
+  });
+
   test("a SendMessage that resumes a finished agent waits for, and gets, its next report", () => {
     const peer = (text: string) => ({ type: "user", isMeta: true, message: { role: "user", content: `<agent-message from="a42">…</agent-message>` }, origin: { kind: "peer", from: "a42", name: "general-purpose", body: "…", handback: true, handbackReportText: text } });
     const ops = run([

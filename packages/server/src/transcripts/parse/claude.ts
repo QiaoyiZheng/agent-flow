@@ -405,15 +405,18 @@ function taskNotification(text: string, at: string | undefined, ctx: ParseCtx, s
 
 /** The report of a subagent, from its hand-back: the text, without the harness's framing and indentation. */
 function handbackReport(body: string, origin: any): string {
-  if (typeof origin?.handbackReportText === "string" && origin.handbackReportText.trim()) return origin.handbackReportText.trim();
+  // the harness may put a "[harness: …]" note about neutralized tags first: it is not part of the report
+  const clean = (t: string) => t.replace(/^\[harness:[^\]]*\]\s*/, "").trim();
+  if (typeof origin?.handbackReportText === "string" && origin.handbackReportText.trim()) return clean(origin.handbackReportText);
   const i = body.indexOf("The report follows:\n");
-  if (i < 0) return body.trim();
-  return body
-    .slice(i + "The report follows:\n".length)
-    .split("\n")
-    .map((l) => l.replace(/^ {2}/, ""))
-    .join("\n")
-    .trim();
+  if (i < 0) return clean(body);
+  return clean(
+    body
+      .slice(i + "The report follows:\n".length)
+      .split("\n")
+      .map((l) => l.replace(/^ {2}/, ""))
+      .join("\n"),
+  );
 }
 
 /** A message from another claude: a subagent's report (to its Agent card), or another session talking. */
