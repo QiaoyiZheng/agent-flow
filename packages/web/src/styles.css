@@ -545,7 +545,10 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .tree-row:hover .meta, .tree-row:hover .count { display: none; }
 .row-actions button { border: 0; background: none; color: var(--text-3); cursor: pointer; width: 20px; height: 20px; border-radius: 4px; font-size: 13px; line-height: 1; padding: 0; }
 .row-actions button:hover { background: var(--bg-3); color: var(--text); }
-.row-actions .menu { right: 0; top: 22px; min-width: 190px; font-weight: 400; }
+/* a row's ⋯ menu opens centered under the whole row, not under the ⋯ button */
+.tree-row { position: relative; }
+.tree-row .menu-wrap { position: static; }
+.row-actions .menu { left: 50%; right: auto; top: calc(100% + 3px); transform: translateX(-50%); min-width: 190px; font-weight: 400; }
 .menu .item.danger { color: var(--s-rejected); }
 .add-machine { margin: 0 12px 8px; padding: 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); display: flex; flex-direction: column; gap: 6px; }
 .add-machine .hint { font-size: 11px; color: var(--text-3); }
