@@ -7,6 +7,8 @@ import { api, failed } from "./store";
 import { Terminal } from "./Terminal";
 import { AgentView } from "./AgentView";
 import { FileView, WebView } from "./Viewers";
+import { OpenDialog } from "./Files";
+import { createPortal } from "react-dom";
 import { basename, kindColor } from "./view";
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
@@ -82,10 +84,13 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   };
   const split = (direction: "right" | "down", extra: Record<string, unknown> = {}) =>
     api("POST", "/pane/split", { pane: paneId, direction, ...extra }).then((r) => r?.paneId && ctx.onFocus(r.paneId), failed("That did not work"));
-  const show = () => {
-    const target = prompt("File path, folder or URL to show next to this pane")?.trim();
-    if (target) api("POST", "/show", { target, of: paneId }).then((r) => ctx.onFocus(r.paneId), failed("That did not work"));
-  };
+  // the Open dialog: next to this pane ("split"), or in this viewer instead of what it shows ("replace")
+  const [opening, setOpening] = useState<"split" | "replace">();
+  const openStart = view && !isUrl(view.target) ? view.target : (p?.cwd ?? "~");
+  const openTarget = (target: string) =>
+    opening === "replace"
+      ? api("POST", "/show", { target, in: paneId }).catch(failed("That did not work"))
+      : api("POST", "/show", { target, of: paneId }).then((r) => ctx.onFocus(r.paneId), failed("That did not work"));
 
   let icon = "$";
   let title = p ? basename(p.cwd) : paneId;
@@ -108,6 +113,16 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
 
   return (
     <div className={`pane ${focused ? "focused" : ""}`} onMouseDown={() => ctx.onFocus(paneId)}>
+      {opening &&
+        createPortal(
+          <OpenDialog
+            start={openStart}
+            title={opening === "replace" ? "Show in this pane" : `Open next to ${title}`}
+            onOpen={openTarget}
+            onClose={() => setOpening(undefined)}
+          />,
+          document.body,
+        )}
       <div className="pane-head">
         <span className="ic" style={color ? { color } : undefined}>
           {icon}
@@ -147,20 +162,13 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
                 </div>
               ))}
               {p?.machine === "local" && (
-                <div className="item" onClick={() => (setMenu(false), show())}>
-                  ≡ file, folder or URL, right
+                <div className="item" onClick={() => (setMenu(false), setOpening("split"))}>
+                  ≡ open a file, folder or page, right…
                 </div>
               )}
               {view && (
-                <div
-                  className="item"
-                  onClick={() => {
-                    setMenu(false);
-                    const target = prompt("Show something else in this viewer", view.target)?.trim();
-                    if (target) api("POST", "/show", { target, in: paneId }).catch(failed("That did not work"));
-                  }}
-                >
-                  ↺ change what this viewer shows
+                <div className="item" onClick={() => (setMenu(false), setOpening("replace"))}>
+                  ↺ show something else here…
                 </div>
               )}
             </div>
@@ -180,7 +188,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
           </div>
         )}
         {view ? (
-          isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} />
+          isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} paneId={paneId} />
         ) : renderable && !raw ? (
           <AgentView paneId={paneId} agent={title} status={p?.agentStatus} focused={focused} onForked={(id) => ctx.onFocus(id)} />
         ) : (

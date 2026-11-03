@@ -244,6 +244,29 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     const el = list.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [version, source, showTerm, out.length, !!menu]);
+  // ... also when the view or its content changes size without a new entry: the queue panel or terminal strip
+  // opening, the message box growing, an image or the code highlighter arriving
+  useEffect(() => {
+    const el = list.current;
+    if (!el) return;
+    const pin = () => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    };
+    const ro = new ResizeObserver(pin);
+    ro.observe(el);
+    const mo = new MutationObserver(() => {
+      for (const c of Array.from(el.children)) if (!observed.has(c)) (observed.add(c), ro.observe(c));
+    });
+    const observed = new WeakSet<Element>();
+    mo.observe(el, { childList: true });
+    for (const c of Array.from(el.children)) (observed.add(c), ro.observe(c));
+    el.addEventListener("load", pin, true);
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      el.removeEventListener("load", pin, true);
+    };
+  }, [source === null]);
   // the live terminal is only needed for prompts we cannot draw ourselves
   const termVisible = (blocked && !menu && !overlay) || showTerm;
   const stripH = Math.round(Math.min(height * 0.7, Math.max(180, height * (blocked ? 0.55 : 0.4))));

@@ -17,6 +17,7 @@ import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
 import { enrichFromTranscript } from "./menu.ts";
 import type { Notices } from "./notices.ts";
+import { checkReadable, findFiles, listDir, readableRoots, statPath } from "./files.ts";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const repoRootOf = (cwd: string) => {
@@ -93,6 +94,13 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         }
         case "GET /view":
           return json(w.view(body.pane) ?? null);
+        // browsing local files (the Open dialog, folder panes, previews that reload when the file changes)
+        case "GET /fs/list":
+          return json(listDir(String(body.path || process.env.HOME || "/"), fileRoots(o, o.opts.home), body.hidden === "1" || body.hidden === true));
+        case "GET /fs/find":
+          return json(findFiles(String(body.root || process.env.HOME || "/"), String(body.q ?? ""), fileRoots(o, o.opts.home)));
+        case "GET /fs/stat":
+          return json(statPath(String(body.path ?? ""), fileRoots(o, o.opts.home)));
         case "GET /ls":
           return json({ model: w.model, views: w.views, runs: o.workspaceRuns(), shellWorkspace: o.shellWorkspace() });
         case "POST /pane/read": {
@@ -273,14 +281,24 @@ const RUN_LIST_EVENTS = new Set(["run.created", "run.stopped", "run.quiescent", 
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".json": "application/json" };
 
 /** Serve a file the UI asked to preview. Only paths inside a run's directories or ~/.agent-flow are allowed. */
+/** Folders the UI may read files from: home, temp, agent-flow's home, and every run's folders. */
+function fileRoots(o: Orchestrator, home: string) {
+  return readableRoots([
+    home,
+    ...o.listRuns().flatMap((r) => {
+      const m = o.getRun(r.id).meta!;
+      return [m.cwd, m.repo, m.integration].filter((x): x is string => !!x);
+    }),
+  ]);
+}
+
 function serveFile(o: Orchestrator, home: string, url: URL): Response {
-  const path = url.searchParams.get("path") ?? "";
-  const allowed = [home, ...o.listRuns().flatMap((r) => {
-    const m = o.getRun(r.id).meta!;
-    return [m.cwd, m.repo, m.integration].filter((x): x is string => !!x);
-  })];
-  if (!path.startsWith("/") || path.includes("/../") || !allowed.some((a) => path === a || path.startsWith(a + "/")))
-    return fail("forbidden", "path is outside the run directories", 403);
+  let path: string;
+  try {
+    path = checkReadable(url.searchParams.get("path") ?? "", fileRoots(o, home));
+  } catch (e) {
+    return fail((e as AfError).code ?? "forbidden", (e as Error).message, (e as AfError).status ?? 403);
+  }
   if (!existsSync(path) || !statSync(path).isFile()) return fail("not_found", `${path} is not a file`, 404);
   return new Response(Bun.file(path));
 }
@@ -361,6 +379,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           panes: () => w.model.panes,
           knownSession: access.known,
           argv: (p) => w.processArgv(p),
+          pids: (p) => w.processes(p).then((ps) => ps.map((x) => x.pid)),
           screen: (p) => w.read(p, 400),
         });
         send({ type: "hello", runs: o.listRuns() });
