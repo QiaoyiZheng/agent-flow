@@ -80,8 +80,8 @@ function sendOutgoing(pane: string, o: Outgoing, mode: "auto" | "steer" = o.stee
   outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sending", error: undefined } : x)));
   api<{ sent?: string; queued?: unknown }>("POST", "/prompt", { pane, text: o.body, attachments: o.files, mode })
     .then((r) =>
-      r.queued
-        ? outbox.update(pane, (list) => list.filter((x) => x.id !== o.id)) // the queue panel shows it now
+      r.queued || o.body.startsWith("/")
+        ? outbox.update(pane, (list) => list.filter((x) => x.id !== o.id)) // the queue panel shows it; a command shows its own result
         : outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sent", prompt: r.sent ?? o.body, at: Date.now() } : x))),
     )
     .catch((e) => outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "failed", error: e.message } : x))));
@@ -231,6 +231,14 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
   };
   const forkAt = (ref: number, text: string) => () => fork(ref, text);
 
+  // links to local files in agent output (codex writes [x.ts](/Users/…/x.ts:12)) open next to this pane
+  const openLink = (e: React.MouseEvent) => {
+    const a = (e.target as HTMLElement).closest("a[data-path]") as HTMLAnchorElement | null;
+    if (!a) return;
+    e.preventDefault();
+    api("POST", "/show", { target: a.dataset.path, of: paneId }).catch(failed("Could not open the file"));
+  };
+
   // keep the newest output in view unless the user scrolled up
   useLayoutEffect(() => {
     const el = list.current;
@@ -267,6 +275,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
       <div
         ref={list}
         className="chat"
+        onClick={openLink}
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
@@ -276,7 +285,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
         {source && !segs.length && <div className="chat-empty">Nothing yet. Send a message below.</div>}
         {segs.map((s) =>
           s.kind === "steps" ? (
-            <Steps key={s.key} tools={s.tools} sig={s.tools.map((t) => (t.done ? (t.error ? "x" : "d") : "r")).join("")} />
+            <Steps key={s.key} tools={s.tools} />
           ) : (
             <Entry
               key={s.entry.key}
@@ -303,6 +312,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
       <div className={`agent-status ${status ?? ""}`}>
         <span className={`live-dot ${status ?? ""}`} />
         <span>{blocked ? (menu ? "waiting for your choice" : overlay ? "the agent shows a notice above" : "waiting for your answer in the terminal") : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
+        <MetaChips meta={log.current.meta} />
         <span className="spacer" />
         {status === "working" && (
           <button title="Interrupt (Esc)" onClick={() => api("POST", "/keys", { pane: paneId, keys: ["esc"] }).catch(failed("That did not work"))}>
@@ -333,11 +343,13 @@ const Entry = memo(
   function Entry({ block, hl, onFork }: { block: ChatBlock; hl: number; onFork?: () => void }) {
     switch (block.kind) {
       case "user":
-        return <UserMessage text={block.text} onFork={onFork} />;
+        return <UserMessage text={block.text} images={block.images} command={block.command} onFork={onFork} />;
       case "text":
         return <Prose text={block.text} hl={hl} />;
+      case "thinking":
+        return <Thinking text={block.text} hl={hl} />;
       case "notice":
-        return <div className="c-notice">{block.text}</div>;
+        return <NoticeLine n={block} hl={hl} />;
       case "tool":
         return <ToolCard t={block} />;
     }
@@ -345,7 +357,7 @@ const Entry = memo(
   (a, b) => a.block === b.block && a.hl === b.hl && !!a.onFork === !!b.onFork,
 );
 
-function UserMessage({ text, onFork }: { text: string; onFork?: () => void }) {
+function UserMessage({ text, images, command, onFork }: { text: string; images?: string[]; command?: string; onFork?: () => void }) {
   const m = text.match(ATTACH_HEAD);
   const files = m ? m[1]!.trim().split("\n").map((l) => l.replace(/^- /, "")) : [];
   const body = m ? text.slice(m[0].length) : text;
@@ -367,7 +379,11 @@ function UserMessage({ text, onFork }: { text: string; onFork?: () => void }) {
             ))}
           </div>
         )}
-        <div className={`c-user-text ${long && !open ? "clamp" : ""}`}>{body}</div>
+        {images && images.length > 0 && <Thumbs images={images} />}
+        <div className={`c-user-text ${long && !open ? "clamp" : ""}`}>
+          {command && <span className="c-cmd-badge">{command}</span>}
+          {body}
+        </div>
         {long && (
           <button className="c-more" onClick={() => setOpen((o) => !o)}>
             {open ? "show less" : "show more"}
@@ -375,6 +391,93 @@ function UserMessage({ text, onFork }: { text: string; onFork?: () => void }) {
         )}
       </div>
     </div>
+  );
+}
+
+const short = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+
+/** Model, effort, mode and context use, as the agent's own status line shows them. */
+function MetaChips({ meta }: { meta: ChatMeta }) {
+  const used = meta.contextTokens && meta.contextWindow ? meta.contextTokens / meta.contextWindow : undefined;
+  const parts = [meta.model, meta.effort, meta.mode].filter(Boolean) as string[];
+  if (!parts.length && used === undefined && meta.cost === undefined) return null;
+  return (
+    <span className="meta-chips">
+      {parts.map((p, i) => (
+        <span key={i} className="meta-chip">
+          {p}
+        </span>
+      ))}
+      {used !== undefined && (
+        <span className={`meta-chip ctx ${used > 0.85 ? "hot" : used > 0.6 ? "warm" : ""}`} title={`${meta.contextTokens!.toLocaleString()} of ${meta.contextWindow!.toLocaleString()} tokens in context`}>
+          <span className="ctx-bar">
+            <span style={{ width: `${Math.min(100, Math.round(used * 100))}%` }} />
+          </span>
+          {short(meta.contextTokens!)} / {short(meta.contextWindow!)}
+        </span>
+      )}
+      {meta.cost !== undefined && <span className="meta-chip">${meta.cost.toFixed(2)}</span>}
+    </span>
+  );
+}
+
+/** The model's reasoning: one dim line, opened on click. */
+function Thinking({ text, hl }: { text: string; hl: number }) {
+  const [open, setOpen] = useState(false);
+  const first = text.replace(/[*_#`>]/g, "").trim().split("\n")[0] ?? "";
+  return (
+    <div className={`c-think ${open ? "open" : ""}`}>
+      <div className="c-think-head" onClick={() => setOpen((o) => !o)}>
+        <span className="c-tool-caret">{open ? "▾" : "▸"}</span>
+        <span className="c-think-label">Thinking</span>
+        {!open && <span className="c-think-first">{first}</span>}
+      </div>
+      {open && (
+        <div className="c-think-body">
+          <Prose text={text} hl={hl} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A compact line (command output, wake-up, error, compaction). Its detail opens on click. */
+function NoticeLine({ n, hl }: { n: Extract<ChatBlock, { kind: "notice" }>; hl: number }) {
+  const [open, setOpen] = useState(false);
+  const tone = n.tone ?? "info";
+  const head = (
+    <>
+      {n.detail && <span className="c-tool-caret">{open ? "▾" : "▸"}</span>}
+      <span className="c-notice-text">{n.text}</span>
+    </>
+  );
+  return (
+    <div className={`c-notice ${tone} ${n.divider ? "divider" : ""} ${n.detail ? "has-detail" : ""}`}>
+      <div className="c-notice-head" onClick={() => n.detail && setOpen((o) => !o)}>
+        {head}
+      </div>
+      {open && n.detail && (n.divider ? <div className="c-notice-detail md-wrap"><Prose text={n.detail} hl={hl} /></div> : <pre className="c-pre c-notice-detail">{n.detail}</pre>)}
+    </div>
+  );
+}
+
+/** Image thumbnails; a click shows the image full size. */
+function Thumbs({ images }: { images: string[] }) {
+  const [big, setBig] = useState<string>();
+  const src = (i: string) => (/^(data:|https?:|blob:)/.test(i) ? i : fileUrl(i));
+  return (
+    <>
+      <div className="c-thumbs">
+        {images.map((i, k) => (
+          <img key={k} src={src(i)} alt="" onClick={() => setBig(src(i))} />
+        ))}
+      </div>
+      {big && (
+        <div className="lightbox" onClick={() => setBig(undefined)}>
+          <img src={big} alt="" />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -454,22 +557,29 @@ export function Prose({ text, hl }: { text: string; hl: number }) {
 
 /** A folded group of tool calls: "4 steps · Bash ×3 · Edit calc.js". */
 const Steps = memo(
-  function Steps({ tools }: { tools: Tool[]; sig: string }) {
+  function Steps({ tools }: { tools: Tool[] }) {
     const [open, setOpen] = useState(false);
-    const running = tools.some((t) => !t.done);
+    const running = tools.some((t) => !t.done && !t.aborted && !t.background);
+    const bg = tools.some((t) => !t.done && !t.aborted && t.background);
+    const aborted = tools.some((t) => t.aborted);
     const failed = tools.filter((t) => t.error).length;
     const counts = new Map<string, number>();
     for (const t of tools) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
-    const edits = tools.filter((t) => t.edit || t.patch).map((t) => basename(t.edit?.path ?? t.summary.split(" — ")[0] ?? ""));
+    const edits = tools.flatMap((t) => (t.files?.length ? t.files : t.edit || t.patch ? [t.edit?.path ?? t.summary.split(" — ")[0] ?? ""] : [])).map((f) => basename(f));
     const parts = [...counts].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n));
     const label = tools.length === 1 ? `${tools[0]!.name} ${tools[0]!.summary}` : `${tools.length} steps · ${parts.join(" · ")}`;
     return (
       <div className={`c-steps ${open ? "open" : ""}`}>
         <div className="c-steps-head" onClick={() => setOpen((o) => !o)}>
           <span className="c-tool-caret">{open ? "▾" : "▸"}</span>
-          <span className={`c-tool-icon ${running ? "run" : failed ? "err" : "ok"}`}>{running ? "◌" : failed ? "✗" : "✓"}</span>
+          <span className={`c-tool-icon ${running ? "run" : failed ? "err" : aborted ? "abort" : bg ? "bg" : "ok"}`}>{running ? "◌" : failed ? "✗" : aborted ? "⊘" : bg ? "◔" : "✓"}</span>
           <span className="c-steps-label">{label}</span>
-          {tools.length > 1 && edits.length > 0 && <span className="c-steps-edits">edited {[...new Set(edits)].slice(0, 3).join(", ")}</span>}
+          {edits.length > 0 && (tools.length > 1 || tools[0]!.files?.length) && (
+            <span className="c-steps-edits">
+              edited {[...new Set(edits)].slice(0, 3).join(", ")}
+              {new Set(edits).size > 3 ? ` +${new Set(edits).size - 3}` : ""}
+            </span>
+          )}
         </div>
         {open && (
           <div className="c-steps-body">
@@ -481,26 +591,39 @@ const Steps = memo(
       </div>
     );
   },
-  (a, b) => a.tools.length === b.tools.length && a.sig === b.sig,
+  // the log replaces a tool's object whenever it changes
+  (a, b) => a.tools.length === b.tools.length && a.tools.every((t, i) => t === b.tools[i]),
 );
+
+const toolState = (t: Tool) => (t.aborted ? "abort" : !t.done ? (t.background ? "bg" : "run") : t.error ? "err" : "ok");
+const TOOL_ICON = { abort: "⊘", bg: "◔", run: "◌", err: "✗", ok: "✓" } as const;
 
 function ToolCard({ t }: { t: Tool }) {
   const [open, setOpen] = useState(false);
-  const hasDetail = !!(t.input || t.patch || t.edit || t.output);
-  const icon = !t.done ? "◌" : t.error ? "✗" : "✓";
+  const hasDetail = !!(t.input || t.patch || t.edit || t.output || t.report || t.images?.length);
+  const st = toolState(t);
   return (
     <div className={`c-tool ${open ? "open" : ""} ${t.error ? "err" : ""}`}>
       <div className="c-tool-head" onClick={() => hasDetail && setOpen((o) => !o)}>
-        <span className={`c-tool-icon ${t.done ? (t.error ? "err" : "ok") : "run"}`}>{icon}</span>
+        <span className={`c-tool-icon ${st}`} title={st === "abort" ? "interrupted" : st === "bg" ? "running in the background" : undefined}>
+          {TOOL_ICON[st]}
+        </span>
         <span className="c-tool-name">{t.name}</span>
         <span className="c-tool-sum">{t.summary}</span>
+        {st === "bg" && <span className="c-tool-tag">background</span>}
+        {st === "abort" && <span className="c-tool-tag">interrupted</span>}
         {hasDetail && <span className="c-tool-caret">{open ? "▾" : "▸"}</span>}
       </div>
       {open && (
         <div className="c-tool-body">
           {t.input && <pre className="c-pre">{t.input}</pre>}
-          {t.edit && <EditDiff before={t.edit.before} after={t.edit.after} />}
-          {t.patch && <Patch text={t.patch} />}
+          {t.patch ? <Patch text={t.patch} /> : t.edit && <EditDiff before={t.edit.before} after={t.edit.after} />}
+          {t.report && (
+            <div className="c-report">
+              <Prose text={t.report} hl={0} />
+            </div>
+          )}
+          {t.images && t.images.length > 0 && <Thumbs images={t.images} />}
           {t.output && <pre className="c-pre out">{t.output}</pre>}
         </div>
       )}
@@ -527,14 +650,63 @@ function EditDiff({ before, after }: { before: string; after: string }) {
   );
 }
 
+/** A unified diff: file headers, hunks, and old/new line numbers when the hunk headers give them. */
 function Patch({ text }: { text: string }) {
+  type Row = { kind: "file" | "hunk" | "add" | "del" | "ctx" | "meta"; text: string; a?: number; b?: number };
+  const rows = useMemo(() => {
+    const out: Row[] = [];
+    let a = 0;
+    let b = 0;
+    let numbered = false;
+    for (const l of text.split("\n")) {
+      const file = l.match(/^\+\+\+ (?:b\/)?(.+)$/) ?? l.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/);
+      if (file && !(l.startsWith("+++") && out.at(-1)?.kind === "add")) {
+        out.push({ kind: "file", text: file[1]!.trim() });
+        continue;
+      }
+      if (/^--- (a\/|\/dev\/null)/.test(l) || /^(diff --git|index [0-9a-f]+\.\.|\*\*\* (Begin|End) Patch)/.test(l)) continue;
+      const h = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+      if (h) {
+        a = Number(h[1]);
+        b = Number(h[2]);
+        numbered = true;
+        out.push({ kind: "hunk", text: h[3]?.trim() || "" });
+        continue;
+      }
+      if (l.startsWith("@@")) {
+        numbered = false;
+        out.push({ kind: "hunk", text: l.slice(2).trim() });
+        continue;
+      }
+      if (l.startsWith("+")) out.push({ kind: "add", text: l.slice(1), b: numbered ? b++ : undefined });
+      else if (l.startsWith("-")) out.push({ kind: "del", text: l.slice(1), a: numbered ? a++ : undefined });
+      else if (l.startsWith("\\")) out.push({ kind: "meta", text: l });
+      else out.push({ kind: "ctx", text: l.startsWith(" ") ? l.slice(1) : l, a: numbered ? a++ : undefined, b: numbered ? b++ : undefined });
+    }
+    return out;
+  }, [text]);
+  const nums = rows.some((r) => r.a !== undefined || r.b !== undefined);
   return (
-    <div className="diff c-diff">
-      {text.split("\n").map((l, i) => (
-        <div key={i} className={l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : l.startsWith("@@") || l.startsWith("***") ? "hunk" : ""}>
-          {l || " "}
-        </div>
-      ))}
+    <div className={`diff c-diff ${nums ? "nums" : ""}`}>
+      {rows.map((r, i) =>
+        r.kind === "file" ? (
+          <div key={i} className="file">
+            {r.text}
+          </div>
+        ) : r.kind === "hunk" ? (
+          <div key={i} className="hunk">
+            {nums ? "⋯ " : "@@ "}
+            {r.text}
+          </div>
+        ) : (
+          <div key={i} className={r.kind}>
+            {nums && <span className="ln">{r.a ?? ""}</span>}
+            {nums && <span className="ln">{r.b ?? ""}</span>}
+            <span className="sign">{r.kind === "add" ? "+" : r.kind === "del" ? "-" : " "}</span>
+            {r.text || " "}
+          </div>
+        ),
+      )}
     </div>
   );
 }

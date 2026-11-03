@@ -6,3 +6,4 @@ spikes/*/results.jsonl
 *.log
 .DS_Store
 .sandbox/
+.claude/worktrees/

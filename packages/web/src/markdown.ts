@@ -99,6 +99,15 @@ marked.use({
     },
     link({ href, title, tokens }) {
       const text = this.parser.parseInline(tokens);
+      // a local file (codex writes [x.ts](/Users/me/x.ts:12)): opened in a viewer pane, not as a web page
+      const local = href.match(/^(?:file:\/\/)?((?:\/|~\/)[^?#]*?)(?::\d+(?::\d+)?)?(?:#L\d+.*)?$/);
+      if (local) {
+        let path = local[1]!;
+        try {
+          path = decodeURI(path);
+        } catch {}
+        return `<a href="#" class="local-link" data-path="${esc(path)}" title="${esc(title || `Open ${path}`)}">${text}</a>`;
+      }
       return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer"${title ? ` title="${esc(title)}"` : ""}>${text}</a>`;
     },
     html({ text }) {
