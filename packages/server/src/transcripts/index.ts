@@ -304,6 +304,41 @@ export async function matchByScreen(fs: TranscriptFS, candidates: string[], scre
   return enough && best!.score > (next?.score ?? 0) ? best!.path : undefined;
 }
 
+/** The title claude gave a conversation: it appends {"type":"ai-title","aiTitle":…} records all through the
+ *  file, and shows the same text as the terminal title (which Herdr reports). Cached while the file does not grow. */
+const titleCache = new WeakMap<TranscriptFS, Map<string, { size: number; title?: string }>>();
+export async function claudeTitle(fs: TranscriptFS, path: string): Promise<string | undefined> {
+  let cache = titleCache.get(fs);
+  if (!cache) titleCache.set(fs, (cache = new Map()));
+  const head = await fs.readFrom(path, 0, 0);
+  if (!head) return undefined;
+  const hit = cache.get(path);
+  if (hit && hit.size === head.size) return hit.title;
+  let title: string | undefined;
+  for (const span of [256 * 1024, 4 * 1024 * 1024]) {
+    const r = await fs.readFrom(path, Math.max(0, head.size - span), span);
+    const all = r ? [...r.data.toString("utf8").matchAll(/"type":"ai-title","aiTitle":("(?:[^"\\]|\\.)*")/g)] : [];
+    if (all.length) {
+      try {
+        title = JSON.parse(all.at(-1)![1]!);
+      } catch {}
+      break;
+    }
+    if (head.size <= span) break;
+  }
+  cache.set(path, { size: head.size, title });
+  return title;
+}
+
+/** Of several candidate transcripts, the one whose title is the pane's terminal title, if exactly one is. */
+export async function matchByTitle(fs: TranscriptFS, candidates: string[], paneTitle: string | undefined) {
+  const want = paneTitle?.trim();
+  if (!want || !candidates.length) return undefined;
+  const titles = await Promise.all(candidates.map((c) => claudeTitle(fs, c).catch(() => undefined)));
+  const hits = candidates.filter((_, i) => titles[i]?.trim() === want);
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
 export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSession, knownPath, screen, argv }: ResolveInput): Promise<{ source: ChatSource } | { reason: string }> {
   const agent = pane.agent;
   if (!isAgent(agent)) return { reason: pane.agent ? `rendering ${pane.agent} output is not supported yet` : "no agent in this pane" };
@@ -329,14 +364,17 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
         if (r) return r;
       }
     }
+    const candidates = await fs.claudeForFolder(pane.cwd, 15);
+    // the terminal title is the conversation's title: the surest sign when nothing above reported the session
+    const titled = await matchByTitle(fs, candidates, pane.title);
+    if (titled) return { source: { agent, path: titled, how: "title" } };
     const sharing = panes.filter((p) => p.agent === "claude" && p.cwd === pane.cwd && p.machine === pane.machine).length;
     if (sharing > 1) {
-      const candidates = await fs.claudeForFolder(pane.cwd, 15);
       const hit = screen ? await matchByScreen(fs, candidates, await screen().catch(() => "")) : undefined;
       if (hit) return { source: { agent, path: hit, how: "screen" } };
       return { reason: `${sharing} claude agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
     }
-    const r = found((await fs.claudeForFolder(pane.cwd, 1))[0], "folder");
+    const r = found(candidates[0], "folder");
     if (r) return r;
     return { reason: "no claude transcript for this folder yet" };
   }

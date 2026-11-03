@@ -280,6 +280,7 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
         {!menu && overlay && <OverlayCard pane={paneId} overlay={overlay} onTerminal={() => setShowTerm(true)} />}
         {source?.how === "folder" && <div className="chat-note">Transcript matched by folder: {source.path}</div>}
         {source?.how === "screen" && <div className="chat-note">Transcript matched by screen content: {source.path}</div>}
+        {source?.how === "title" && <div className="chat-note">Transcript matched by conversation title: {source.path}</div>}
       </div>
       {termVisible && height > 0 && (
         <div className={`live ${blocked ? "blocked" : ""}`}>

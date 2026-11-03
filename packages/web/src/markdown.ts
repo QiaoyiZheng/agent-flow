@@ -102,7 +102,9 @@ marked.use({
       return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer"${title ? ` title="${esc(title)}"` : ""}>${text}</a>`;
     },
     html({ text }) {
-      return esc(text); // agent output is untrusted: show raw HTML as text
+      // agent output is untrusted: show raw HTML as text, except <br>, which agents use for line breaks in table cells
+      if (/^<br\s*\/?>$/i.test(text.trim())) return "<br>";
+      return esc(text);
     },
   },
 });

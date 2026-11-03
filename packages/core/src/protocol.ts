@@ -228,7 +228,7 @@ export interface ChatSource {
   agent: "claude" | "codex" | "omp";
   path: string;
   /** How the transcript was found: exact session id/path, the screen's content, or a guess from the pane's folder. */
-  how: "session" | "screen" | "folder";
+  how: "session" | "title" | "screen" | "folder";
 }
 
 /** Messages the server pushes to the web UI over WebSocket. */

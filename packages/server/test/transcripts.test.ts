@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, HPane } from "@af/core";
 import { parseClaude, parseCodex, parseOmp } from "../src/transcripts/parse.ts";
-import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, matchByScreen, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
+import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, claudeTitle, matchByScreen, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -213,6 +213,39 @@ describe("finding and following transcripts", () => {
     expect(await resolveTranscript(fs, { pane: a, panes: [a, b], argv: async () => [], screen: async () => "" })).toMatchObject({ reason: expect.stringContaining("does not show which conversation") });
     // a path reported by the SessionStart hook wins over everything
     expect(await resolveTranscript(fs, { pane: a, panes: [a, b], knownPath: other, argv: async () => [], screen: async () => leadScreen })).toEqual({ source: { agent: "claude", path: other, how: "session" } });
+  });
+
+  test("several claude agents in one folder: the conversation title (the terminal title) tells which is whose", async () => {
+    const root = tmp();
+    const dir = join(root, ".claude/projects/-proj");
+    mkdirSync(dir, { recursive: true });
+    const conv = (id: string, titles: string[], filler = 0) => {
+      const lines: object[] = [{ type: "user", cwd: "/proj", message: { role: "user", content: "hi" } }];
+      for (const t of titles) {
+        lines.push({ type: "ai-title", aiTitle: t, sessionId: id });
+        for (let i = 0; i < filler; i++) lines.push({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }] } });
+      }
+      writeFileSync(join(dir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+      return join(dir, `${id}.jsonl`);
+    };
+    // the title was set early and the file grew a lot since: still found
+    const ppt = conv("bbbbbbbb-0000-0000-0000-000000000001", ["PPT 大纲", "技术创新与\"卡脖子\"问题PPT"], 400);
+    const paper = conv("bbbbbbbb-0000-0000-0000-000000000002", ["同步远程的paper撰写"]);
+    const fork = conv("bbbbbbbb-0000-0000-0000-000000000003", ["同步远程的paper撰写", "同步远程的paper撰写 ⑂"]);
+    const fs = new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, "none") });
+    expect(await claudeTitle(fs, ppt)).toBe('技术创新与"卡脖子"问题PPT');
+    const a = pane({ agent: "claude", title: '技术创新与"卡脖子"问题PPT' });
+    const b = pane({ id: "w1:p2", agent: "claude", title: "同步远程的paper撰写" });
+    const c = pane({ id: "w1:p3", agent: "claude", title: "同步远程的paper撰写 ⑂" });
+    const panes = [a, b, c];
+    const blank = { argv: async () => [], screen: async () => "" };
+    expect(await resolveTranscript(fs, { pane: a, panes, ...blank })).toEqual({ source: { agent: "claude", path: ppt, how: "title" } });
+    expect(await resolveTranscript(fs, { pane: b, panes, ...blank })).toEqual({ source: { agent: "claude", path: paper, how: "title" } });
+    expect(await resolveTranscript(fs, { pane: c, panes, ...blank })).toEqual({ source: { agent: "claude", path: fork, how: "title" } });
+    // a title that is not unique, or not a conversation title at all, decides nothing
+    conv("bbbbbbbb-0000-0000-0000-000000000004", ["同步远程的paper撰写"]);
+    expect(await resolveTranscript(fs, { pane: b, panes, ...blank })).toMatchObject({ reason: expect.stringContaining("does not show which conversation") });
+    expect(await resolveTranscript(fs, { pane: pane({ agent: "claude", title: "Claude Code" }), panes, ...blank })).toMatchObject({ reason: expect.any(String) });
   });
 
   test("a large transcript opens at its last part, from a whole line", async () => {
