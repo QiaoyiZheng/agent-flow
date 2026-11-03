@@ -309,7 +309,9 @@ export interface QueuedMessage {
 export type ServerPush =
   | { type: "hello"; runs: RunSummary[] }
   | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec>; queue: Record<string, QueuedMessage[]> }
-  | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[] }
+  /** more: earlier conversation exists; it comes as chat.prepend when asked for with chat.more. */
+  | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[]; more?: boolean }
+  | { type: "chat.prepend"; id: string; ops: ChatOp[]; more: boolean }
   | { type: "chat.ops"; id: string; ops: ChatOp[] }
   | { type: "notices"; list: Notice[] }
   | { type: "notice"; notice: Notice }
@@ -327,4 +329,6 @@ export type ClientPush =
   | { type: "term.scroll"; id: string; direction: "up" | "down"; lines: number }
   | { type: "term.close"; id: string }
   | { type: "chat.open"; id: string; paneId: string }
+  /** The user scrolled to the top: send the conversation before what was sent. */
+  | { type: "chat.more"; id: string }
   | { type: "chat.close"; id: string };

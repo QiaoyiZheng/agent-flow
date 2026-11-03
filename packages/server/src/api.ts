@@ -12,6 +12,7 @@ import { claudeExtraArgs } from "./agents.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import { TerminalBridge } from "./terminals.ts";
 import { ChatBridge } from "./transcripts/bridge.ts";
+import { chatImage } from "./transcripts/index.ts";
 import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
 import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
@@ -341,6 +342,11 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
       if (url.pathname.startsWith("/api/")) {
         if (!sameOrigin || !authed) return fail("forbidden", "bad origin or token", 403);
         if (url.pathname === "/api/file") return serveFile(o, opts.home, url);
+        if (url.pathname === "/api/chat-image") {
+          const img = await chatImage(url.searchParams.get("id") ?? "");
+          if (!img) return fail("not_found", "that image is gone (the conversation was reopened)", 404);
+          return new Response(new Uint8Array(img.bytes), { headers: { "content-type": img.type, "cache-control": "private, max-age=86400, immutable" } });
+        }
         if (url.pathname === "/api/upload" && req.method === "POST") {
           try {
             const len = Number(req.headers.get("content-length") ?? 0);
@@ -410,7 +416,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           });
           return;
         }
-        if (msg.type === "chat.open" || msg.type === "chat.close") return ws.data.chat?.handle(msg);
+        if (msg.type === "chat.open" || msg.type === "chat.close" || msg.type === "chat.more") return ws.data.chat?.handle(msg);
         ws.data.bridge?.handle(msg);
       },
       close(ws) {

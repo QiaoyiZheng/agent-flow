@@ -95,6 +95,13 @@ class Log {
   private tools = new Map<string, Tool>();
   private early = new Map<string, Partial<Tool>>();
   meta: ChatMeta = {};
+  /** Earlier conversation in front of what is here (results of its calls that arrived already apply to them). */
+  prepend(ops: ChatOp[]) {
+    const later = this.entries;
+    this.entries = [];
+    this.apply(ops.filter((o) => o.op !== "meta")); // the footer keeps the latest settings
+    this.entries = [...this.entries, ...later];
+  }
   apply(ops: ChatOp[]) {
     for (const o of ops) {
       if (o.op === "add") {
@@ -147,6 +154,23 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
   const box = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // earlier conversation: asked for when the user scrolls near the top
+  const [more, setMore] = useState(false);
+  const loadingEarlier = useRef(false);
+  const anchor = useRef<{ height: number; top: number } | undefined>(undefined);
+  const chatId = useRef("");
+  const loadEarlier = () => {
+    if (!more || loadingEarlier.current || !chatId.current) return;
+    loadingEarlier.current = true;
+    send({ type: "chat.more", id: chatId.current });
+  };
+  useLayoutEffect(() => {
+    const el = list.current;
+    const a = anchor.current;
+    if (!el || !a) return;
+    anchor.current = undefined;
+    el.scrollTop = a.top + (el.scrollHeight - a.height);
+  }, [version]);
   const [height, setHeight] = useState(0);
   const [showTerm, setShowTerm] = useState(false);
   const [hl, setHl] = useState(0);
@@ -189,14 +213,26 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     log.current = new Log();
     setSource(undefined);
     const off = onChat(id, (m) => {
+      if (m.type === "chat.prepend") {
+        // keep what is on screen where it is: the earlier part grows the list above it
+        const el = list.current;
+        anchor.current = el ? { height: el.scrollHeight, top: el.scrollTop } : undefined;
+        log.current.prepend(m.ops);
+        setMore(m.more);
+        loadingEarlier.current = false;
+        return bump();
+      }
       if (m.type === "chat.reset") {
         log.current = new Log();
         setSource(m.source);
         setReason(m.reason);
+        setMore(!!m.more);
+        loadingEarlier.current = false;
       }
       log.current.apply(m.ops);
       bump();
     });
+    chatId.current = id;
     send({ type: "chat.open", id, paneId });
     return () => {
       off();
@@ -302,9 +338,15 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          if (el.scrollTop < 400) loadEarlier();
         }}
       >
         {source === undefined && <div className="chat-empty">Loading transcript…</div>}
+        {more && (
+          <button className="chat-earlier" onClick={loadEarlier}>
+            {loadingEarlier.current ? "Loading earlier messages…" : "Show earlier messages"}
+          </button>
+        )}
         {source && !segs.length && !out.length && (
           <div className="chat-empty">{source.pending ? `New conversation. Send ${agent} a message below; it shows up here as you go.` : "Nothing yet. Send a message below."}</div>
         )}
@@ -489,12 +531,12 @@ function NoticeLine({ n, hl }: { n: Extract<ChatBlock, { kind: "notice" }>; hl: 
 /** Image thumbnails; a click shows the image full size. */
 function Thumbs({ images }: { images: string[] }) {
   const [big, setBig] = useState<string>();
-  const src = (i: string) => (/^(data:|https?:|blob:)/.test(i) ? i : fileUrl(i));
+  const src = (i: string) => (i.startsWith("afimg:") ? `/api/chat-image?id=${encodeURIComponent(i.slice(6))}&token=${encodeURIComponent(TOKEN)}` : /^(data:|https?:|blob:)/.test(i) ? i : fileUrl(i));
   return (
     <>
       <div className="c-thumbs">
         {images.map((i, k) => (
-          <img key={k} src={src(i)} alt="" onClick={() => setBig(src(i))} />
+          <img key={k} src={src(i)} alt="" loading="lazy" decoding="async" onClick={() => setBig(src(i))} />
         ))}
       </div>
       {big && (

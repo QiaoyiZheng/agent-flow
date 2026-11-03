@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, HPane } from "@af/core";
 import { parseClaude, parseCodex, parseOmp } from "../src/transcripts/parse.ts";
-import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, claudeTitle, matchByScreen, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
+import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, chatImage, claudeTitle, matchByScreen, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -326,6 +326,49 @@ describe("finding and following transcripts", () => {
     conv("bbbbbbbb-0000-0000-0000-000000000004", ["同步远程的paper撰写"]);
     expect(await resolveTranscript(fs, { pane: b, panes, ...blank })).toMatchObject({ reason: expect.stringContaining("does not show which conversation") });
     expect(await resolveTranscript(fs, { pane: pane({ agent: "claude", title: "Claude Code" }), panes, ...blank })).toMatchObject({ reason: expect.any(String) });
+  });
+
+  test("huge lines do not push the conversation out of the first window; earlier parts load on request; images go by reference", async () => {
+    const root = tmp();
+    const path = join(root, "shots.jsonl");
+    const png = `data:image/png;base64,${Buffer.alloc(300_000, 7).toString("base64")}`; // a 400 KB screenshot
+    const lines: string[] = [];
+    for (let i = 0; i < 60; i++) {
+      lines.push(JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: `question ${i}` }] } }));
+      lines.push(JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `answer ${i}` }] } }));
+      lines.push(JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: `shot ${i}` }, { type: "image", data: png.split(",")[1], mimeType: "image/png" }] } }));
+    }
+    writeFileSync(path, lines.join("\n") + "\n"); // ~24 MB, almost all of it images
+    const t = new TranscriptTail({ agent: "omp", path, how: "session" }, new LocalFS(), 100_000);
+    const first = (await t.read()).ops;
+    const texts = (ops: any[]) => ops.filter((o) => o.op === "add" && o.entry.block.kind === "user").map((o) => o.entry.block.text);
+    // a window of ~100 KB of conversation: every line counts at most 4 KB, so the screenshots do not crowd it out
+    expect(texts(first).length).toBeGreaterThan(30);
+    expect(texts(first).at(-1)).toBe("shot 59");
+    expect(t.more).toBe(true);
+    // images are references, fetched again from the line they are on
+    const imgs = first.flatMap((o: any) => (o.op === "add" ? (o.entry.block.images ?? []) : []));
+    expect(imgs.length).toBeGreaterThan(5);
+    expect(imgs.every((i: string) => i.startsWith("afimg:"))).toBe(true);
+    expect(JSON.stringify(first).length).toBeLessThan(50_000); // not megabytes
+    const img = await chatImage(imgs[0]!.slice(6));
+    expect(img?.type).toBe("image/png");
+    expect(img?.bytes.length).toBe(300_000);
+    expect(await chatImage("nope")).toBeUndefined();
+    // earlier parts, back to the start, each line once, in order, with keys of their own
+    const all = [...texts(first)];
+    const keys = new Set(first.filter((o: any) => o.op === "add").map((o: any) => o.entry.key));
+    for (let guard = 0; t.more && guard < 20; guard++) {
+      const { ops, more } = await t.readEarlier();
+      all.unshift(...texts(ops));
+      for (const o of ops as any[]) if (o.op === "add") (expect(keys.has(o.entry.key)).toBe(false), keys.add(o.entry.key));
+      expect(more).toBe(t.more);
+    }
+    expect(t.more).toBe(false);
+    expect(all).toEqual(Array.from({ length: 60 }, (_, i) => [`question ${i}`, `shot ${i}`]).flat());
+    // appended lines still arrive
+    appendFileSync(path, JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "later" }] } }) + "\n");
+    expect(texts((await t.read()).ops)).toEqual(["later"]);
   });
 
   test("a large transcript opens at its last part, from a whole line", async () => {

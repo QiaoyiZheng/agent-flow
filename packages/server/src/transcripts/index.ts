@@ -16,7 +16,101 @@ import { type Agent, PARSERS, type ParseCtx } from "./parse.ts";
 import { sq } from "../remote.ts";
 
 /** Load at most this much of a transcript when opening it; older history is skipped. */
-export const MAX_INITIAL = 8 * 1024 * 1024;
+/**
+ * How much of a transcript is opened at first, and how much more each time the user scrolls to the top: about this
+ * much conversation. A line counts at most LINE_WEIGHT bytes, so a few huge lines (screenshots, request dumps)
+ * cannot push the rest of the conversation out.
+ */
+export const WINDOW_WEIGHT = 1536 * 1024;
+const LINE_WEIGHT = 4096;
+/** Raw bytes read for one window at most (over SSH less: it is slower). */
+export const WINDOW_RAW = 96 * 1024 * 1024;
+export const WINDOW_RAW_REMOTE = 24 * 1024 * 1024;
+/** Kept for callers that size the first window in bytes (tests). */
+export const MAX_INITIAL = WINDOW_WEIGHT;
+const SCAN_CHUNK = 4 * 1024 * 1024;
+
+/**
+ * The start of the window that ends at `end`: a line start such that the lines in [start, end) weigh about
+ * `weight` (each line at most LINE_WEIGHT), or 0. Never more than `raw` bytes back.
+ */
+export async function windowStart(fs: TranscriptFS, path: string, end: number, weight: number, raw: number): Promise<number> {
+  let lineStart = end; // start of the last line counted (end itself: nothing counted yet)
+  let total = 0;
+  let pos = end;
+  while (pos > 0) {
+    const from = Math.max(0, pos - SCAN_CHUNK);
+    const r = await fs.readFrom(path, from, pos - from);
+    if (!r) return lineStart;
+    const d = r.data;
+    for (let i = d.length - 1; i >= 0; i--) {
+      if (d[i] !== 10) continue;
+      const start = from + i + 1;
+      if (start < lineStart) {
+        total += Math.min(lineStart - start, LINE_WEIGHT);
+        lineStart = start;
+        if (total >= weight || end - lineStart >= raw) return lineStart;
+      }
+    }
+    pos = from;
+  }
+  return 0;
+}
+
+/**
+ * Images in chat ops travel as references ("afimg:<id>"), fetched by the browser only when shown: screenshots made
+ * transcripts send megabytes on every open. A reference names the line the image is on; reading it again gives the
+ * image. Small images stay inline.
+ */
+const INLINE_IMAGE = 24 * 1024;
+interface ImageRef {
+  fs: TranscriptFS;
+  agent: Agent;
+  path: string;
+  line: number;
+  k: number;
+}
+const imageRefs = new Map<string, ImageRef>();
+let imageSeq = 0;
+const MAX_REFS = 20_000;
+function refImage(ref: ImageRef) {
+  const id = `${(++imageSeq).toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  imageRefs.set(id, ref);
+  if (imageRefs.size > MAX_REFS) imageRefs.delete(imageRefs.keys().next().value!);
+  return `afimg:${id}`;
+}
+
+/** Every image list in an op, in order. */
+function imageLists(op: ChatOp): string[][] {
+  if (op.op === "add") {
+    const b = op.entry.block as { images?: string[] };
+    return b.images ? [b.images] : [];
+  }
+  if (op.op === "result") return op.images ? [op.images] : [];
+  if (op.op === "update") return op.set.images ? [op.set.images] : [];
+  return [];
+}
+
+/** The image an "afimg:" reference stands for: its bytes and type, read from the transcript again. */
+export async function chatImage(id: string): Promise<{ type: string; bytes: Buffer } | undefined> {
+  const ref = imageRefs.get(id);
+  if (!ref) return undefined;
+  const r = await ref.fs.readFrom(ref.path, ref.line, 64 * 1024 * 1024);
+  if (!r) return undefined;
+  const nl = r.data.indexOf(10);
+  const line = r.data.subarray(0, nl < 0 ? r.data.length : nl).toString("utf8");
+  let ops: ChatOp[];
+  try {
+    ops = PARSERS[ref.agent](JSON.parse(line), { n: 0 });
+  } catch {
+    return undefined;
+  }
+  const all = ops.flatMap(imageLists).flat();
+  const url = all[ref.k];
+  const m = url?.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+  if (!m) return undefined;
+  return { type: m[1] || "image/png", bytes: m[2] ? Buffer.from(m[3]!, "base64") : Buffer.from(decodeURIComponent(m[3]!)) };
+}
 const RECENT_DAYS = 14;
 /** How many of the last bytes read a transcript tail compares on the next read, to notice a rewritten file. */
 const TAIL_MARK = 512;
@@ -485,7 +579,10 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
   return { reason: `${agent} has not reported its session to Herdr yet` };
 }
 
-/** Follows one transcript file: parses what is there (the last MAX_INITIAL bytes), then whatever gets appended. */
+/**
+ * Follows one transcript file: parses its last part (about WINDOW_WEIGHT of conversation), then whatever gets
+ * appended, and earlier parts on request (the user scrolled to the top).
+ */
 export class TranscriptTail {
   private offset = -1;
   private partial = Buffer.alloc(0);
@@ -494,14 +591,53 @@ export class TranscriptTail {
   private mark = Buffer.alloc(0);
   /** The file read (device and inode), when the file access tells it. */
   private file?: string;
-  /** Bytes skipped at the start because the file was larger than MAX_INITIAL. */
+  /** Where the part shown so far starts (a line start): earlier parts are read from before it. 0: all of it. */
   skipped = 0;
+  private pages = 0;
 
   constructor(
     readonly source: ChatSource,
     private fs: TranscriptFS,
-    private maxInitial = MAX_INITIAL,
+    /** About how much conversation a window holds (see WINDOW_WEIGHT). */
+    private weight = WINDOW_WEIGHT,
+    private raw = WINDOW_RAW,
   ) {}
+
+  /** Earlier conversation exists before what was read. */
+  get more() {
+    return this.skipped > 0;
+  }
+
+  /** Parse [from, to) of the file (whole lines), with `ctx`; entries remember where their line starts. */
+  private async parseRange(from: number, to: number, ctx: ParseCtx, data?: Buffer): Promise<ChatOp[]> {
+    const buf = data ?? (await this.fs.readFrom(this.source.path, from, to - from))?.data;
+    if (!buf) return [];
+    const parse = PARSERS[this.source.agent];
+    const ops: ChatOp[] = [];
+    for (let pos = 0; pos < buf.length; ) {
+      let nl = buf.indexOf(10, pos);
+      if (nl < 0) nl = buf.length;
+      const lineStart = from + pos;
+      const raw = buf.subarray(pos, nl);
+      pos = nl + 1;
+      if (raw.length < 2) continue;
+      let lineOps: ChatOp[];
+      try {
+        lineOps = parse(JSON.parse(raw.toString("utf8")), ctx);
+      } catch {
+        continue;
+      }
+      let k = 0;
+      for (const op of lineOps) {
+        if (op.op === "add") op.entry.ref = lineStart;
+        for (const list of imageLists(op))
+          for (let i = 0; i < list.length; i++, k++)
+            if (list[i]!.length > INLINE_IMAGE && list[i]!.startsWith("data:")) list[i] = refImage({ fs: this.fs, agent: this.source.agent, path: this.source.path, line: lineStart, k });
+        ops.push(op);
+      }
+    }
+    return ops;
+  }
 
   /**
    * New ops since the last call. Starts over if the file was rewritten: it shrank, it is another file now (written
@@ -511,24 +647,28 @@ export class TranscriptTail {
    */
   async read(again = false): Promise<{ ops: ChatOp[]; reset: boolean }> {
     const reset = again;
+    let first = false;
     if (this.offset < 0) {
       const head = await this.fs.readFrom(this.source.path, 0, 0);
       if (!head) return { ops: [], reset };
-      this.offset = Math.max(0, head.size - this.maxInitial);
+      this.offset = await windowStart(this.fs, this.source.path, head.size, this.weight, this.raw);
       this.skipped = this.offset;
       this.file = head.file;
+      first = true;
     }
     const back = this.mark.length;
-    const chunk = await this.fs.readFrom(this.source.path, this.offset - back, 16 * 1024 * 1024 + back);
+    // the first read takes the whole window at once; later ones what was appended (16 MB at a time)
+    const chunk = await this.fs.readFrom(this.source.path, this.offset - back, (first ? this.raw : 16 * 1024 * 1024) + back);
     if (!chunk) return { ops: [], reset };
     const replaced = !!this.file && !!chunk.file && chunk.file !== this.file;
     if (replaced || chunk.size < this.offset || (back && !chunk.data.subarray(0, back).equals(this.mark))) {
-      this.offset = -1; // as when first opened: the last MAX_INITIAL bytes
+      this.offset = -1; // as when first opened
       this.skipped = 0;
       this.partial = Buffer.alloc(0);
       this.mark = Buffer.alloc(0);
       this.file = undefined;
       this.ctx = { n: 0 };
+      this.pages = 0;
       if (again) return { ops: [], reset }; // rewritten again while starting over: the next read starts over once more
       return this.read(true);
     }
@@ -537,32 +677,33 @@ export class TranscriptTail {
     if (!data.length) return { ops: [], reset };
     this.mark = Buffer.from((data.length >= TAIL_MARK ? data : Buffer.concat([this.mark, data])).subarray(-TAIL_MARK));
     // split on newline bytes, so a read that ends inside a multi-byte character cannot corrupt a line
-    let buf = this.partial.length ? Buffer.concat([this.partial, data]) : data;
+    const buf = this.partial.length ? Buffer.concat([this.partial, data]) : data;
     // byte offset in the file where buf starts: entries remember where their line starts (fork points)
-    let start = this.offset - this.partial.length;
-    if (this.skipped && this.offset === this.skipped && !this.partial.length) {
-      const cut = buf.indexOf(10) + 1; // drop the cut first line
-      buf = buf.subarray(cut);
-      start += cut;
-    }
+    const start = this.offset - this.partial.length;
     this.offset += data.length;
     const end = buf.lastIndexOf(10);
     this.partial = Buffer.from(buf.subarray(end + 1));
-    const parse = PARSERS[this.source.agent];
-    const ops: ChatOp[] = [];
-    for (let pos = 0; pos <= end; ) {
-      const nl = buf.indexOf(10, pos);
-      const line = buf.subarray(pos, nl).toString("utf8");
-      const lineStart = start + pos;
-      pos = nl + 1;
-      if (!line.trim()) continue;
-      try {
-        for (const op of parse(JSON.parse(line), this.ctx)) {
-          if (op.op === "add") op.entry.ref = lineStart;
-          ops.push(op);
-        }
-      } catch {}
-    }
+    const ops = end < 0 ? [] : await this.parseRange(start, start + end + 1, this.ctx, buf.subarray(0, end + 1));
     return { ops, reset };
+  }
+
+  /**
+   * The conversation before what was read so far, about one window of it. Parsed on its own (fresh state), with
+   * keys of its own, so it can be put in front of what the browser has.
+   */
+  async readEarlier(): Promise<{ ops: ChatOp[]; more: boolean }> {
+    if (this.skipped <= 0) return { ops: [], more: false };
+    const end = this.skipped;
+    const from = await windowStart(this.fs, this.source.path, end, this.weight, this.raw);
+    const page = ++this.pages;
+    const ctx: ParseCtx = { n: 0 };
+    const ops = await this.parseRange(from, end, ctx);
+    const key = (k: string) => `p${page}${k}`;
+    for (const op of ops) {
+      if (op.op === "add") op.entry.key = key(op.entry.key);
+      else if (op.op === "remove") op.keys = op.keys.map(key);
+    }
+    this.skipped = from;
+    return { ops, more: from > 0 };
   }
 }

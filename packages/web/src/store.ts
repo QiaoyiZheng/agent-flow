@@ -8,7 +8,7 @@ export const TOKEN = params.get("token") ?? localStorage.getItem("af-token") ?? 
 if (params.get("token")) localStorage.setItem("af-token", TOKEN);
 
 type TermListener = (m: Extract<ServerPush, { type: "term.frame" | "term.closed" }>) => void;
-type ChatListener = (m: Extract<ServerPush, { type: "chat.reset" | "chat.ops" }>) => void;
+type ChatListener = (m: Extract<ServerPush, { type: "chat.reset" | "chat.ops" | "chat.prepend" }>) => void;
 const chatSubs = new Map<string, ChatListener>();
 export function onChat(id: string, fn: ChatListener) {
   chatSubs.set(id, fn);
@@ -95,6 +95,7 @@ function connect() {
         break;
       case "chat.reset":
       case "chat.ops":
+      case "chat.prepend":
         chatSubs.get(m.id)?.(m);
         break;
     }
