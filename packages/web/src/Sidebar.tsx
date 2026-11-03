@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import type { Attention, HerdrModel, RunState, RunSummary } from "@af/core";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Attention, HPane, HerdrModel, RunState, RunSummary } from "@af/core";
 import { api, failed, notify } from "./store";
 
 const KIND_LABEL: Record<Attention["kind"], string> = {
@@ -25,7 +25,9 @@ export function Sidebar({
   onSelectPane,
   onSelectRun,
   onNew,
-  onAttention,
+  onNeed,
+  seen,
+  onSeen,
 }: {
   herdr?: HerdrModel;
   runs: RunSummary[];
@@ -36,13 +38,15 @@ export function Sidebar({
   onSelectPane: (workspaceId: string, tabId: string, paneId: string) => void;
   onSelectRun: (runId: string) => void;
   onNew: (machine?: string) => void;
-  onAttention: (a: Attention) => void;
+  onNeed: (n: Need) => void;
+  /** When the user last saw each pane (statusAt of the "done" they saw). */
+  seen: Record<string, string>;
+  onSeen: (paneId: string, at: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [menu, setMenu] = useState<string>();
   const [renaming, setRenaming] = useState<string>();
   const [adding, setAdding] = useState(false);
-  const attention = run ? Object.values(run.attention).sort((a, b) => b.at.localeCompare(a.at)) : [];
   const runOf = new Map(runs.filter((r) => r.workspace).map((r) => [r.workspace!, r]));
   const liveWs = new Set(herdr?.workspaces.map((w) => w.id));
   const pastRuns = runs.filter((r) => !r.workspace || !liveWs.has(r.workspace));
@@ -50,34 +54,7 @@ export function Sidebar({
 
   return (
     <aside className="side">
-      <div className="section">
-        <div className="section-title">
-          <span>Needs you{run?.meta ? ` · ${run.meta.id}` : ""}</span>
-          <span className={`count ${attention.length ? "" : "zero"}`}>{attention.length}</span>
-        </div>
-        {!attention.length && <div className="empty">{run ? "Nothing waiting on you." : "Select a run to see what it needs."}</div>}
-        {attention.map((a) => (
-          <div key={a.id} className="needs" onClick={() => onAttention(a)}>
-            <div className="k">
-              <span>
-                {KIND_LABEL[a.kind]}
-                {a.agent ? ` · ${a.agent}` : a.node ? ` · ${a.node}` : ""}
-              </span>
-              <button
-                className="x"
-                title="Dismiss"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  api("POST", "/attention/dismiss", { id: a.id }).catch(failed("That did not work"));
-                }}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="t">{a.text}</div>
-          </div>
-        ))}
-      </div>
+      <NeedsYou herdr={herdr} runs={runs} hidden={hidden} seen={seen} onSeen={onSeen} onNeed={onNeed} />
 
       <div className="tree">
         <div className="section-title" style={{ padding: "10px 14px 6px" }}>
@@ -318,5 +295,137 @@ function RenameInput({ value, onDone }: { value: string; onDone: (label: string 
         else if (e.key === "Escape") finish(undefined);
       }}
     />
+  );
+}
+
+/** One thing waiting on the user, from any run, workspace or machine. */
+export interface Need {
+  key: string;
+  kind: "attention" | "blocked" | "finished";
+  label: string;
+  where: string;
+  text: string;
+  at: string;
+  paneId?: string;
+  workspace?: string;
+  runId?: string;
+  node?: string;
+  attentionId?: string;
+  /** For "finished": the status time to mark seen. */
+  statusAt?: string;
+}
+
+function NeedsYou({
+  herdr,
+  runs,
+  hidden,
+  seen,
+  onSeen,
+  onNeed,
+}: {
+  herdr?: HerdrModel;
+  runs: RunSummary[];
+  hidden: Set<string>;
+  seen: Record<string, string>;
+  onSeen: (paneId: string, at: string) => void;
+  onNeed: (n: Need) => void;
+}) {
+  const [questions, setQuestions] = useState<Record<string, string>>({});
+  const online = (p: HPane) => {
+    const m = herdr?.machines.find((x) => x.id === p.machine);
+    return !!m && (m.local || m.state === "online");
+  };
+  const wsLabel = (wsId?: string) => {
+    const w = herdr?.workspaces.find((x) => x.id === wsId);
+    const m = w && herdr?.machines.find((x) => x.id === w.machine);
+    return w ? (m && !m.local ? `${m.label} / ${w.label}` : w.label) : "";
+  };
+  const blocked = useMemo(() => (herdr?.panes ?? []).filter((p) => p.agent && p.agentStatus === "blocked" && !hidden.has(p.workspaceId) && online(p)), [herdr, hidden]);
+  const blockedKey = blocked.map((p) => `${p.id}@${p.statusAt ?? ""}`).join(",");
+
+  // the question each waiting agent asks (what the rendered view's question card shows)
+  useEffect(() => {
+    for (const p of blocked) {
+      const k = `${p.id}@${p.statusAt ?? ""}`;
+      if (k in questions) continue;
+      setQuestions((q) => ({ ...q, [k]: "" }));
+      api<{ menu: { question: string[] } | null; overlay: { lines: string[] } | null }>("GET", "/pane/menu", { pane: p.id, run: undefined })
+        .then((r) => {
+          const text = (r.menu?.question.join(" ") || r.overlay?.lines.find((l) => l.trim()) || "").replace(/\s+/g, " ").trim();
+          setQuestions((q) => ({ ...q, [k]: text }));
+        })
+        .catch(() => {});
+    }
+  }, [blockedKey]);
+
+  const needs: Need[] = [];
+  const covered = new Set<string>();
+  for (const r of runs) {
+    if (r.stopped) continue;
+    for (const a of r.needs ?? []) {
+      if (a.paneId && (a.kind === "blocked" || a.kind === "startup_blocked")) covered.add(a.paneId);
+      needs.push({
+        key: `a:${r.id}:${a.id}`,
+        kind: "attention",
+        label: `${KIND_LABEL[a.kind]}${a.agent ? ` · ${a.agent}` : a.node ? ` · ${a.node}` : ""}`,
+        where: `${wsLabel(r.workspace) || r.cwd.split("/").at(-1)} · run ${r.id}`,
+        text: a.text,
+        at: a.at,
+        paneId: a.paneId,
+        workspace: r.workspace,
+        runId: r.id,
+        node: a.node?.split("#")[0],
+        attentionId: a.id,
+      });
+    }
+  }
+  for (const p of blocked) {
+    if (covered.has(p.id)) continue;
+    const q = questions[`${p.id}@${p.statusAt ?? ""}`];
+    needs.push({ key: `b:${p.id}`, kind: "blocked", label: `waiting for an answer · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: q || p.title || "Open it to answer.", at: p.statusAt ?? "", paneId: p.id, workspace: p.workspaceId });
+  }
+  const runWorkspaces = new Map(runs.filter((r) => !r.stopped && r.workspace).map((r) => [r.workspace!, r]));
+  for (const p of herdr?.panes ?? []) {
+    if (!p.agent || p.agentStatus !== "done" || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
+    if ((seen[p.id] ?? "") >= p.statusAt) continue;
+    const r = runWorkspaces.get(p.workspaceId);
+    if (r && r.leadPane !== p.id) continue; // a run's workers report to its lead
+    needs.push({ key: `f:${p.id}`, kind: "finished", label: `finished · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: p.title ?? "", at: p.statusAt, paneId: p.id, workspace: p.workspaceId, statusAt: p.statusAt });
+  }
+  const rank = (n: Need) => (n.kind === "finished" ? 1 : 0);
+  needs.sort((a, b) => rank(a) - rank(b) || b.at.localeCompare(a.at));
+
+  return (
+    <div className="section needs-section">
+      <div className="section-title">
+        <span>Needs you</span>
+        <span className={`count ${needs.length ? "" : "zero"}`}>{needs.length}</span>
+      </div>
+      {!needs.length && <div className="empty">Nothing waiting on you.</div>}
+      <div className="needs-list">
+        {needs.map((n) => (
+          <div key={n.key} className={`needs ${n.kind}`} onClick={() => onNeed(n)} title={n.text}>
+            <div className="k">
+              <span>{n.label}</span>
+              {n.kind !== "blocked" && (
+                <button
+                  className="x"
+                  title={n.kind === "finished" ? "Mark as seen" : "Dismiss"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (n.kind === "finished") onSeen(n.paneId!, n.statusAt!);
+                    else api("POST", "/attention/dismiss", { id: n.attentionId, run: n.runId }).catch(failed("That did not work"));
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            {n.where && <div className="w">{n.where}</div>}
+            {n.text && <div className="t">{n.text}</div>}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 // Wire types shared by the server, the af CLI, and the web UI.
 
 import type { AgentKind, Command } from "./graph.ts";
-import type { RunEvent, RunState } from "./run.ts";
+import type { Attention, RunEvent, RunState } from "./run.ts";
 
 /** Who is calling. CLI calls made by an agent carry AF_RUN/AF_AGENT; calls with no agent come from the human user. */
 export interface Caller {
@@ -58,7 +58,11 @@ export interface RunSummary {
   createdAt: string;
   stopped: boolean;
   lead: string;
+  /** The lead's pane: its "finished" shows in Needs you, the workers' do not (the lead handles those). */
+  leadPane?: string;
   attention: number;
+  /** The open attention items themselves, with the pane of the agent each is about. */
+  needs: (Attention & { paneId?: string })[];
   quiescent: boolean;
   /** Herdr workspace the run's agents live in. */
   workspace?: string;
@@ -113,6 +117,8 @@ export interface HPane {
   session?: { kind: "path" | "id"; value: string };
   /** Scrolled up: the visible screen is history, not what the agent shows now. */
   scrolled?: boolean;
+  /** When agentStatus last changed, if agent-flow saw it change (not set for the status found at server start). */
+  statusAt?: string;
 }
 
 export interface HLayout {

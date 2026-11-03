@@ -24,6 +24,20 @@ export interface MenuOption {
   selected: boolean;
   /** Options that turn into a text field (claude "Type something.", codex "No, and tell Codex …"). */
   freeText: boolean;
+  /** Multi-select options: whether the box is ticked. Undefined for plain options. */
+  checked?: boolean;
+  /** Not an answer but a button: claude's multi-select "Next"/"Submit", and "Submit answers"/"Cancel" on its review page. */
+  action?: "primary" | "secondary";
+}
+
+/** One step of claude's multi-question dialog ("←  ☒ Parts  ☐ Length  ✔ Submit  →"). */
+export interface MenuTab {
+  label: string;
+  done: boolean;
+  /** The last step, where the answers are reviewed and sent. */
+  submit?: boolean;
+  /** The step on screen (known from the transcript, or the review page). */
+  current?: boolean;
 }
 
 export interface Menu {
@@ -33,7 +47,14 @@ export interface Menu {
   options: MenuOption[];
   hint?: string;
   multiSelect: boolean;
+  tabs?: MenuTab[];
+  /** claude's last step: the answers so far, and Submit answers / Cancel. */
+  review?: boolean;
 }
+
+/** claude's multi-select button under the options. */
+const ACTION = /^(Next|Submit)$/;
+const NUMBERED = /^\s*\d{1,2}[.)]\s/;
 
 const POINTER = /^(\s*)([❯›▶➤])\s+(\S.*)$/;
 /** A dialog's outer edge (solid rule or box corner). */
@@ -101,15 +122,22 @@ export function parseMenu(screen: string, agent?: string): Menu | undefined {
   for (let p = lines.length - 1; p >= 0 && p >= lines.length - 60; p--) {
     const m = lines[p]!.match(POINTER);
     if (!m) continue;
-    const t = lines[p]!.length - m[3]!.length; // column where the option text starts
-    const menu = readAround(lines, p, t, m[3]!);
+    let t = lines[p]!.length - m[3]!.length; // column where the option text starts
+    let action = false;
+    if (ACTION.test(m[3]!.trim())) {
+      // claude's "Next"/"Submit" is highlighted: it is drawn deeper than the options, right below the last one
+      let k = p - 1;
+      while (k >= 0 && (blank(lines[k]!) || (!NUMBERED.test(lines[k]!) && indentOf(lines[k]!) > 0))) k--;
+      if (k >= 0 && NUMBERED.test(lines[k]!) && indentOf(lines[k]!) < t) (t = indentOf(lines[k]!)), (action = true);
+    }
+    const menu = readAround(lines, p, t, m[3]!, action);
     if (menu) return menu;
   }
   return undefined;
 }
 
-function readAround(lines: string[], p: number, t: number, pointerText: string): Menu | undefined {
-  type Row = { kind: "opt" | "desc"; text: string; selected: boolean };
+function readAround(lines: string[], p: number, t: number, pointerText: string, pointerIsAction = false): Menu | undefined {
+  type Row = { kind: "opt" | "desc" | "action"; text: string; selected: boolean };
   const above: Row[] = [];
   let i = p - 1;
   for (; i >= 0; i--) {
@@ -133,23 +161,33 @@ function readAround(lines: string[], p: number, t: number, pointerText: string):
   }
   // descriptions above the first option belong to nothing: the region started mid-description
   while (above[0]?.kind === "desc") above.shift();
-  const rows = [...above, { kind: "opt" as const, text: pointerText.trim(), selected: true }, ...below];
+  const rows: Row[] = [...above, { kind: pointerIsAction ? "action" : "opt", text: pointerText.trim(), selected: true }, ...below];
 
   const options: MenuOption[] = [];
   for (const r of rows) {
+    const last = options.at(-1);
+    // "Next"/"Submit" right under a multi-select list is a button (and its own stop for the arrow keys)
+    const isAction = r.kind === "action" || (r.kind === "desc" && ACTION.test(r.text) && last?.checked !== undefined && !options.some((o) => o.action));
+    if (isAction) {
+      options.push({ index: options.length, label: r.text, selected: r.selected, freeText: false, action: "primary" });
+      continue;
+    }
     if (r.kind === "desc") {
-      const last = options.at(-1);
       if (last) last.description = last.description ? `${last.description}\n${r.text}` : r.text;
       continue;
     }
     const num = r.text.match(/^(\d{1,2})[.)]\s+(.*)$/);
-    const label = (num ? num[2]! : r.text).trim();
+    let label = (num ? num[2]! : r.text).trim();
+    let checked: boolean | undefined;
+    const box = label.match(/^\[([ x✓✔])\]\s*(.*)$/) ?? label.match(/^([☐☑☒◻◼])\s+(.*)$/);
+    if (box) (checked = !/[ ☐◻]/.test(box[1]!)), (label = box[2]!.trim());
     options.push({
       index: options.length,
       number: num ? Number(num[1]) : undefined,
       label,
       selected: r.selected,
       freeText: /^(type something|other|something else)\b|tell (claude|codex|me|it) what to do/i.test(label),
+      ...(checked !== undefined ? { checked } : {}),
     });
   }
   // in a numbered list, unnumbered lines before option 1 are part of the question (codex indents its question like its options)
@@ -190,8 +228,24 @@ function readAround(lines: string[], p: number, t: number, pointerText: string):
   // codex draws its whole dialog at the options' indent: those lines are the question; what is above them is
   // the terminal (the shell prompt, earlier output), not part of the dialog
   if (extra.length) question.splice(0, question.length, ...extra);
-  const multiSelect = options.some((o) => /^\[[ x✓✔]\]|^[☐☑☒◻◼]/.test(o.label));
-  return { question, code: code.length ? code : undefined, options, hint, multiSelect };
+  const multiSelect = options.some((o) => o.checked !== undefined);
+  // claude's steps ("←  ☒ Parts  ☐ Length  ✔ Submit  →"): shown as steps, not as question text
+  let tabs: MenuTab[] | undefined;
+  const tabLine = question.findIndex((l) => /^(←\s*)?[☐☑☒✔✓]\s*\S/.test(l) && (/→\s*$/.test(l) || /^←/.test(l) || question.indexOf(l) === 0));
+  if (tabLine >= 0) {
+    tabs = question[tabLine]!.replace(/^←\s*|\s*→\s*$/g, "")
+      .split(/\s{2,}/)
+      .map((x) => x.match(/^([☐☑☒✔✓])\s*(.+)$/))
+      .filter((x): x is RegExpMatchArray => !!x)
+      .map((x) => (x[2] === "Submit" && /[✔✓]/.test(x[1]!) ? { label: "Submit", done: false, submit: true } : { label: x[2]!.trim(), done: /[☑☒✔✓]/.test(x[1]!) }));
+    question.splice(tabLine, 1);
+  }
+  const review = question.some((l) => /^Review your answers$/i.test(l)) && options.some((o) => /^submit answers$/i.test(o.label));
+  if (review) {
+    for (const o of options) o.action = /^submit answers$/i.test(o.label) ? "primary" : /^cancel$/i.test(o.label) ? "secondary" : o.action;
+    tabs?.forEach((x) => (x.current = !!x.submit));
+  }
+  return { question, code: code.length ? code : undefined, options, hint, multiSelect, ...(tabs?.length ? { tabs } : {}), ...(review ? { review } : {}) };
 }
 
 /** Keys that move the highlight from the selected option to `target` and press Enter. */
@@ -220,14 +274,16 @@ export function enrichFromTranscript(menu: Menu, transcriptTail: string): Menu {
       }
     } catch {}
   }
-  if (!pending || answered.has(pending.id)) return menu;
+  if (!pending || answered.has(pending.id) || menu.review) return menu;
   const questions: any[] = Array.isArray(pending.input?.questions) ? pending.input.questions : [];
   const shown = menu.question.join("\n");
   const q = questions.find((x) => typeof x?.question === "string" && shown.includes(x.question.trim())) ?? (questions.length === 1 ? questions[0] : undefined);
   if (!q) return menu;
   const byLabel = new Map<string, any>((q.options ?? []).map((o: any) => [String(o.label).trim(), o]));
+  const header = typeof q.header === "string" ? q.header.trim() : undefined;
   return {
     ...menu,
+    tabs: menu.tabs?.map((x) => ({ ...x, current: !!header && x.label === header })),
     multiSelect: menu.multiSelect || !!q.multiSelect,
     options: menu.options.map((o) => {
       const src = byLabel.get(o.label.trim());

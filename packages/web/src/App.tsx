@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import type { AgentKind, Attention, GraphState, HPane, RunState } from "@af/core";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { AgentKind, GraphState, HPane, RunState } from "@af/core";
 
 interface WorkflowInfo {
   id: string;
@@ -16,7 +16,7 @@ import { api, useStore, watch, failed, notify } from "./store";
 import { Terminal } from "./Terminal";
 import { Graph } from "./Graph";
 import { NodeDetail } from "./NodeDetail";
-import { Sidebar } from "./Sidebar";
+import { type Need, Sidebar } from "./Sidebar";
 import { LayoutView, type PaneCtx } from "./Layout";
 import { Messages } from "./Viewers";
 import { kindColor } from "./view";
@@ -37,6 +37,24 @@ export function App() {
   const [shellWs, setShellWs] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [createOn, setCreateOn] = useState<string>();
+  const pendingNode = useRef<{ run: string; node: string } | undefined>(undefined);
+  // when the user last saw each agent's pane: a "finished" newer than that shows in Needs you
+  const [seen, setSeen] = useState<Record<string, string>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("af.seen") ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  const markSeen = (marks: [string, string][]) =>
+    setSeen((old) => {
+      const next = { ...old };
+      for (const [id, at] of marks) next[id] = at;
+      const live = new Set(herdr?.panes.map((p) => p.id));
+      for (const id of Object.keys(next)) if (herdr && !live.has(id)) delete next[id];
+      localStorage.setItem("af.seen", JSON.stringify(next));
+      return next;
+    });
 
   // the shell drawer's workspace is not listed in the tree
   useEffect(() => {
@@ -101,6 +119,18 @@ export function App() {
   const leadPane = run?.meta ? run.agents[run.meta.lead]?.paneId : undefined;
   const tabPanes = herdr && tabId ? herdr.panes.filter((p) => p.tabId === tabId) : [];
   const focusedPane = (selectedWs && focused[selectedWs] && tabPanes.some((p) => p.id === focused[selectedWs]) ? focused[selectedWs] : (layout?.focusedPaneId ?? tabPanes[0]?.id)) as string | undefined;
+  // what is on screen counts as seen (only while this browser tab is visible)
+  const [visible, setVisible] = useState(document.visibilityState === "visible");
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  const unseen = visible && !creating && !pastRun ? tabPanes.filter((p) => p.agentStatus === "done" && p.statusAt && (seen[p.id] ?? "") < p.statusAt) : [];
+  const unseenKey = unseen.map((p) => `${p.id}@${p.statusAt}`).join(",");
+  useEffect(() => {
+    if (unseen.length) markSeen(unseen.map((p) => [p.id, p.statusAt!]));
+  }, [unseenKey]);
 
   const selectWs = (id: string) => {
     setPastRun(undefined);
@@ -116,11 +146,21 @@ export function App() {
     const p = paneId ? panesById.get(paneId) : undefined;
     if (p) selectPane(p.workspaceId, p.tabId, p.id);
   };
-  const onAttention = (a: Attention) => {
-    const node = a.node?.split("#")[0];
-    if (node && run?.graph.nodes[node]) setSelectedNode(node);
-    if (a.agent) goToPane(run?.agents[a.agent]?.paneId);
+  // Needs you: go to the pane (or workspace) and, for a run item, show its node once that run is loaded
+  const onNeed = (n: Need) => {
+    if (n.paneId && panesById.has(n.paneId)) goToPane(n.paneId);
+    else if (n.workspace && herdr?.workspaces.some((w) => w.id === n.workspace)) selectWs(n.workspace);
+    else if (n.runId) setPastRun(n.runId);
+    pendingNode.current = n.node && n.runId ? { run: n.runId, node: n.node } : undefined;
+    if (n.node && run && n.runId === run.meta?.id && run.graph.nodes[n.node]) setSelectedNode(n.node);
   };
+  useEffect(() => {
+    const p = pendingNode.current;
+    if (p && run?.meta?.id === p.run && run.graph.nodes[p.node]) {
+      setSelectedNode(p.node);
+      pendingNode.current = undefined;
+    }
+  }, [run?.meta?.id, run?.seq]);
   const down = useMemo(() => new Map((herdr?.machines ?? []).filter((m) => !m.local && m.state !== "online").map((m) => [m.id, { label: m.label, error: m.error }])), [herdr]);
   const ctx: PaneCtx = {
     down,
@@ -157,7 +197,9 @@ export function App() {
         onSelectPane={selectPane}
         onSelectRun={(id) => (setPastRun(id), setCreating(false))}
         onNew={(machine) => (setCreateOn(machine), setCreating(true))}
-        onAttention={onAttention}
+        onNeed={onNeed}
+        seen={seen}
+        onSeen={(id, at) => markSeen([[id, at]])}
       />
 
       <main className="main">

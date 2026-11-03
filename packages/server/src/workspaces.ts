@@ -52,6 +52,8 @@ interface Machine {
   failedPolls: number;
   /** The connection failed or dropped since it was last fine (so "connected again" is worth saying). */
   troubled?: boolean;
+  /** Each pane's agent status and when it changed to it (undefined: it had it when we first looked). */
+  since?: Map<string, { status: string; at?: string }>;
 }
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
@@ -303,7 +305,16 @@ export class Workspaces {
       for (const id of Object.keys(m.sigs)) if (!snap.tabs.some((t) => t.id === id)) delete m.sigs[id];
       m.workspaces = snap.workspaces.map((w) => ({ ...w, machine: key, id: p(w.id), activeTabId: w.activeTabId ? p(w.activeTabId) : undefined }));
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
-      m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId) }));
+      // when each agent's status changed: "finished" in Needs you means finished after the user last looked
+      const first = !m.since;
+      const since = (m.since ??= new Map());
+      const now = new Date().toISOString();
+      for (const x of snap.panes) {
+        const was = since.get(x.id);
+        if (!was || was.status !== x.agentStatus) since.set(x.id, { status: x.agentStatus, at: first || !was ? undefined : now });
+      }
+      for (const id of since.keys()) if (!snap.panes.some((x) => x.id === id)) since.delete(id);
+      m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at }));
       m.layouts = layouts;
       if (m.meta.local && m.failedPolls > 0) this.opts.notify?.("info", "herdr", "Herdr is responding again");
       m.failedPolls = 0;

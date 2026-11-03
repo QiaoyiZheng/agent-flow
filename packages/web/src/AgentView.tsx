@@ -694,11 +694,15 @@ interface MenuOption {
   preview?: string;
   selected: boolean;
   freeText: boolean;
+  checked?: boolean;
+  action?: "primary" | "secondary";
 }
 interface AgentMenu {
   question: string[];
   code?: string[];
   options: MenuOption[];
+  tabs?: { label: string; done: boolean; submit?: boolean; current?: boolean }[];
+  review?: boolean;
   hint?: string;
   multiSelect: boolean;
 }
@@ -765,9 +769,11 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
       .finally(() => setBusy(false));
   };
   const cancel = () => api("POST", "/keys", { pane, keys: ["esc"] }).catch((e) => setError(e.message));
-  const [title, ...rest] = menu.question;
-  const titleIsTab = !!title && /^[☐☑☒✔✓□■]/.test(title);
-  const lines = titleIsTab ? rest : menu.question;
+  const lines = menu.question;
+  // claude's multi-select "Next"/"Submit" and its review page's "Submit answers"/"Cancel" are buttons under the list
+  const answers = menu.options.filter((o) => !o.action);
+  const actions = menu.options.filter((o) => o.action);
+  const steps = menu.tabs && (menu.tabs.length > 2 || !menu.tabs.some((t) => t.submit)) ? menu.tabs : undefined;
 
   return (
     <div
@@ -786,11 +792,26 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
         else if (e.key === "Escape") (e.preventDefault(), cancel());
       }}
     >
-      {titleIsTab && <div className="menu-tab">{title!.replace(/^[☐☑☒✔✓□■]\s*/, "")}</div>}
+      {steps ? (
+        steps.length === 1 ? (
+          <div className="menu-tab">{steps[0]!.label}</div>
+        ) : (
+          <div className="menu-steps">
+            {steps.map((t, i) => (
+              <span key={i} className={`menu-step ${t.done ? "done" : ""} ${t.current ? "cur" : ""}`}>
+                {!t.submit && <span className="mark">{t.done ? "✓" : ""}</span>}
+                {t.label}
+              </span>
+            ))}
+          </div>
+        )
+      ) : (
+        (menu.review || (menu.tabs?.[0] && !menu.tabs[0].submit)) && <div className="menu-tab">{menu.review ? "Review your answers" : menu.tabs![0]!.label}</div>
+      )}
       {lines.length > 0 && (
         <div className="menu-question">
-          {lines.map((l, i) => (
-            <div key={i} className={menu.code?.includes(l) || /^\$ |^[a-z0-9_./-]+ .*[|&;]|^(npm|git|rm|ls|cd|bun|node|python3?|make|cargo|go) /i.test(l) ? "cmd" : ""}>
+          {(menu.review ? lines.filter((l) => !/^Review your answers$/i.test(l)) : lines).map((l, i) => (
+            <div key={i} className={menu.review && /^●/.test(l) ? "review-q" : menu.review && /^→/.test(l) ? "review-a" : menu.code?.includes(l) || /^\$ |^[a-z0-9_./-]+ .*[|&;]|^(npm|git|rm|ls|cd|bun|node|python3?|make|cargo|go) /i.test(l) ? "cmd" : ""}>
               {l}
             </div>
           ))}
@@ -798,7 +819,7 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
       )}
       <div className={`menu-body ${menu.options.some((o) => o.preview) ? "with-preview" : ""}`}>
       <div className="menu-options">
-        {menu.options.map((o) =>
+        {answers.map((o) =>
           typing === o.index ? (
             <form
               key={o.index}
@@ -817,6 +838,7 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
           ) : (
             <button key={o.index} className={`menu-option ${o.index === hi ? "hi" : ""}`} disabled={busy} onClick={() => choose(o)} onMouseEnter={() => setHi(o.index)}>
               <span className="menu-num">{o.number ?? o.index + 1}</span>
+              {o.checked !== undefined && <span className={`menu-check ${o.checked ? "on" : ""}`}>{o.checked ? "✓" : ""}</span>}
               <span className="menu-label">
                 {o.label}
                 {o.description && <span className="menu-desc">{o.description}</span>}
@@ -830,13 +852,30 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
         <pre className="menu-preview">{menu.options[hi]?.preview ?? "(no preview for this option)"}</pre>
       )}
       </div>
+      {actions.length > 0 && (
+        <div className="menu-actions">
+          {actions.map((o) => (
+            <button key={o.index} className={`btn ${o.action === "primary" ? "primary" : ""} ${o.index === hi ? "hi" : ""}`} disabled={busy} onClick={() => choose(o)} onMouseEnter={() => setHi(o.index)}>
+              {o.label === "Next" ? "Next →" : o.label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="menu-foot">
-        <span>{menu.multiSelect ? "Toggle options, then choose the submit option" : "Click, or press 1–9 · ↑/↓ and Enter"}</span>
+        <span>
+          {menu.review
+            ? "Check your answers, then submit"
+            : menu.multiSelect
+              ? `Click options to tick them, then ${actions[0]?.label === "Next" ? "Next" : "Submit"}`
+              : "Click, or press 1–9 · ↑/↓ and Enter"}
+        </span>
         <span className="spacer" />
         {error && <span className="menu-err">{error}</span>}
-        <button className="c-more" onClick={cancel} title="Esc">
-          Cancel (Esc)
-        </button>
+        {!actions.some((o) => /^cancel$/i.test(o.label)) && (
+          <button className="c-more" onClick={cancel} title="Esc">
+            Cancel (Esc)
+          </button>
+        )}
       </div>
     </div>
   );

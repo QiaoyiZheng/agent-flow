@@ -265,6 +265,9 @@ function openInEditor(path: string) {
   return { ok: true };
 }
 
+/** Run events that change the run list the UI shows (and its "Needs you" items). */
+const RUN_LIST_EVENTS = new Set(["run.created", "run.stopped", "run.quiescent", "attention.raised", "attention.resolved", "agent.placed"]);
+
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".json": "application/json" };
 
 /** Serve a file the UI asked to preview. Only paths inside a run's directories or ~/.agent-flow are allowed. */
@@ -284,6 +287,7 @@ interface WsData {
   bridge?: TerminalBridge;
   chat?: ChatBridge;
   unsub?: () => void;
+  runsUnsub?: () => void;
 }
 
 export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices }) {
@@ -358,6 +362,10 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           screen: (p) => w.read(p, 400),
         });
         send({ type: "hello", runs: o.listRuns() });
+        // the run list (with every run's open attention items) for "Needs you", whichever run this client watches
+        ws.data.runsUnsub = o.subscribe((_run, event) => {
+          if (RUN_LIST_EVENTS.has(event.type)) send({ type: "hello", runs: o.listRuns() });
+        });
         send({ type: "notices", list: opts.notices.list });
         ws.send(herdrPush());
         clients.add(ws);
@@ -378,10 +386,6 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           }
           ws.data.unsub = o.subscribe((run, event) => {
             if (run === msg.run) ws.send(JSON.stringify({ type: "event", run, event } satisfies ServerPush));
-            if (run === msg.run && ["run.stopped", "run.quiescent", "attention.raised", "attention.resolved"].includes(event.type))
-              ws.send(JSON.stringify({ type: "hello", runs: o.listRuns() } satisfies ServerPush));
-            else if (["run.created", "run.stopped", "run.quiescent", "attention.raised", "attention.resolved"].includes(event.type))
-              ws.send(JSON.stringify({ type: "hello", runs: o.listRuns() } satisfies ServerPush));
           });
           return;
         }
@@ -391,6 +395,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
       close(ws) {
         clients.delete(ws);
         ws.data.unsub?.();
+        ws.data.runsUnsub?.();
         ws.data.bridge?.closeAll();
         ws.data.chat?.closeAll();
       },

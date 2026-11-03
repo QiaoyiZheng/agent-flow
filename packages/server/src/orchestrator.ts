@@ -162,7 +162,9 @@ export class Orchestrator {
         createdAt: r.state.meta!.createdAt,
         stopped: r.state.stopped,
         lead: r.state.meta!.lead,
+        leadPane: r.state.agents[r.state.meta!.lead]?.paneId,
         attention: Object.keys(r.state.attention).length,
+        needs: Object.values(r.state.attention).map((a) => ({ ...a, paneId: a.agent ? r.state.agents[a.agent]?.paneId : undefined })),
         quiescent: r.state.graph.quiescent,
         workspace: r.state.meta!.herdrWorkspace,
       }))

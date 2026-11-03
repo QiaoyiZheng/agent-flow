@@ -29,7 +29,8 @@ const ASK = [
 describe("parsing agent menus", () => {
   test("claude question: title, question, options with descriptions, an option past the separator, key hint", () => {
     const m = parseMenu(ASK)!;
-    expect(m.question).toEqual(["☐ Format", "Which output format do you prefer for the report?"]);
+    expect(m.question).toEqual(["Which output format do you prefer for the report?"]);
+    expect(m.tabs).toEqual([{ label: "Format", done: false }]);
     expect(m.options.map((o) => [o.number, o.label, o.description ?? "", o.selected, o.freeText])).toEqual([
       [1, "Markdown", "Plain text with headings", true, false],
       [2, "LaTeX", "For the paper", false, false],
@@ -165,7 +166,8 @@ describe("parsing agent menus", () => {
       "cancel",
     ].join("\n");
     const m = parseMenu(screen)!;
-    expect(m.question).toEqual(["☐ Layout", "Which layout?"]);
+    expect(m.question).toEqual(["Which layout?"]);
+    expect(m.tabs).toEqual([{ label: "Layout", done: false }]);
     expect(m.options.map((o) => [o.label, o.description ?? ""])).toEqual([
       ["Sidebar", ""],
       ["Top bar", ""],
@@ -318,5 +320,82 @@ describe("panels and notices instead of the input box", () => {
     expect(screenOverlay(["Submitted pass.", "╭─ π > demo", "╰─ "].join("\n"), "omp")).toBeUndefined();
     expect(screenOverlay("anything\nat all\nhere", "gemini")).toBeUndefined();
     expect(screenOverlay("\n\n", "claude")).toBeUndefined();
+  });
+});
+
+describe("claude multi-select questions: Next/Submit is a button, not an option", () => {
+  const RULE = "─".repeat(100);
+  const page = (pointer: number | "action", ticked: number[], button = "Next") => {
+    const opt = (i: number, label: string, desc?: string) => [`${pointer === i ? "❯" : " "} ${i}. [${ticked.includes(i) ? "✔" : " "}] ${label}`, ...(desc ? [`         ${desc}`] : [])];
+    return [
+      "←  ☒ Parts  ☐ Length  ✔ Submit  →",
+      "",
+      "Which parts should the slides cover?",
+      "",
+      ...opt(1, "Background", "Context and background information"),
+      ...opt(2, "Causes", "Underlying causes"),
+      ...opt(3, "Type something"),
+      `${pointer === "action" ? "❯" : " "}    ${button}`,
+      RULE,
+      "  4. Chat about this",
+      "",
+      "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+    ].join("\n");
+  };
+
+  test("options carry their tick, the button is its own arrow stop, steps are read from the tab bar", () => {
+    const m = parseMenu(page(1, [1]), "claude")!;
+    expect(m.multiSelect).toBe(true);
+    expect(m.question).toEqual(["Which parts should the slides cover?"]);
+    expect(m.tabs).toEqual([{ label: "Parts", done: true }, { label: "Length", done: false }, { label: "Submit", done: false, submit: true }]);
+    expect(m.options.map((o) => [o.index, o.label, o.checked, o.action, o.freeText])).toEqual([
+      [0, "Background", true, undefined, false],
+      [1, "Causes", false, undefined, false],
+      [2, "Type something", false, undefined, true],
+      [3, "Next", undefined, "primary", false],
+      [4, "Chat about this", undefined, undefined, false],
+    ]);
+    expect(m.options[2]!.description).toBeUndefined(); // "Next" is not the description of the option above it
+    expect(keysToChoose(m, 3)).toEqual(["down", "down", "down", "enter"]);
+  });
+
+  test("with the button highlighted (drawn deeper than the options) the menu is still read", () => {
+    const m = parseMenu(page("action", [1, 2], "Submit"), "claude")!;
+    expect(m.options.map((o) => o.label)).toEqual(["Background", "Causes", "Type something", "Submit", "Chat about this"]);
+    expect(m.options.find((o) => o.selected)).toMatchObject({ index: 3, action: "primary" });
+    expect(m.options.filter((o) => o.checked).map((o) => o.label)).toEqual(["Background", "Causes"]);
+    expect(keysToChoose(m, 0)).toEqual(["up", "up", "up", "enter"]);
+  });
+
+  test("the review page: answers are the question, Submit answers and Cancel are buttons", () => {
+    const screen = [
+      "←  ☒ Parts  ☒ Length  ✔ Submit  →",
+      "",
+      "Review your answers",
+      "",
+      " ● Which parts should the slides cover?",
+      "   → Background",
+      " ● How long should the talk be?",
+      "   → 10 minutes",
+      "",
+      "Ready to submit your answers?",
+      "",
+      "❯ 1. Submit answers",
+      "  2. Cancel",
+    ].join("\n");
+    const m = parseMenu(screen, "claude")!;
+    expect(m.review).toBe(true);
+    expect(m.multiSelect).toBe(false);
+    expect(m.tabs!.map((x) => [x.label, x.current])).toEqual([["Parts", false], ["Length", false], ["Submit", true]]);
+    expect(m.options.map((o) => [o.label, o.action])).toEqual([["Submit answers", "primary"], ["Cancel", "secondary"]]);
+    // the transcript's pending question does not turn the review page into a multi-select
+    const call = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "q1", name: "AskUserQuestion", input: { questions: [{ question: "Which parts should the slides cover?", header: "Parts", multiSelect: true, options: [] }] } }] } });
+    expect(enrichFromTranscript(m, call)).toBe(m);
+  });
+
+  test("the transcript tells which step is on screen", () => {
+    const call = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "q1", name: "AskUserQuestion", input: { questions: [{ question: "Which parts should the slides cover?", header: "Parts", multiSelect: true, options: [{ label: "Background" }] }, { question: "How long?", header: "Length", options: [] }] } }] } });
+    const m = enrichFromTranscript(parseMenu(page(1, []), "claude")!, call);
+    expect(m.tabs!.map((x) => [x.label, x.current])).toEqual([["Parts", true], ["Length", false], ["Submit", false]]);
   });
 });

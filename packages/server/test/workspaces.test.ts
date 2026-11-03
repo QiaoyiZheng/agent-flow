@@ -49,6 +49,29 @@ describe("workspaces: mirror Herdr", () => {
     expect(w.model.layouts[ws.tabId]!.root).toEqual({ type: "pane", paneId: ws.paneId });
   });
 
+  test("an agent's status carries the time it changed, unless it had it when agent-flow first looked", async () => {
+    const home = tmp("af-ws-home-");
+    const backend = new FakeBackend();
+    const ws = await backend.createWorkspace("proj", home);
+    await backend.startAgent("old", "claude", ws.paneId, []);
+    backend.set("old", "done");
+    const w = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    await w.start(60_000);
+    const pane = () => w.model.panes.find((p) => p.id === ws.paneId)!;
+    expect(pane()).toMatchObject({ agentStatus: "done", statusAt: undefined }); // finished before we looked: not news
+    backend.set("old", "working");
+    await w.refresh();
+    const t1 = pane().statusAt!;
+    expect(pane().agentStatus).toBe("working");
+    expect(Date.parse(t1)).toBeGreaterThan(Date.now() - 5000);
+    await w.refresh();
+    expect(pane().statusAt).toBe(t1); // unchanged status keeps its time
+    await Bun.sleep(5);
+    backend.set("old", "done");
+    await w.refresh();
+    expect(pane().statusAt! > t1).toBe(true);
+  });
+
   test("only tabs whose layout changed are exported again", async () => {
     const { backend, w, ws } = await setup();
     const t2 = await w.newTab(ws.workspaceId);
