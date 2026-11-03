@@ -108,7 +108,9 @@ describe("omp transcript", () => {
     ]);
     const edit = blocks(ops).at(-1) as any;
     expect(edit.summary).toBe("calc.js — Adding guarded division");
-    expect(edit.patch).toStartWith("[calc.js#6F9B]");
+    // omp's edit commands are not a diff: they are the input; the real diff comes with the result (parse-omp.test.ts)
+    expect(edit.patch).toBeUndefined();
+    expect(edit.input).toStartWith("[calc.js#6F9B]");
     expect(blocks(ops).slice(0, 3).map((b) => (b.kind === "tool" ? `${b.name}: ${b.summary}` : `${b.kind}: ${(b as any).text}`))).toEqual(["user: add div", "text: I’ll add `div`.", "read: calc.js"]);
     expect(ops.find((o) => o.op === "result")).toEqual({ op: "result", id: "k1", output: "export function add", error: false });
   });
