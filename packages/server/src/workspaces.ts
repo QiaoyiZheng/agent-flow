@@ -14,7 +14,7 @@ import { AfError } from "./orchestrator.ts";
 import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
-import { REWIND_HINT, controlSteps } from "./controls.ts";
+import { REWIND_HINT, controlSteps, inputText } from "./controls.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -613,6 +613,19 @@ export class Workspaces {
     }
   }
 
+  /** Clear what is typed in the agent's own input box (Ctrl+C, only when there is text: see controls.ts). */
+  async clearBox(pane: string) {
+    const p = this.pane(pane);
+    const r = this.route(pane);
+    if (!inputText(p.agent, await r.backend.readScreen(r.raw, true))) return false;
+    await r.backend.sendKeys(r.raw, ["ctrl+c"]);
+    for (let i = 0; i < 15; i++) {
+      await Bun.sleep(60);
+      if (!inputText(p.agent, await r.backend.readScreen(r.raw, true))) break;
+    }
+    return true;
+  }
+
   /** Stop, rewind, clear or exit an agent, with the keys its own terminal uses for that (see controls.ts). */
   async control(pane: string, action: string) {
     const p = this.pane(pane);
@@ -620,6 +633,7 @@ export class Workspaces {
     const r = this.route(pane);
     for (const st of steps) {
       if ("wait" in st) await Bun.sleep(st.wait);
+      else if ("clearBox" in st) await this.clearBox(pane);
       else if ("keys" in st) await r.backend.sendKeys(r.raw, st.keys);
       else {
         await r.backend.sendText(r.raw, st.text);
@@ -657,6 +671,25 @@ export class Workspaces {
   }
 
   /** What the agent shows besides its conversation: an option menu, or a panel/notice instead of its input box. */
+  /** The pane's visible screen (with colour codes when `ansi`). */
+  async visible(pane: string, ansi = false) {
+    this.pane(pane);
+    const r = this.route(pane);
+    return r.backend.readScreen(r.raw, ansi);
+  }
+
+  /** Press keys in a pane (no checks: for agent-flow's own key sequences). */
+  async press(pane: string, keys: string[]) {
+    const r = this.route(pane);
+    await r.backend.sendKeys(r.raw, keys);
+  }
+
+  /** Type text into a pane without pressing Enter. */
+  async typeText(pane: string, text: string) {
+    const r = this.route(pane);
+    await r.backend.sendText(r.raw, text);
+  }
+
   async screenState(pane: string): Promise<{ menu?: Menu; overlay?: Overlay }> {
     // the visible screen: "recent-unwrapped" joins full-width rows, and dialog rows are padded to full width
     const p = this.pane(pane);

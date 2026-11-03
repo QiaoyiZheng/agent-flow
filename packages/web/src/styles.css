@@ -700,9 +700,17 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 
 /* ---------- fork ---------- */
 .c-user { position: relative; }
-.c-fork { position: absolute; right: 8px; top: 6px; display: none; border: 1px solid var(--line-2); background: var(--bg-2); color: var(--text-2); font-size: 11px; border-radius: 6px; padding: 2px 8px; cursor: pointer; }
-.c-user:hover .c-fork { display: block; }
-.c-fork:hover { color: var(--text); border-color: var(--accent); }
+.c-user-actions { position: absolute; right: 8px; top: 6px; display: none; gap: 6px; }
+.c-user:hover .c-user-actions, .c-user.pickable .c-user-actions { display: flex; }
+.c-fork, .c-rewind { border: 1px solid var(--line-2); background: var(--bg-2); color: var(--text-2); font-size: 11px; border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.c-fork:hover, .c-rewind:hover { color: var(--text); border-color: var(--accent); }
+.c-rewind.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); font-weight: 600; }
+.c-user.pickable { outline: 1px dashed rgba(124, 131, 247, 0.45); }
+.c-user.pickable:hover { outline-color: var(--accent); }
+.c-rewind-ask { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 4; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg-2); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); font-size: 12.5px; color: var(--text-2); }
+.c-rewind-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.c-user.asking { z-index: 5; }
+.rewind-banner { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: 10px; margin: 0 0 8px; padding: 6px 12px; border: 1px solid var(--accent); border-radius: 8px; background: rgba(20, 22, 30, 0.92); color: var(--accent); font-size: 12px; backdrop-filter: blur(4px); }
 .agent-status button:disabled { opacity: 0.5; cursor: default; }
 
 /* narrow panes: keep the header usable */
@@ -825,3 +833,4 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .agent-status .menu .item { display: flex; align-items: center; gap: 8px; }
 .agent-status .menu .kbd { margin-left: auto; font: 10.5px var(--mono); color: var(--text-3); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 5px; }
 .agent-status button.stop { color: var(--s-rejected); }
+.c-user { position: relative; }

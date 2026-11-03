@@ -3,7 +3,9 @@
 import type { HPane } from "@af/core";
 import type { Orchestrator } from "./orchestrator.ts";
 import type { Workspaces } from "./workspaces.ts";
+import { join } from "node:path";
 import { LocalFS, SshFS, type TranscriptFS, resolveTranscript } from "./transcripts/index.ts";
+import { Cuts } from "./rewind.ts";
 
 export type TranscriptAccess = ReturnType<typeof makeTranscriptAccess>;
 
@@ -35,5 +37,7 @@ export function makeTranscriptAccess(o: Orchestrator, w: Workspaces) {
       screen: () => w.read(paneId, 400),
     });
   };
-  return { fsFor, known, resolve };
+  /** Turns rewound away that the transcript does not show yet (see rewind.ts). */
+  const cuts = new Cuts(o.opts.home ? join(o.opts.home, "cuts.json") : undefined);
+  return { fsFor, known, resolve, cuts };
 }

@@ -16,6 +16,7 @@ import { chatImage } from "./transcripts/index.ts";
 import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
 import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
+import { rewindTo } from "./rewind.ts";
 import { enrichFromTranscript } from "./menu.ts";
 import type { Notices } from "./notices.ts";
 import { checkReadable, findFiles, listDir, readableRoots, statPath } from "./files.ts";
@@ -209,6 +210,17 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         }
         case "POST /pane/choose":
           return json(await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined));
+        case "POST /pane/rewind":
+          return json(
+            await rewindTo(w, access, {
+              pane: String(body.pane ?? ""),
+              text: String(body.text ?? ""),
+              back: Math.max(0, Number(body.back) || 0),
+              occurrence: Math.max(1, Number(body.occurrence) || 1),
+              ref: Number.isFinite(Number(body.ref)) && body.ref !== null && body.ref !== undefined ? Number(body.ref) : undefined,
+              code: !!body.code,
+            }),
+          );
         case "POST /pane/control":
           return json(await w.control(String(body.pane ?? ""), String(body.action ?? "")));
         case "POST /keys":
@@ -311,6 +323,7 @@ interface WsData {
   chat?: ChatBridge;
   unsub?: () => void;
   runsUnsub?: () => void;
+  cutsUnsub?: () => void;
 }
 
 export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices }) {
@@ -388,8 +401,11 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
           knownSession: access.known,
           argv: (p) => w.processArgv(p),
           pids: (p) => w.processes(p).then((ps) => ps.map((x) => x.pid)),
+          cutsFor: (path) => access.cuts.for(path),
           screen: (p) => w.read(p, 400),
         });
+        // a rewind: chat views of that pane read the conversation again
+        ws.data.cutsUnsub = access.cuts.onChange((pane) => ws.data.chat?.reload(pane));
         send({ type: "hello", runs: o.listRuns() });
         // the run list (with every run's open attention items) for "Needs you", whichever run this client watches
         ws.data.runsUnsub = o.subscribe((_run, event) => {
@@ -425,6 +441,7 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
         clients.delete(ws);
         ws.data.unsub?.();
         ws.data.runsUnsub?.();
+        ws.data.cutsUnsub?.();
         ws.data.bridge?.closeAll();
         ws.data.chat?.closeAll();
       },

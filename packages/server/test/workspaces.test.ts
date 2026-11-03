@@ -457,8 +457,15 @@ describe("controls: stop, rewind, clear, exit with each agent's own keys", () =>
       return { keys: backend.keys.map((k) => k.keys.join("+")), texts: backend.texts.map((t) => t.text), hint: r.hint };
     };
     expect(await run("claude", "interrupt")).toMatchObject({ keys: ["esc"], texts: [] });
-    expect(await run("claude", "rewind")).toMatchObject({ keys: ["ctrl+c", "esc", "esc"], hint: expect.stringContaining("Restore conversation") });
-    expect(await run("codex", "rewind")).toMatchObject({ keys: ["ctrl+c", "esc", "esc"] });
+    // an empty box is not Ctrl+C'd (that arms "press again to quit"); a box with text is cleared first
+    backend.screens.set(pane, "────\n❯\u00a0 \n────\n");
+    expect(await run("claude", "rewind")).toMatchObject({ keys: ["esc", "esc"], hint: expect.stringContaining("Restore conversation") });
+    expect(await run("claude", "clear")).toMatchObject({ keys: [] });
+    backend.screens.set(pane, "────\n❯\u00a0half typed\n────\n");
+    expect(await run("claude", "rewind")).toMatchObject({ keys: ["ctrl+c", "esc", "esc"] });
+    backend.screens.set(pane, "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n");
+    expect(await run("codex", "rewind")).toMatchObject({ keys: ["esc", "esc"] });
+    backend.screens.set(pane, "╰─ draft\n");
     expect(await run("omp", "rewind")).toMatchObject({ keys: ["ctrl+c", "enter"], texts: ["/rewind"] });
     expect(await run("claude", "exit")).toMatchObject({ keys: ["ctrl+c", "ctrl+c"] });
     for (const k of ["codex", "omp"] as const) expect(await run(k, "exit")).toMatchObject({ keys: ["ctrl+c", "ctrl+d"] });

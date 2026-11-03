@@ -29,7 +29,8 @@ export interface TerminalBackend {
   sendText(paneId: string, text: string): Promise<void>;
   readPane(paneId: string, lines: number): Promise<string>;
   /** The screen exactly as drawn (rows as they are, no unwrapping): for reading dialogs. */
-  readScreen(paneId: string): Promise<string>;
+  /** The visible screen as text; with `ansi`, with its colour codes (to see what is highlighted). */
+  readScreen(paneId: string, ansi?: boolean): Promise<string>;
   paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
   closeWorkspace(workspaceId: string, group?: boolean): Promise<void>;
@@ -219,8 +220,8 @@ export class Herdr implements TerminalBackend {
     await this.cli(["pane", "send-text", paneId, text]);
   }
 
-  async readScreen(paneId: string) {
-    const r = await this.rpc("pane.read", { pane_id: paneId, source: "visible" });
+  async readScreen(paneId: string, ansi = false) {
+    const r = await this.rpc("pane.read", ansi ? { pane_id: paneId, source: "visible", format: "ansi", strip_ansi: false } : { pane_id: paneId, source: "visible" });
     return String(r?.read?.text ?? "");
   }
 

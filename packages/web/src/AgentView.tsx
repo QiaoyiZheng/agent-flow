@@ -266,6 +266,44 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
       .finally(() => setForking(false));
   };
   const forkAt = (ref: number, text: string) => () => fork(ref, text);
+
+  // rewind to before one of your messages: agent-flow drives the agent's own picker to it (see server rewind.ts)
+  const rewindable = !!source && !source.pending && (source.agent === "claude" || source.agent === "codex" || source.agent === "omp");
+  const [picking, setPicking] = useState(false);
+  const [rewinding, setRewinding] = useState(false);
+  const firstLineOf = (t: string) => (t.split("\n").find((l) => l.trim()) ?? "").replace(/\s+/g, " ").trim();
+  const rewindInfo = useMemo(() => {
+    const users = log.current.entries.filter((e) => e.block.kind === "user") as (ChatEntry & { block: { kind: "user"; text: string } })[];
+    const info = new Map<string, { back: number; occurrence: number }>();
+    users.forEach((e, i) => {
+      const fl = firstLineOf(e.block.text);
+      const occurrence = users.slice(i).filter((x) => firstLineOf(x.block.text) === fl).length;
+      info.set(e.key, { back: users.length - 1 - i, occurrence });
+    });
+    return info;
+  }, [version]);
+  const rewindTo = (e: ChatEntry & { block: { kind: "user"; text: string } }, code: boolean) => {
+    const at = rewindInfo.get(e.key);
+    if (!at) return;
+    setRewinding(true);
+    setPicking(false);
+    api("POST", "/pane/rewind", { pane: paneId, text: e.block.text, back: at.back, occurrence: at.occurrence, ref: e.ref, code })
+      .then(() => {
+        // the message comes back into the box, as in the agent's own terminal
+        const m = e.block.text.match(ATTACH_HEAD);
+        const files = m ? m[1]!.trim().split("\n").map((l) => l.replace(/^- /, "")) : [];
+        const body = m ? e.block.text.slice(m[0].length) : e.block.text;
+        drafts.update(paneId, () => ({ text: body, files: files.map((f) => ({ id: ++fileSeq, name: basename(f), path: f })) }));
+      })
+      .catch(failed("Could not rewind"))
+      .finally(() => setRewinding(false));
+  };
+  useEffect(() => {
+    if (!picking) return;
+    const k = (ev: KeyboardEvent) => ev.key === "Escape" && (ev.preventDefault(), setPicking(false));
+    window.addEventListener("keydown", k, true);
+    return () => window.removeEventListener("keydown", k, true);
+  }, [picking]);
   const [controls, setControls] = useState(false);
   const control = (action: "interrupt" | "rewind" | "clear" | "exit") =>
     api<{ hint?: string }>("POST", "/pane/control", { pane: paneId, action })
@@ -367,6 +405,16 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
           if (el.scrollTop < 400) loadEarlier();
         }}
       >
+        {(picking || rewinding) && (
+          <div className="rewind-banner">
+            {rewinding ? `Rewinding ${agent}…` : "Pick the message to go back to: ↶ rewind to here on it. Esc to cancel."}
+            {picking && (
+              <button className="c-more" onClick={() => setPicking(false)}>
+                cancel
+              </button>
+            )}
+          </div>
+        )}
         {source === undefined && <div className="chat-empty">Loading transcript…</div>}
         {more && (
           <button className="chat-earlier" onClick={loadEarlier}>
@@ -385,6 +433,11 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
               block={s.entry.block}
               hl={hl}
               onFork={forkable && s.entry.block.kind === "user" && s.entry.ref !== undefined ? forkAt(s.entry.ref, s.entry.block.text) : undefined}
+              rewind={
+                rewindable && s.entry.block.kind === "user" && !rewinding
+                  ? { agent, picking, run: (code: boolean) => rewindTo(s.entry as ChatEntry & { block: { kind: "user"; text: string } }, code) }
+                  : undefined
+              }
             />
           ),
         )}
@@ -412,9 +465,9 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
             ■ Stop
           </button>
         )}
-        {source && !source.pending && (
-          <button title={`Rewind: go back to an earlier message and continue from there (${agent === "omp" ? "/rewind" : "Esc Esc"}). Opens ${agent}'s own picker.`} onClick={() => control("rewind")}>
-            ↶ Rewind
+        {rewindable && (
+          <button className={picking ? "on" : ""} disabled={rewinding} title="Rewind: pick one of your messages to go back to; the conversation continues from before it" onClick={() => setPicking((v) => !v)}>
+            {rewinding ? "rewinding…" : "↶ Rewind"}
           </button>
         )}
         <span className="menu-wrap">
@@ -426,8 +479,13 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
               <div className="item" onClick={() => control("interrupt")}>
                 ■ Stop the turn <span className="kbd">Esc</span>
               </div>
+              {rewindable && (
+                <div className="item" onClick={() => setPicking(true)}>
+                  ↶ Rewind to one of your messages…
+                </div>
+              )}
               <div className="item" onClick={() => control("rewind")}>
-                ↶ Rewind to an earlier message <span className="kbd">{agent === "omp" ? "/rewind" : "Esc Esc"}</span>
+                ↶ Open {agent}'s own rewind list <span className="kbd">{agent === "omp" ? "/rewind" : "Esc Esc"}</span>
               </div>
               <div className="item" onClick={() => control("clear")}>
                 ⌫ Clear what is typed in {agent}'s own box <span className="kbd">Ctrl+C</span>
@@ -464,10 +522,10 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
 const ATTACH_HEAD = /^Read these attached files first:\n((?:- .+\n?)+)\n?/;
 
 const Entry = memo(
-  function Entry({ block, hl, onFork }: { block: ChatBlock; hl: number; onFork?: () => void }) {
+  function Entry({ block, hl, onFork, rewind }: { block: ChatBlock; hl: number; onFork?: () => void; rewind?: RewindProp }) {
     switch (block.kind) {
       case "user":
-        return <UserMessage text={block.text} images={block.images} command={block.command} onFork={onFork} />;
+        return <UserMessage text={block.text} images={block.images} command={block.command} onFork={onFork} rewind={rewind} />;
       case "text":
         return <Prose text={block.text} hl={hl} />;
       case "thinking":
@@ -478,22 +536,60 @@ const Entry = memo(
         return <ToolCard t={block} />;
     }
   },
-  (a, b) => a.block === b.block && a.hl === b.hl && !!a.onFork === !!b.onFork,
+  (a, b) => a.block === b.block && a.hl === b.hl && !!a.onFork === !!b.onFork && !!a.rewind === !!b.rewind && a.rewind?.picking === b.rewind?.picking,
 );
 
-function UserMessage({ text, images, command, onFork }: { text: string; images?: string[]; command?: string; onFork?: () => void }) {
+interface RewindProp {
+  agent: string;
+  /** The footer's Rewind was pressed: every message offers itself. */
+  picking: boolean;
+  run: (code: boolean) => void;
+}
+
+function UserMessage({ text, images, command, onFork, rewind }: { text: string; images?: string[]; command?: string; onFork?: () => void; rewind?: RewindProp }) {
   const m = text.match(ATTACH_HEAD);
   const files = m ? m[1]!.trim().split("\n").map((l) => l.replace(/^- /, "")) : [];
   const body = m ? text.slice(m[0].length) : text;
   const long = body.split("\n").length > 5 || body.length > 420;
   const [open, setOpen] = useState(false);
+  const [asking, setAsking] = useState(false);
   return (
-    <div className="c-user">
+    <div className={`c-user ${rewind?.picking ? "pickable" : ""} ${asking ? "asking" : ""}`}>
       <span className="c-caret">›</span>
-      {onFork && (
-        <button className="c-fork" title="Fork from here: a new agent with the conversation before this message, and this message in its box to edit" onClick={onFork}>
-          ⑂ fork from here
-        </button>
+      {(onFork || rewind) && !asking && (
+        <span className="c-user-actions">
+          {rewind && (
+            <button className={`c-rewind ${rewind.picking ? "on" : ""}`} title={`Rewind ${rewind.agent} to before this message: it and everything after it leave the conversation, and it comes back into the box below`} onClick={() => setAsking(true)}>
+              ↶ rewind to here
+            </button>
+          )}
+          {onFork && (
+            <button className="c-fork" title="Fork from here: a new agent with the conversation before this message, and this message in its box to edit" onClick={onFork}>
+              ⑂ fork from here
+            </button>
+          )}
+        </span>
+      )}
+      {asking && rewind && (
+        <div className="c-rewind-ask">
+          <span>
+            Rewind {rewind.agent} to before this message? It and what came after leave the conversation; the message comes back into the box below.
+            {rewind.agent !== "claude" && " Files are not changed."}
+          </span>
+          <span className="c-rewind-btns">
+            <button className="btn primary" onClick={() => (setAsking(false), rewind.run(false))}>
+              Rewind{rewind.agent === "claude" ? " conversation" : ""}
+            </button>
+            {rewind.agent === "claude" && (
+              <button className="btn" title="claude also puts back the files it edited since this message (its checkpoints)" onClick={() => (setAsking(false), rewind.run(true))}>
+                Rewind conversation and code
+              </button>
+            )}
+            <button className="btn" onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+          </span>
+        </div>
       )}
       <div style={{ minWidth: 0, flex: 1 }}>
         {files.length > 0 && (

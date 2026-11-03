@@ -10,7 +10,7 @@
 
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ChatOp, ChatSource, HPane } from "@af/core";
 import { type Agent, PARSERS, type ParseCtx } from "./parse.ts";
 import { sq } from "../remote.ts";
@@ -133,6 +133,8 @@ export interface TranscriptFS {
   copyPrefix(src: string, dst: string, bytes: number | undefined, from: string, to: string): Promise<void>;
   /** Run a shell command where the files are (to list skills). */
   sh(cmd: string): Promise<string>;
+  /** The codex rollout file named by an id: a thread's first file ("…-<id>.jsonl") or a later page ("…_<id>.jsonl"). */
+  codexFilesById(id: string): Promise<string[]>;
   /** The session a running claude process is in: claude keeps <config>/sessions/<pid>.json up to date (also after /clear). */
   claudeSessionOfPid(pid: number): Promise<string | undefined>;
   /**
@@ -201,6 +203,18 @@ export class LocalFS implements TranscriptFS {
       if (existsSync(f)) return f;
     }
     return undefined;
+  }
+
+  async codexFilesById(id: string) {
+    const root = this.roots.codex;
+    if (!existsSync(root) || !/^[0-9a-z-]+$/i.test(id)) return [];
+    const out: string[] = [];
+    const ls = (d: string) => (existsSync(d) ? readdirSync(d).sort().reverse() : []);
+    for (const y of ls(root))
+      for (const m of ls(join(root, y)))
+        for (const d of ls(join(root, y, m)))
+          for (const f of ls(join(root, y, m, d))) if (f.endsWith(`-${id}.jsonl`) || f.endsWith(`_${id}.jsonl`)) out.push(join(root, y, m, d, f));
+    return out;
   }
 
   async codexById(id: string) {
@@ -338,6 +352,16 @@ export class SshFS implements TranscriptFS {
   claudeById(id: string) {
     if (!/^[0-9a-f-]+$/i.test(id)) return Promise.resolve(undefined);
     return this.line(`ls -1 "$HOME"/.claude/projects/*/${id}.jsonl 2>/dev/null | head -n 1`);
+  }
+
+  async codexFilesById(id: string) {
+    if (!/^[0-9a-z-]+$/i.test(id)) return [];
+    const r = await this.exec(`ls -1 "$HOME"/.codex/sessions/*/*/*/*-${id}.jsonl "$HOME"/.codex/sessions/*/*/*/*_${id}.jsonl 2>/dev/null`);
+    return r.out
+      .toString()
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
   }
 
   codexById(id: string) {
@@ -579,6 +603,35 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
   return { reason: `${agent} has not reported its session to Herdr yet` };
 }
 
+/** A transcript's first line, parsed (session headers), or undefined. */
+async function firstLine(fs: TranscriptFS, path: string): Promise<any> {
+  const r = await fs.readFrom(path, 0, 512 * 1024);
+  if (!r) return undefined;
+  const nl = r.data.indexOf(10);
+  try {
+    return JSON.parse(r.data.subarray(0, nl < 0 ? r.data.length : nl).toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The earlier files a codex rollout continues, nearest first: after a rewind (or a fork) codex starts a new file
+ * whose header names its base (history_base: the id the base file is named by, and the byte it ends at) and holds
+ * only what comes after it. The first rewind names the thread's first file, a later one the page before it.
+ */
+export async function codexBases(fs: TranscriptFS, path: string, depth = 0): Promise<{ path: string; end: number }[]> {
+  if (depth > 30) return [];
+  const head = await firstLine(fs, path);
+  const base = head?.type === "session_meta" ? head.payload?.history_base : undefined;
+  const id = typeof base?.thread_id === "string" ? base.thread_id : undefined;
+  const end = Number(base?.end_byte_offset);
+  if (!id || !Number.isFinite(end) || end <= 0) return [];
+  const file = (await fs.codexFilesById(id).catch(() => [] as string[])).find((f) => f !== path);
+  if (!file) return [];
+  return [{ path: file, end }, ...(await codexBases(fs, file, depth + 1))];
+}
+
 /**
  * Follows one transcript file: parses its last part (about WINDOW_WEIGHT of conversation), then whatever gets
  * appended, and earlier parts on request (the user scrolled to the top).
@@ -594,6 +647,12 @@ export class TranscriptTail {
   /** Where the part shown so far starts (a line start): earlier parts are read from before it. 0: all of it. */
   skipped = 0;
   private pages = 0;
+  /** Earlier files this one continues (codex after a rewind), nearest first, and how far back each is read. */
+  private bases: { path: string; end: number }[] = [];
+  private baseAt = -1;
+  private baseSkipped = 0;
+  /** Files (this one, its bases) that start where a rewind went back to. */
+  private rewound = new Set<string>();
 
   constructor(
     readonly source: ChatSource,
@@ -601,17 +660,25 @@ export class TranscriptTail {
     /** About how much conversation a window holds (see WINDOW_WEIGHT). */
     private weight = WINDOW_WEIGHT,
     private raw = WINDOW_RAW,
+    /** Byte ranges of this file whose entries are hidden (turns removed by a rewind the file does not show yet). */
+    private cuts: () => { from: number; to: number }[] = () => [],
   ) {}
 
   /** Earlier conversation exists before what was read. */
   get more() {
-    return this.skipped > 0;
+    if (this.baseAt < 0) return this.skipped > 0 || this.bases.length > 0;
+    return this.baseSkipped > 0 || this.baseAt < this.bases.length - 1;
   }
 
-  /** Parse [from, to) of the file (whole lines), with `ctx`; entries remember where their line starts. */
-  private async parseRange(from: number, to: number, ctx: ParseCtx, data?: Buffer): Promise<ChatOp[]> {
-    const buf = data ?? (await this.fs.readFrom(this.source.path, from, to - from))?.data;
+  /**
+   * Parse [from, to) of a file (whole lines), with `ctx`. Entries of the transcript itself remember where their line
+   * starts (fork and rewind points); entries of a base file do not. Entries in a cut range are left out.
+   */
+  private async parseRange(from: number, to: number, ctx: ParseCtx, data?: Buffer, path = this.source.path): Promise<ChatOp[]> {
+    const buf = data ?? (await this.fs.readFrom(path, from, to - from))?.data;
     if (!buf) return [];
+    const own = path === this.source.path;
+    const cuts = own ? this.cuts() : [];
     const parse = PARSERS[this.source.agent];
     const ops: ChatOp[] = [];
     for (let pos = 0; pos < buf.length; ) {
@@ -627,12 +694,19 @@ export class TranscriptTail {
       } catch {
         continue;
       }
+      const hidden = cuts.some((c) => lineStart >= c.from && lineStart < c.to);
       let k = 0;
       for (const op of lineOps) {
-        if (op.op === "add") op.entry.ref = lineStart;
+        if (op.op === "add") {
+          if (hidden) continue; // still parsed: the parser's state (open tool calls, the conversation tree) stays right
+          if (own) op.entry.ref = lineStart;
+          const b = op.entry.block;
+          if (lineStart === 0 && this.rewound.has(path) && b.kind === "notice" && b.divider && /^(Continued from an earlier file|Forked from)/.test(b.text))
+            op.entry.block = { ...b, text: "↶ Rewound here: the turns that came after this point were removed" };
+        }
         for (const list of imageLists(op))
           for (let i = 0; i < list.length; i++, k++)
-            if (list[i]!.length > INLINE_IMAGE && list[i]!.startsWith("data:")) list[i] = refImage({ fs: this.fs, agent: this.source.agent, path: this.source.path, line: lineStart, k });
+            if (list[i]!.length > INLINE_IMAGE && list[i]!.startsWith("data:")) list[i] = refImage({ fs: this.fs, agent: this.source.agent, path, line: lineStart, k });
         ops.push(op);
       }
     }
@@ -654,6 +728,15 @@ export class TranscriptTail {
       this.offset = await windowStart(this.fs, this.source.path, head.size, this.weight, this.raw);
       this.skipped = this.offset;
       this.file = head.file;
+      this.bases = this.source.agent === "codex" ? await codexBases(this.fs, this.source.path).catch(() => []) : [];
+      this.baseAt = -1;
+      // a file whose base goes on past the point it continues from: the turns after that point were rewound away
+      this.rewound.clear();
+      const chain = [this.source.path, ...this.bases.map((b) => b.path)];
+      for (let i = 0; i < this.bases.length; i++) {
+        const b = this.bases[i]!;
+        if (((await this.fs.readFrom(b.path, 0, 0))?.size ?? 0) > b.end) this.rewound.add(chain[i]!);
+      }
       first = true;
     }
     const back = this.mark.length;
@@ -684,6 +767,18 @@ export class TranscriptTail {
     const end = buf.lastIndexOf(10);
     this.partial = Buffer.from(buf.subarray(end + 1));
     const ops = end < 0 ? [] : await this.parseRange(start, start + end + 1, this.ctx, buf.subarray(0, end + 1));
+    // a codex file that continues earlier ones (after rewinds) and is read whole: earlier parts go first, until the
+    // first window is about full
+    if (first && this.skipped === 0 && this.bases.length) {
+      let before: ChatOp[] = [];
+      let read = start + end + 1 - this.skipped;
+      for (let i = 0; i < 40 && this.more && read < this.weight; i++) {
+        const earlier = await this.readEarlier();
+        before = [...earlier.ops, ...before];
+        read += earlier.bytes;
+      }
+      return { ops: [...before, ...ops], reset };
+    }
     return { ops, reset };
   }
 
@@ -691,19 +786,31 @@ export class TranscriptTail {
    * The conversation before what was read so far, about one window of it. Parsed on its own (fresh state), with
    * keys of its own, so it can be put in front of what the browser has.
    */
-  async readEarlier(): Promise<{ ops: ChatOp[]; more: boolean }> {
-    if (this.skipped <= 0) return { ops: [], more: false };
-    const end = this.skipped;
-    const from = await windowStart(this.fs, this.source.path, end, this.weight, this.raw);
+  async readEarlier(): Promise<{ ops: ChatOp[]; more: boolean; bytes: number }> {
+    let path = this.source.path;
+    let end: number;
+    if (this.baseAt < 0 && this.skipped > 0) end = this.skipped;
+    else {
+      // this file is read to its start: go on in the file it continues
+      if (this.baseAt < 0 || this.baseSkipped <= 0) {
+        if (this.baseAt + 1 >= this.bases.length) return { ops: [], more: false, bytes: 0 };
+        this.baseAt++;
+        this.baseSkipped = this.bases[this.baseAt]!.end;
+      }
+      path = this.bases[this.baseAt]!.path;
+      end = this.baseSkipped;
+    }
+    const from = await windowStart(this.fs, path, end, this.weight, this.raw);
     const page = ++this.pages;
     const ctx: ParseCtx = { n: 0 };
-    const ops = await this.parseRange(from, end, ctx);
+    const ops = await this.parseRange(from, end, ctx, undefined, path);
     const key = (k: string) => `p${page}${k}`;
     for (const op of ops) {
       if (op.op === "add") op.entry.key = key(op.entry.key);
       else if (op.op === "remove") op.keys = op.keys.map(key);
     }
-    this.skipped = from;
-    return { ops, more: from > 0 };
+    if (path === this.source.path) this.skipped = from;
+    else this.baseSkipped = from;
+    return { ops, more: this.more, bytes: end - from };
   }
 }

@@ -18,8 +18,47 @@ import { AfError } from "./orchestrator.ts";
 export type ControlAction = "interrupt" | "rewind" | "clear" | "exit";
 export const CONTROL_ACTIONS: readonly ControlAction[] = ["interrupt", "rewind", "clear", "exit"];
 
-/** What to do for an action: keys to press (with a pause between groups), or a command to type. */
-export type ControlStep = { keys: string[] } | { text: string } | { wait: number };
+/**
+ * What to do for an action: keys to press (with a pause between groups), a command to type, or clear the agent's
+ * own input box: Ctrl+C, but only when the box has text. On an empty box Ctrl+C arms "press again to quit" (claude,
+ * codex), so a later Ctrl+C would quit the agent.
+ */
+export type ControlStep = { keys: string[] } | { text: string } | { wait: number } | { clearBox: true };
+
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+
+/**
+ * What is typed in the agent's own input box, from its screen with colour codes; "" when empty, undefined when the
+ * box is not on screen (a picker or a dialog is). claude: "❯" + no-break space + text; codex: "›" + text, its
+ * placeholder ("Ask Codex to do anything", examples) drawn dim; omp: "╰─ " + text (plus a dim completion hint).
+ */
+export function inputText(agent: string | undefined, ansiScreen: string): string | undefined {
+  const lines = ansiScreen.split("\n");
+  const plain = (l: string) => l.replace(ANSI, "").replace(/\r$/, "");
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 25); i--) {
+    const raw = lines[i]!;
+    const t = plain(raw);
+    if (agent === "claude") {
+      const m = t.match(/^❯\u00a0(.*)$/);
+      if (m) return m[1]!.trim();
+    } else if (agent === "codex") {
+      const m = t.match(/^›(?:\s(.*))?$/);
+      if (!m) continue;
+      const after = raw.slice(raw.indexOf("›") + 1);
+      const lead = after.match(/^(?:\x1b\[[0-9;?]*[A-Za-z]|\s)*/)?.[0] ?? "";
+      if (/\x1b\[(?:0;)?2m/.test(lead)) return ""; // the dim placeholder
+      return (m[1] ?? "").trim();
+    } else if (agent === "omp") {
+      const m = t.match(/^╰─(?:\s(.*))?$/);
+      if (m) {
+        // the completion hint after the cursor is dim gray: leave it out
+        const typed = raw.slice(raw.indexOf("╰─") + 2).replace(/\x1b\[38;2;110;118;129m[^\x1b]*/g, "");
+        return plain(typed).trim();
+      }
+    }
+  }
+  return undefined;
+}
 
 const ESC_ESC: ControlStep[] = [{ keys: ["esc"] }, { wait: 120 }, { keys: ["esc"] }];
 
@@ -27,22 +66,22 @@ const TABLE: Record<string, Record<ControlAction, ControlStep[]>> = {
   claude: {
     interrupt: [{ keys: ["esc"] }],
     // from an empty input: whatever is typed goes first, or Esc Esc would only clear it
-    rewind: [{ keys: ["ctrl+c"] }, { wait: 150 }, ...ESC_ESC],
-    clear: [{ keys: ["ctrl+c"] }],
+    rewind: [{ clearBox: true }, ...ESC_ESC],
+    clear: [{ clearBox: true }],
     // claude: the first Ctrl+C clears the box (and arms "Press Ctrl-C again to exit"), the second exits.
     // Ctrl+D right after the first one does nothing (checked live), so it is not used here.
     exit: [{ keys: ["ctrl+c"] }, { wait: 300 }, { keys: ["ctrl+c"] }],
   },
   codex: {
     interrupt: [{ keys: ["esc"] }],
-    rewind: [{ keys: ["ctrl+c"] }, { wait: 150 }, ...ESC_ESC],
-    clear: [{ keys: ["ctrl+c"] }],
+    rewind: [{ clearBox: true }, ...ESC_ESC],
+    clear: [{ clearBox: true }],
     exit: [{ keys: ["ctrl+c"] }, { wait: 150 }, { keys: ["ctrl+d"] }],
   },
   omp: {
     interrupt: [{ keys: ["esc"] }],
-    rewind: [{ keys: ["ctrl+c"] }, { wait: 150 }, { text: "/rewind" }],
-    clear: [{ keys: ["ctrl+c"] }],
+    rewind: [{ clearBox: true }, { text: "/rewind" }],
+    clear: [{ clearBox: true }],
     exit: [{ keys: ["ctrl+c"] }, { wait: 150 }, { keys: ["ctrl+d"] }],
   },
 };

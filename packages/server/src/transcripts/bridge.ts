@@ -13,6 +13,8 @@ interface Opts {
   knownSession: (paneId: string) => { id?: string; path?: string } | undefined;
   argv: (paneId: string) => Promise<string[][]>;
   pids?: (paneId: string) => Promise<number[]>;
+  /** Byte ranges of a transcript whose turns were rewound away (hidden until the agent writes the new branch). */
+  cutsFor?: (path: string) => { from: number; to: number }[];
   screen: (paneId: string) => Promise<string>;
 }
 
@@ -71,7 +73,8 @@ export class ChatBridge {
     }
     o.pending = undefined;
     if (o.tail && o.tail.source.path === r.source.path) return;
-    o.tail = new TranscriptTail(r.source, fs, undefined, this.opts.fsFor(o.paneId).remote ? WINDOW_RAW_REMOTE : WINDOW_RAW);
+    const path = r.source.path;
+    o.tail = new TranscriptTail(r.source, fs, undefined, this.opts.fsFor(o.paneId).remote ? WINDOW_RAW_REMOTE : WINDOW_RAW, () => this.opts.cutsFor?.(path) ?? []);
     const { ops } = await o.tail.read();
     if (!o.closed) this.opts.send({ type: "chat.reset", id, source: r.source, ops, more: o.tail.more });
   }
@@ -116,6 +119,16 @@ export class ChatBridge {
       }
       await new Promise((r) => (o.timer = setTimeout(r, remote ? 1500 : 500)));
     }
+  }
+
+  /** Read a pane's conversation again from the start (after a rewind), in every view of it. */
+  reload(paneId: string) {
+    for (const o of this.open.values())
+      if (o.paneId === paneId) {
+        o.tail = undefined;
+        o.pending = undefined;
+        o.lastResolve = 0;
+      }
   }
 
   close(id: string) {
