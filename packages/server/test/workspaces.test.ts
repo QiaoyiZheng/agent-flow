@@ -70,6 +70,20 @@ describe("workspaces: mirror Herdr", () => {
     backend.set("old", "done");
     await w.refresh();
     expect(pane().statusAt! > t1).toBe(true);
+
+    // a restart keeps the times; a status that changed while the server was down changed "now"
+    const t2 = pane().statusAt!;
+    await Bun.sleep(1100); // the save is debounced
+    w.stop?.();
+    const again = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    await again.start(60_000);
+    expect(again.model.panes.find((p) => p.id === ws.paneId)!.statusAt).toBe(t2);
+    again.stop?.();
+    backend.set("old", "working");
+    const third = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    await third.start(60_000);
+    expect(third.model.panes.find((p) => p.id === ws.paneId)!.statusAt! > t2).toBe(true);
+    third.stop?.();
   });
 
   test("only tabs whose layout changed are exported again", async () => {

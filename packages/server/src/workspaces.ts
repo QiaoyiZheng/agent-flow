@@ -64,6 +64,10 @@ export class Workspaces {
   /** Messages waiting for their agent's turn to end, by pane. Saved, so they survive a restart. */
   queue: Record<string, QueuedMessage[]> = {};
   private queueFile: string;
+  /** Each machine's agent statuses and when they changed (pane ids as Herdr knows them), saved across restarts. */
+  private statusFile: string;
+  private savedStatus: Record<string, Record<string, { status: string; at?: string }>> = {};
+  private statusSave?: ReturnType<typeof setTimeout>;
   /** When a queued message was last delivered to a pane (the next waits until the agent has taken it up). */
   private queueSentAt = new Map<string, number>();
   private draining = new Set<string>();
@@ -86,6 +90,10 @@ export class Workspaces {
 
   constructor(private opts: WorkspacesOptions) {
     this.viewsFile = join(opts.home, "views.json");
+    this.statusFile = join(opts.home, "status.json");
+    try {
+      if (existsSync(this.statusFile)) this.savedStatus = JSON.parse(readFileSync(this.statusFile, "utf8"));
+    } catch {}
     this.queueFile = join(opts.home, "queue.json");
     try {
       if (existsSync(this.queueFile)) this.queue = JSON.parse(readFileSync(this.queueFile, "utf8"));
@@ -318,15 +326,24 @@ export class Workspaces {
       for (const id of Object.keys(m.sigs)) if (!snap.tabs.some((t) => t.id === id)) delete m.sigs[id];
       m.workspaces = snap.workspaces.map((w) => ({ ...w, machine: key, id: p(w.id), activeTabId: w.activeTabId ? p(w.activeTabId) : undefined }));
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
-      // when each agent's status changed: "finished" in Needs you means finished after the user last looked
-      const first = !m.since;
-      const since = (m.since ??= new Map());
+      // when each agent's status changed: "finished" in Needs you means finished after the user last looked.
+      // Saved across restarts: a status that changed while the server was down changed now.
+      const since = (m.since ??= new Map(Object.entries(this.savedStatus[key] ?? {})));
       const now = new Date().toISOString();
+      let changed = false;
       for (const x of snap.panes) {
         const was = since.get(x.id);
-        if (!was || was.status !== x.agentStatus) since.set(x.id, { status: x.agentStatus, at: first || !was ? undefined : now });
+        if (!was || was.status !== x.agentStatus) {
+          since.set(x.id, { status: x.agentStatus, at: was ? now : undefined });
+          changed = true;
+        }
       }
-      for (const id of since.keys()) if (!snap.panes.some((x) => x.id === id)) since.delete(id);
+      for (const id of since.keys())
+        if (!snap.panes.some((x) => x.id === id)) {
+          since.delete(id);
+          changed = true;
+        }
+      if (changed) this.saveStatus(key, since);
       m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at }));
       m.layouts = layouts;
       if (m.meta.local && m.failedPolls > 0) this.opts.notify?.("info", "herdr", "Herdr is responding again");
@@ -542,6 +559,16 @@ export class Workspaces {
     const [item] = list.splice(i, 1);
     this.saveQueue();
     return item!;
+  }
+
+  private saveStatus(machine: string, since: Map<string, { status: string; at?: string }>) {
+    this.savedStatus[machine] = Object.fromEntries(since);
+    clearTimeout(this.statusSave);
+    this.statusSave = setTimeout(() => {
+      try {
+        writeFileSync(this.statusFile, JSON.stringify(this.savedStatus));
+      } catch {}
+    }, 1000);
   }
 
   private saveQueue() {

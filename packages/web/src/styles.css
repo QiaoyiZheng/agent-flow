@@ -805,3 +805,18 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .viewer .bar .path { direction: rtl; text-align: left; min-width: 0; }
 .outline.floating { position: absolute; right: 12px; top: 44px; z-index: 5; width: 240px; max-height: 60vh; padding: 10px 12px; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); display: block !important; }
 .md.doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
+.chat-earlier { display: block; margin: 4px auto 12px; border: 1px solid var(--line-2); background: var(--bg-1); color: var(--text-3); font-size: 12px; padding: 4px 12px; border-radius: 999px; cursor: pointer; }
+.chat-earlier:hover { color: var(--text); border-color: var(--text-3); }
+.bell { border: 0; background: none; cursor: pointer; font-size: 11px; padding: 0 2px; opacity: 0.45; filter: grayscale(1); text-transform: none; }
+.bell.on { opacity: 0.9; filter: none; }
+.bell:hover { opacity: 1; }
+/* sidebar rows: the ⋮ menu always at the right edge; other actions (+) appear on hover, left of it */
+.tree-row .row-gap { flex: 1; }
+.tree-row .row-actions { display: inline-flex; margin-left: auto; }
+.tree-row .row-actions > :not(.menu-wrap) { display: none; }
+.tree-row:hover .row-actions > :not(.menu-wrap) { display: inline-flex; }
+.tree-row .row-gap + .row-actions, .tree-row .meta + .row-actions { margin-left: 4px; }
+.tree-row:hover .meta { display: inline; }
+.row-actions .kebab { width: 16px; font-size: 15px; font-weight: 700; color: var(--text-3); opacity: 0.45; }
+.tree-row:hover .row-actions .kebab, .row-actions .menu-wrap:has(.menu) .kebab { opacity: 1; }
+.tree-row .row-actions .menu-wrap { display: inline-flex; }

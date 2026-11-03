@@ -119,14 +119,19 @@ export function App() {
   const leadPane = run?.meta ? run.agents[run.meta.lead]?.paneId : undefined;
   const tabPanes = herdr && tabId ? herdr.panes.filter((p) => p.tabId === tabId) : [];
   const focusedPane = (selectedWs && focused[selectedWs] && tabPanes.some((p) => p.id === focused[selectedWs]) ? focused[selectedWs] : (layout?.focusedPaneId ?? tabPanes[0]?.id)) as string | undefined;
-  // what is on screen counts as seen (only while this browser tab is visible)
-  const [visible, setVisible] = useState(document.visibilityState === "visible");
+  // a finished agent counts as seen when you are actually here: this window has focus, and the pane is the one
+  // you are in (or the only agent in the tab). On screen while you work in another app is not seen.
+  const [present, setPresent] = useState(document.visibilityState === "visible" && document.hasFocus());
   useEffect(() => {
-    const on = () => setVisible(document.visibilityState === "visible");
+    const on = () => setPresent(document.visibilityState === "visible" && document.hasFocus());
     document.addEventListener("visibilitychange", on);
-    return () => document.removeEventListener("visibilitychange", on);
+    window.addEventListener("focus", on);
+    window.addEventListener("blur", on);
+    return () => (document.removeEventListener("visibilitychange", on), window.removeEventListener("focus", on), window.removeEventListener("blur", on));
   }, []);
-  const unseen = visible && !creating && !pastRun ? tabPanes.filter((p) => p.agentStatus === "done" && p.statusAt && (seen[p.id] ?? "") < p.statusAt) : [];
+  const tabAgents = tabPanes.filter((p) => p.agent);
+  const looking = present && !creating && !pastRun ? tabAgents.filter((p) => p.id === focusedPane || tabAgents.length === 1) : [];
+  const unseen = looking.filter((p) => p.agentStatus === "done" && p.statusAt && (seen[p.id] ?? "") < p.statusAt);
   const unseenKey = unseen.map((p) => `${p.id}@${p.statusAt}`).join(",");
   useEffect(() => {
     if (unseen.length) markSeen(unseen.map((p) => [p.id, p.statusAt!]));

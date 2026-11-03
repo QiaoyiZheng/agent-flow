@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Attention, HPane, HerdrModel, RunState, RunSummary } from "@af/core";
-import { api, failed, notify } from "./store";
+import { api, failed, notify as notifyUser } from "./store";
 
 const KIND_LABEL: Record<Attention["kind"], string> = {
   blocked: "waiting for an answer",
@@ -83,7 +83,7 @@ export function Sidebar({
                 <span className="caret">{open ? "▾" : "▸"}</span>
                 {!m.local && <span className={`dot m-${m.state}`} />}
                 <span className="name">{m.label}</span>
-                {!m.local && <span className="meta">{m.state === "online" ? workspaces.length || "" : m.state === "connecting" ? (workspaces.length ? "reconnecting…" : "connecting…") : m.state === "error" ? "retrying" : ""}</span>}
+                {!m.local && <span className="meta">{m.state === "connecting" ? (workspaces.length ? "reconnecting…" : "connecting…") : m.state === "error" ? "retrying" : ""}</span>}
                 <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                   {(m.local || m.state === "online") && (
                     <button title={`New workspace on ${m.label}`} onClick={() => onNew(m.id)}>
@@ -155,7 +155,7 @@ export function Sidebar({
                           </span>
                         )}
                         {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
-                        {r && r.attention > 0 ? <span className="count">{r.attention}</span> : <span className="meta">{agents.length || ""}</span>}
+                        <span className="row-gap" />
                         <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                           <RowMenu id={`w:${w.id}`} open={menu} setOpen={setMenu}>
                             {(m.local || m.state === "online") && (
@@ -207,8 +207,8 @@ function RowMenu({ id, open, setOpen, children }: { id: string; open?: string; s
   const on = open === id;
   return (
     <span className="menu-wrap">
-      <button title="More" onClick={() => setOpen(on ? undefined : id)}>
-        ⋯
+      <button className="kebab" title="More" onClick={() => setOpen(on ? undefined : id)}>
+        ⋮
       </button>
       {on && (
         <div className="menu" onMouseLeave={() => setOpen(undefined)} onClick={() => setOpen(undefined)}>
@@ -257,7 +257,7 @@ function AddMachine({ onDone }: { onDone: () => void }) {
                 className="c-more"
                 onClick={() =>
                   api("POST", "/machine/setup-in-shell", { target, label: label || undefined })
-                    .then(() => notify("info", "The setup command is waiting in the persistent shell (ctrl+` to open it). Answer its questions there."))
+                    .then(() => notifyUser("info", "The setup command is waiting in the persistent shell (ctrl+` to open it). Answer its questions there."))
                     .catch(failed("That did not work"))
                 }
               >
@@ -395,11 +395,50 @@ function NeedsYou({
   const rank = (n: Need) => (n.kind === "finished" ? 1 : 0);
   needs.sort((a, b) => rank(a) - rank(b) || b.at.localeCompare(a.at));
 
+  // reminders: a desktop notification for each new item while you are elsewhere, and the count in the tab title
+  const [notify, setNotify] = useState(() => (typeof Notification !== "undefined" && Notification.permission === "granted" ? localStorage.getItem("af-notify") !== "0" : false));
+  const notified = useRef<Set<string> | undefined>(undefined);
+  const needKey = (n: Need) => `${n.key}@${n.statusAt ?? n.at}`;
+  useEffect(() => {
+    document.title = needs.length ? `(${needs.length}) agent-flow` : "agent-flow";
+    const keys = needs.map(needKey);
+    if (!notified.current) {
+      notified.current = new Set(keys); // what is waiting when the page opens is not news
+      return;
+    }
+    for (const n of needs) {
+      const k = needKey(n);
+      if (notified.current.has(k)) continue;
+      notified.current.add(k);
+      if (!notify || typeof Notification === "undefined" || Notification.permission !== "granted" || document.hasFocus()) continue;
+      try {
+        const note = new Notification(n.kind === "finished" ? `${n.label.replace(/^finished · /, "")} finished` : n.label, { body: [n.where, n.text].filter(Boolean).join(" — ").slice(0, 180), tag: k, silent: false });
+        note.onclick = () => (window.focus(), onNeed(n), note.close());
+      } catch {}
+    }
+  }, [needs.map(needKey).join(",")]);
+  const bell = () => {
+    if (typeof Notification === "undefined") return notifyUser("warn", "This browser cannot show notifications");
+    if (Notification.permission === "denied") return notifyUser("warn", "Notifications are blocked for this page", "Allow them in the browser's site settings, then click the bell again.");
+    if (Notification.permission === "default")
+      return void Notification.requestPermission().then((p) => {
+        localStorage.setItem("af-notify", p === "granted" ? "1" : "0");
+        setNotify(p === "granted");
+      });
+    localStorage.setItem("af-notify", notify ? "0" : "1");
+    setNotify(!notify);
+  };
+
   return (
     <div className="section needs-section">
       <div className="section-title">
         <span>Needs you</span>
-        <span className={`count ${needs.length ? "" : "zero"}`}>{needs.length}</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button className={`bell ${notify ? "on" : ""}`} onClick={bell} title={notify ? "Desktop notifications are on: when an agent finishes or asks while you are elsewhere. Click to turn off." : "Turn on desktop notifications: when an agent finishes or asks while you are elsewhere"}>
+            {notify ? "🔔" : "🔕"}
+          </button>
+          <span className={`count ${needs.length ? "" : "zero"}`}>{needs.length}</span>
+        </span>
       </div>
       {!needs.length && <div className="empty">Nothing waiting on you.</div>}
       <div className="needs-list">
