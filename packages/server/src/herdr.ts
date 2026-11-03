@@ -33,6 +33,7 @@ export interface TerminalBackend {
   paneExists(paneId: string): Promise<boolean>;
   closeTab(tabId: string): Promise<void>;
   closeWorkspace(workspaceId: string, group?: boolean): Promise<void>;
+  renameWorkspace(workspaceId: string, label: string): Promise<void>;
   /** argv for a streaming terminal session (control or observe), used by the WebSocket bridge. */
   terminalSessionArgv(paneId: string, mode: "control" | "observe", cols: number, rows: number): string[];
 
@@ -219,6 +220,10 @@ export class Herdr implements TerminalBackend {
 
   async closeTab(tabId: string) {
     await this.cli(["tab", "close", tabId]).catch(() => {});
+  }
+
+  async renameWorkspace(workspaceId: string, label: string) {
+    await this.rpc("workspace.rename", { workspace_id: workspaceId, label });
   }
 
   /** Close a workspace and everything running in it. `group` also closes its linked worktree workspaces. */

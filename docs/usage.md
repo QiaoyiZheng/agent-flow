@@ -83,4 +83,5 @@ loops:
 | 看结果 / 通过 / 打回 | `af inbox` · `af diff <node>` · `af graph accept <node>` · `af graph reject <node> --reason "…"` |
 | 改图 | `af graph edit / rm / cancel / retry <node>` |
 | 结束 | `af run stop` |
+| 改 workspace 名字 | 左栏双击名字（或 ⋯ → Rename…），或 `af workspace rename <workspace> "名字"` |
 | 完整说明 | `af guide lead` |

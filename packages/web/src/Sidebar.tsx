@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Attention, HerdrModel, RunState, RunSummary } from "@af/core";
 import { api, failed, notify } from "./store";
 
@@ -40,6 +40,7 @@ export function Sidebar({
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [menu, setMenu] = useState<string>();
+  const [renaming, setRenaming] = useState<string>();
   const [adding, setAdding] = useState(false);
   const attention = run ? Object.values(run.attention).sort((a, b) => b.at.localeCompare(a.at)) : [];
   const runOf = new Map(runs.filter((r) => r.workspace).map((r) => [r.workspace!, r]));
@@ -155,11 +156,36 @@ export function Sidebar({
                     <div key={w.id} className={!m.local && m.state !== "online" ? "stale" : ""}>
                       <div className={`tree-row ws ${w.id === selectedWs ? "active" : ""}`} onClick={() => onSelectWs(w.id)}>
                         <span className={`dot ${statusDot(w.agentStatus)}`} title={`${agents.length} agent${agents.length === 1 ? "" : "s"} · ${w.agentStatus}`} />
-                        <span className="name">{w.label}</span>
+                        {renaming === w.id ? (
+                          <RenameInput
+                            value={w.label}
+                            onDone={(label) => {
+                              setRenaming(undefined);
+                              if (label !== undefined && label.trim() && label.trim() !== w.label)
+                                api("POST", "/workspace/rename", { workspace: w.id, label }).catch(failed("Could not rename the workspace"));
+                            }}
+                          />
+                        ) : (
+                          <span
+                            className="name"
+                            title="Double-click to rename"
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              if (m.local || m.state === "online") setRenaming(w.id);
+                            }}
+                          >
+                            {w.label}
+                          </span>
+                        )}
                         {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
                         {r && r.attention > 0 ? <span className="count">{r.attention}</span> : <span className="meta">{agents.length || ""}</span>}
                         <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                           <RowMenu id={`w:${w.id}`} open={menu} setOpen={setMenu}>
+                            {(m.local || m.state === "online") && (
+                              <div className="item" onClick={() => setRenaming(w.id)}>
+                                Rename…
+                              </div>
+                            )}
                             <div
                               className="item danger"
                               onClick={() => {
@@ -265,5 +291,32 @@ function AddMachine({ onDone }: { onDone: () => void }) {
         </div>
       )}
     </form>
+  );
+}
+
+/** Edit a name in place: Enter or leaving the field saves, Esc cancels. */
+function RenameInput({ value, onDone }: { value: string; onDone: (label: string | undefined) => void }) {
+  const [text, setText] = useState(value);
+  const done = useRef(false);
+  const finish = (label: string | undefined) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(label);
+  };
+  return (
+    <input
+      className="rename-input"
+      autoFocus
+      value={text}
+      onFocus={(e) => e.currentTarget.select()}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => finish(text)}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) finish(text);
+        else if (e.key === "Escape") finish(undefined);
+      }}
+    />
   );
 }

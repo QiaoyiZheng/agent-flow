@@ -95,6 +95,10 @@ export class FakeBackend implements TerminalBackend {
     this.tabs.delete(tabId);
     this.bump();
   }
+  async renameWorkspace(workspaceId: string, label: string) {
+    this.workspaces.get(workspaceId)!.label = label;
+    this.bump();
+  }
   async closeWorkspace(workspaceId: string) {
     for (const t of [...this.tabs.values()]) if (t.workspaceId === workspaceId) await this.closeTab(t.id);
     this.workspaces.delete(workspaceId);

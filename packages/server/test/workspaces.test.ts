@@ -334,6 +334,15 @@ describe("workspaces: adding and removing machines and workspaces", () => {
     expect(execs.at(-1)).toContain("'/home/u/paper'"); // ~ expanded to the remote home, checked there
     await expect(w.newWorkspace("x", "/nope", "ds03")).rejects.toThrow(/does not exist on ds03/);
 
+    // rename, locally and on the remote machine (Herdr's own name, so its TUI shows it too)
+    expect(await w.renameWorkspace(lw.workspaceId, "  my   project ")).toEqual({ workspace: lw.workspaceId, label: "my project" });
+    expect(w.model.workspaces.find((x) => x.id === lw.workspaceId)!.label).toBe("my project");
+    await w.renameWorkspace(rw.workspaceId, "论文");
+    expect(remoteBackend.workspaces.get(rw.workspaceId.slice("ds03~".length))!.label).toBe("论文");
+    expect(w.model.workspaces.find((x) => x.id === rw.workspaceId)!.label).toBe("论文");
+    await expect(w.renameWorkspace(lw.workspaceId, "   ")).rejects.toThrow(/needs a name/);
+    await expect(w.renameWorkspace("w999", "x")).rejects.toThrow(/no Herdr workspace/);
+
     await w.closeWorkspace(rw.workspaceId);
     expect(w.model.workspaces.some((x) => x.id === rw.workspaceId)).toBe(false);
     expect(remoteBackend.workspaces.size).toBe(0);

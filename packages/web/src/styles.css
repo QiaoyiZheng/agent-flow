@@ -650,3 +650,5 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .overlay-card .menu-tab { color: var(--accent); background: var(--accent-dim); }
 .overlay-text { font-size: 13.5px; line-height: 1.55; color: var(--text); margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
 .overlay-text a { color: var(--accent); }
+
+.rename-input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 5px; outline: none; }

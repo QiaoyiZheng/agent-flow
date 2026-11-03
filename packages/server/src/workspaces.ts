@@ -417,6 +417,18 @@ export class Workspaces {
     return { workspaceId: p(r.workspaceId), tabId: p(r.tabId), paneId: p(r.paneId) };
   }
 
+  /** Rename a workspace (in Herdr, so the Herdr TUI shows the new name too). */
+  async renameWorkspace(workspaceId: string, label: string) {
+    if (!this.model.workspaces.some((w) => w.id === workspaceId)) throw new AfError("unknown_workspace", `no Herdr workspace ${workspaceId}`, 404);
+    const name = label.replace(/\s+/g, " ").trim();
+    if (!name) throw new AfError("empty_name", "a workspace needs a name");
+    if (name.length > 80) throw new AfError("long_name", "keep the name under 80 characters");
+    const r = this.route(workspaceId);
+    await r.backend.renameWorkspace(r.raw, name);
+    await this.changed(r.m.meta.id);
+    return { workspace: workspaceId, label: name };
+  }
+
   /** Close a workspace and stop everything running in it. */
   async closeWorkspace(workspaceId: string) {
     if (!this.model.workspaces.some((w) => w.id === workspaceId)) throw new AfError("unknown_workspace", `no Herdr workspace ${workspaceId}`, 404);

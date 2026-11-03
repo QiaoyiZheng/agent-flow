@@ -175,6 +175,7 @@ Panes (everyone; Herdr owns the layout, the web UI shows it):
   af open <path|url> --tab [WORKSPACE]           show it in a new tab
   af split [PANE] [--down] [--agent K]           split a pane (default yours): a shell, or an agent
   af close <pane>
+  af workspace rename <workspace> "<name>"
   af connect <machine>                           connect a saved SSH machine (Herdr's own list); its ids look like ds03~w3:p4
                                                  it stays connected (and reconnects after restarts) until:
   af disconnect <machine>`;
@@ -340,6 +341,11 @@ async function main() {
       if (!pos[0]) die("usage: af connect <machine>   (machines: af ls)");
       const m = await call("POST", "/machine/connect", { machine: pos[0] });
       return console.log(`${m.label}: ${m.state}${m.error ? ` (${m.error})` : ""}`);
+    }
+    case "workspace": {
+      if (pos[0] !== "rename" || !pos[1] || !pos[2]) die('usage: af workspace rename <workspace> "<name>"   (ids: af ls)');
+      const r = await call("POST", "/workspace/rename", { workspace: pos[1], label: pos.slice(2).join(" ") });
+      return console.log(`${r.workspace} is now "${r.label}"`);
     }
     case "disconnect": {
       if (!pos[0]) die("usage: af disconnect <machine>");

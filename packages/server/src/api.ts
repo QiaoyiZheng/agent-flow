@@ -133,6 +133,8 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           await backend.runInPane(shell.paneId, cmd);
           return json({ ok: true, command: cmd, pane: shell.paneId });
         }
+        case "POST /workspace/rename":
+          return json(await w.renameWorkspace(String(body.workspace ?? ""), String(body.label ?? "")));
         case "POST /workspace/close": {
           const id = String(body.workspace ?? "");
           const run = o.runByWorkspace(id);
