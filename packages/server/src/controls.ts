@@ -93,6 +93,23 @@ export function controlSteps(agent: string | undefined, action: string): Control
   return t[action as ControlAction];
 }
 
+/**
+ * Steering: getting a message into the agent's running turn now. Enter while it works does different things
+ * (checked live, claude 2.1.318, codex 0.162.1, omp 18.2.3):
+ *   claude   queues it ("ctrl+enter to send now" under the box); Ctrl+Enter sends it now: a running command
+ *            moves to the background and the message is answered at once
+ *   codex    takes it into the turn, or, while a tool call runs, holds it ("Messages to be submitted after next
+ *            tool call (press esc to interrupt and send immediately)"); Esc then sends it now. Esc with
+ *            nothing held stops the turn, so it is pressed only while that line is on screen.
+ *   omp      sends it now (a running command moves to the background)
+ * After typing the message and Enter: wait for `waiting` on screen, then press `keys`.
+ */
+export const STEER_NOW: Record<string, { waiting: RegExp; keys: string[] } | undefined> = {
+  claude: { waiting: /to send now/i, keys: ["ctrl+enter"] },
+  codex: { waiting: /Messages to be submitted after next tool call/i, keys: ["esc"] },
+  omp: undefined,
+};
+
 /** What the rewind picker of each agent needs from the user next, for the hint the UI shows. */
 export const REWIND_HINT: Record<string, string> = {
   claude: "Pick the message to go back to, then choose Restore conversation.",

@@ -727,7 +727,7 @@ function OutgoingMessage({ o, pane, working, stale, onTerminal }: { o: Outgoing;
       : o.state === "failed"
         ? `not sent: ${o.error}`
         : working
-          ? "steered into the current turn — the agent reads it after its current step"
+          ? "sent now, into the current turn"
           : stale
             ? "sent, but the agent has not picked it up yet"
             : "sent";
@@ -937,6 +937,9 @@ function Patch({ text }: { text: string }) {
 
 let fileSeq = 0;
 
+/** What each agent's own "send now" is (agent-flow presses it for Steer). */
+const STEER_KEY: Record<string, string> = { claude: "claude's Ctrl+Enter", codex: "codex's Esc on a held message", omp: "omp's Enter while it works" };
+
 function Composer({
   paneId,
   agent,
@@ -1092,7 +1095,7 @@ function Composer({
           }}
         />
         {working && (
-          <button className="composer-steer" disabled={!canSend} onClick={() => submit(true)} title={`Steer: send into ${agent}'s current turn now (⌘/Ctrl+Enter)`}>
+          <button className="composer-steer" disabled={!canSend} onClick={() => submit(true)} title={`Steer: send it to ${agent} now, into its current turn, as ${STEER_KEY[agent] ?? "its send now"} does (⌘/Ctrl+Enter)`}>
             Steer
           </button>
         )}
@@ -1138,7 +1141,7 @@ function QueuePanel({ paneId, agent, working, onEdit }: { paneId: string; agent:
             {q.body && <div className="queue-text">{q.body}</div>}
           </div>
           <div className="queue-actions">
-            <button className="queue-steer" disabled={!!busy} onClick={() => act(q, "/queue/steer", (r) => r.sent && outbox.update(paneId, (l) => [...l, { id: ++outSeq, body: q.body, files: q.files, prompt: r.sent, at: Date.now(), state: "sent", steer: true }]))} title={`Send it into ${agent}'s current turn now, instead of after it`}>
+            <button className="queue-steer" disabled={!!busy} onClick={() => act(q, "/queue/steer", (r) => r.sent && outbox.update(paneId, (l) => [...l, { id: ++outSeq, body: q.body, files: q.files, prompt: r.sent, at: Date.now(), state: "sent", steer: true }]))} title={`Send it to ${agent} now, into its current turn (${STEER_KEY[agent] ?? "its send now"})`}>
               Steer
             </button>
             <button disabled={!!busy} onClick={() => act(q, "/queue/remove", () => onEdit(q))} title="Take it out of the queue and back into the message box">

@@ -14,7 +14,7 @@ import { AfError } from "./orchestrator.ts";
 import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
-import { REWIND_HINT, controlSteps, inputText } from "./controls.ts";
+import { REWIND_HINT, STEER_NOW, controlSteps, inputText } from "./controls.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -31,6 +31,8 @@ export interface WorkspacesOptions {
   /** Tell the user about connection trouble. */
   notify?: (level: "error" | "warn" | "info", source: string, text: string, detail?: string) => void;
   now?: () => string;
+  /** Screen checks (150 ms apart) for a steered message to show up as waiting (tests make it short). */
+  steerPolls?: number;
   /** How often remote machines are polled (local: every refresh). */
   remotePollMs?: number;
 }
@@ -510,6 +512,27 @@ export class Workspaces {
     this.promptedAt.set(pane, Date.now());
   }
 
+  /**
+   * Send a message into the agent's running turn now, as its own "send now" does (see STEER_NOW): type it with
+   * Enter, then, when the agent shows it waiting, press its send-now key. An agent that was not working just gets
+   * the message.
+   */
+  async steerNow(pane: string, text: string) {
+    const p = this.pane(pane);
+    await this.prompt(pane, text);
+    const how = STEER_NOW[p.agent ?? ""];
+    if (!how) return { sentNow: true };
+    const r = this.route(pane);
+    for (let i = 0; i < (this.opts.steerPolls ?? 20); i++) {
+      await Bun.sleep(150);
+      if (how.waiting.test(await r.backend.readScreen(r.raw))) {
+        await r.backend.sendKeys(r.raw, how.keys);
+        return { sentNow: true };
+      }
+    }
+    return { sentNow: false }; // taken in already (codex between tool calls), or the agent was not working
+  }
+
   /** Working, asking, or just given a prompt that Herdr has not seen it start on yet. */
   private busy(p: HPane) {
     if (p.agentStatus === "working" || p.agentStatus === "blocked") return true;
@@ -529,6 +552,7 @@ export class Workspaces {
     const text = composePrompt(body, files);
     if (!text) throw new AfError("empty", "nothing to send");
     const busy = this.busy(p) || (this.queue[pane]?.length ?? 0) > 0;
+    if (mode === "steer" && this.busy(p)) return { sent: text, ...(await this.steerNow(pane, text)) };
     if (mode === "queue" || (mode === "auto" && busy)) {
       const item: QueuedMessage = { id: Math.random().toString(36).slice(2, 10), body: body.trim(), files, at: this.now() };
       (this.queue[pane] ??= []).push(item);
@@ -546,10 +570,12 @@ export class Workspaces {
     if (i < 0) throw new AfError("not_queued", "that message is not in the queue any more", 404);
     const item = list[i]!;
     const text = composePrompt(item.body, item.files);
-    await this.prompt(pane, text); // throws (and keeps it queued) if the agent is asking something
+    const p = this.pane(pane);
+    // throws (and keeps it queued) if the agent is asking something
+    const r = this.busy(p) ? await this.steerNow(pane, text) : (await this.prompt(pane, text), { sentNow: true });
     list.splice(i, 1);
     this.saveQueue();
-    return { sent: text };
+    return { sent: text, ...r };
   }
 
   /** Take a message out of the queue (to delete it, or to edit it in the composer). */

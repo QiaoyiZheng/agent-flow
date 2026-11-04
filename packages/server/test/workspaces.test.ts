@@ -527,14 +527,18 @@ describe("the message queue and steering", () => {
     expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first", "second"]);
     expect(backend.prompts).toEqual([]);
 
-    // steer: the second goes into the running turn at once, the first keeps waiting
+    // steer: the second goes into the running turn at once, the first keeps waiting. claude shows a typed message
+    // as waiting ("ctrl+enter to send now"); Ctrl+Enter sends it now
+    (w as any).opts.steerPolls = 3;
+    backend.screens.set(pane, "❯ Press up to edit queued messages\n  ctrl+enter to send now\n");
     const id2 = w.queue[pane]![1]!.id;
-    expect(await w.steer(pane, id2)).toEqual({ sent: "Read these attached files first:\n- /x/a.png\n\nsecond" });
+    expect(await w.steer(pane, id2)).toEqual({ sent: "Read these attached files first:\n- /x/a.png\n\nsecond", sentNow: true });
+    expect(backend.keys.at(-1)).toEqual({ target: pane, keys: ["ctrl+enter"] });
     expect(backend.prompts.map((p) => p.text)).toEqual(["Read these attached files first:\n- /x/a.png\n\nsecond"]);
     expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first"]);
     await expect(w.steer(pane, id2)).rejects.toThrow(/not in the queue/);
     // steer mode sends at once even while working; queue mode holds even when idle
-    expect(await w.send(pane, "now", [], "steer")).toEqual({ sent: "now" });
+    expect(await w.send(pane, "now", [], "steer")).toEqual({ sent: "now", sentNow: true });
     await w.send(pane, "third", []);
     expect(w.queue[pane]!.map((q) => q.body)).toEqual(["first", "third"]);
 
@@ -553,6 +557,29 @@ describe("the message queue and steering", () => {
     await Bun.sleep(10);
     expect(backend.prompts.map((p) => p.text)).toEqual(["first"]);
     expect(w.queue[pane]).toBeUndefined();
+  });
+
+  test("steer uses each agent's own send-now: claude Ctrl+Enter, codex Esc only while it holds the message, omp nothing", async () => {
+    const { backend, w, ws } = await setup();
+    (w as any).opts.steerPolls = 3;
+    const pane = ws.paneId;
+    const steer = async (kind: "claude" | "codex" | "omp", screen: string) => {
+      backend.panes.get(pane)!.agent = { name: kind, kind, args: [], status: "working" };
+      backend.screens.set(pane, screen);
+      await w.refresh();
+      backend.keys = [];
+      backend.prompts = [];
+      const r = await w.send(pane, "look at b.ts too", [], "steer");
+      return { prompts: backend.prompts.map((p) => p.text), keys: backend.keys.map((k) => k.keys.join(" ")), sentNow: (r as any).sentNow };
+    };
+    // screens as the agents draw them (their input box at the bottom)
+    const claudeBox = "\n────────────────────────────────────────\n❯ Press up to edit queued messages\n────────────────────────────────────────\n  ⏵⏵ auto mode on · esc to interrupt";
+    const codexBox = "\n› Ask Codex to do anything\n  GPT-6-Astra xhigh · ~";
+    expect(await steer("claude", `  ctrl+enter to send now\n✳ Tinkering… (31s)${claudeBox}`)).toEqual({ prompts: ["look at b.ts too"], keys: ["ctrl+enter"], sentNow: true });
+    expect(await steer("codex", `• Working (47s • esc to interrupt)\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ look at b.ts too${codexBox}`)).toEqual({ prompts: ["look at b.ts too"], keys: ["esc"], sentNow: true });
+    // codex took it straight into the turn (no held line): Esc would stop the turn, so it is not pressed
+    expect(await steer("codex", `› look at b.ts too\n• Working (6s • esc to interrupt)${codexBox}`)).toEqual({ prompts: ["look at b.ts too"], keys: [], sentNow: false });
+    expect(await steer("omp", " π > working\n╰─ ")).toEqual({ prompts: ["look at b.ts too"], keys: [], sentNow: true });
   });
 
   test("right after a prompt, before Herdr sees the agent start, the next message still waits", async () => {
