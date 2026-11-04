@@ -42,6 +42,8 @@ export interface MenuOption {
   selected: boolean;
   /** Options that turn into a text field (claude "Type something.", codex "No, and tell Codex …"). */
   freeText: boolean;
+  /** Marked as the current choice (claude's /model: "Opus ✔"). */
+  current?: boolean;
   /** Multi-select options: whether the box is ticked (omp also ticks a single-select answer chosen earlier, ◉). Undefined for plain options. */
   checked?: boolean;
   /** Not an answer but a button: claude's multi-select "Next"/"Submit", and "Submit answers"/"Cancel" on its review page. */
@@ -74,7 +76,19 @@ export interface Menu {
    * box on Enter: the answer is typed after that Enter and sent with another one.
    */
   keys?: { tick?: "space"; textAfterEnter?: boolean };
+  /**
+   * A setting under the options, changed with ←/→ (claude's /model: "◉ xHigh effort ←/→ to adjust"). `levels` are
+   * its values in order, when known, with the current one.
+   */
+  setting?: { label: string; value: string; levels?: string[]; note?: string };
+  /** More keys the dialog offers besides Enter (claude's /model: "s to use this session only"). */
+  extraKeys?: { key: string; label: string }[];
 }
+
+/** A setting row changed with ←/→: "◉ xHigh effort ←/→ to adjust" (claude's effort: ○ ◐ ● ◉ ◈). */
+const SETTING_ROW = /^([○◐●◉◈◯◎])\s+(.+?)\s+effort\s+←\/→/i;
+/** claude's effort levels, low to high. */
+const EFFORT_LEVELS = ["Low", "Medium", "High", "xHigh", "Max"];
 
 /** claude's multi-select button under the options. */
 const ACTION = /^(Next|Submit)$/;
@@ -304,15 +318,28 @@ function readAround(lines: string[], p: number, t: number, pointerText: string, 
   const questionEnd = i;
   const below: Row[] = [];
   let hint: string | undefined;
-  for (let j = p + 1; j < lines.length; j++) {
+  let setting: Menu["setting"];
+  const tail: string[] = [];
+  let j = p + 1;
+  for (; j < lines.length; j++) {
     const l = lines[j]!;
     if (blank(l) || SEPARATOR.test(l)) continue;
     const ind = indentOf(l);
-    if (ind < t) {
-      if (HINT.test(l)) hint = l.trim();
-      break;
-    }
+    if (ind < t) break;
     below.push({ kind: ind === t ? "opt" : "desc", text: l.trim(), selected: false });
+  }
+  // after the options: a setting row (←/→), a note about it, the key hint
+  for (; j < lines.length && j < p + 40; j++) {
+    const l = lines[j]!;
+    if (blank(l) || SEPARATOR.test(l)) continue;
+    const st = l.trim().match(SETTING_ROW);
+    if (st) setting = { label: "effort", value: st[2]!.trim(), levels: EFFORT_LEVELS.some((e) => e.toLowerCase() === st[2]!.trim().toLowerCase()) ? EFFORT_LEVELS : undefined };
+    else if (HINT.test(l)) {
+      hint = l.trim();
+      break;
+    } else if (setting) setting.note = [setting.note, l.trim()].filter(Boolean).join(" ");
+    else tail.push(l.trim());
+    if (!setting && !HINT.test(l) && tail.length > 3) break;
   }
   // descriptions above the first option belong to nothing: the region started mid-description
   while (above[0]?.kind === "desc") above.shift();
@@ -400,7 +427,35 @@ function readAround(lines: string[], p: number, t: number, pointerText: string, 
     for (const o of options) o.action = /^submit answers$/i.test(o.label) ? "primary" : /^cancel$/i.test(o.label) ? "secondary" : o.action;
     tabs?.forEach((x) => (x.current = !!x.submit));
   }
-  return { question, code: code.length ? code : undefined, options, hint, multiSelect, ...(tabs?.length ? { tabs } : {}), ...(review ? { review } : {}) };
+  // rows drawn as two columns ("Opus ✔                 Opus 5.5 · Best for…"): the description column starts at
+  // the same place in every row; the longest name may leave only two spaces before it
+  const cols = options.map((o) => {
+    const m = o.label.match(/^(.+?)\s{2,}(\S.*)$/);
+    return m ? m[1]!.length + (o.label.length - m[1]!.length - m[2]!.length) : -1;
+  });
+  const col = cols.filter((c) => c > 0).sort((a, b) => a - b).at(-1);
+  const twoColumns = col !== undefined && options.length > 1 && cols.every((c) => c === col || c < 0) && cols.filter((c) => c === col).length >= Math.max(2, options.length - 1);
+  for (const o of options) {
+    if (twoColumns && !o.description && o.label.length > col! && /\s{2}$/.test(o.label.slice(0, col))) {
+      o.description = o.label.slice(col).trim();
+      o.label = o.label.slice(0, col).trim();
+    }
+    // "✔" after the name: the current choice
+    if (/\s✔$/.test(o.label)) (o.label = o.label.replace(/\s✔$/, "")), (o.current = true);
+  }
+  // keys the hint names besides Enter / Esc / arrows ("s to use this session only")
+  const extraKeys = [...(hint ?? "").matchAll(/(?:^|·)\s*([a-z])\s+to\s+([^·]+)/gi)].map((m) => ({ key: m[1]!.toLowerCase(), label: m[2]!.trim() }));
+  return {
+    question,
+    code: code.length ? code : undefined,
+    options,
+    hint,
+    multiSelect,
+    ...(tabs?.length ? { tabs } : {}),
+    ...(review ? { review } : {}),
+    ...(setting ? { setting } : {}),
+    ...(extraKeys.length ? { extraKeys } : {}),
+  };
 }
 
 /** Keys that move the highlight from the selected option to `target` and press Enter. */

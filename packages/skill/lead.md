@@ -9,7 +9,7 @@ You are the lead agent of an agent-flow run. Your name is in $AF_AGENT and your 
 - Each run of a node is an instance: code#1, code#2, ... Accepted instances never change.
 
 ## Build the graph
-  af graph add <id> --kind codex|claude|omp --task "<task>" [--after a,b] [--on <outcome>] [--shared] [--hold] [--auto-accept]
+  af graph add <id> --kind codex|claude|omp|gemini --task "<task>" [--after a,b] [--on <outcome>] [--shared] [--hold] [--auto-accept]
   af graph add <id> --agent <name> --task "<task>"      # queue on a named agent (create it with af spawn)
   af graph link <from> <to> [--on <outcome>] [--max N]  # an edge that closes a cycle needs --on; --max caps the loop (default 3)
   af graph edit <id> --task "<task>"    af graph rm <id>    af graph unlink <from> <to>    af graph max <from> <to> <N>
@@ -47,7 +47,7 @@ If a merge conflicts, you get a message. Reject with instructions or add a node 
 
 ## Talk
   af send <agent> "<text>"    af inbox    af reply <msg-id> "<text>"
-  af spawn <name> --kind claude|codex|omp [--role "<role>"]
+  af spawn <name> --kind claude|codex|omp|gemini [--role "<role>"]
 
 ## Panes and windows
 The user sees Herdr's workspaces, tabs and split panes in the web UI. You can arrange them:
@@ -56,7 +56,7 @@ The user sees Herdr's workspaces, tabs and split panes in the web UI. You can ar
   af open <path|url> [--down]             # show a file, folder or page in a new pane next to yours
   af open <path|url> --of <pane>          # ... next to another pane, e.g. beside a worker
   af open <path|url> --in <viewer pane>   # ... in an existing viewer pane (reuse it, do not pile up panes)
-  af split [<pane>] [--down] [--agent claude|codex|omp]   # a shell, or a helper agent joining this run
+  af split [<pane>] [--down] [--agent claude|codex|omp|gemini]   # a shell, or a helper agent joining this run
   af close <pane>
 Show the user what matters (a diff summary, a report, a key file) instead of describing it. A finished document for the user: af deliver <file> --title "<what>" (preview next to you, one click to open it in Obsidian / VS Code / its app). The herdr CLI also works for anything else (herdr pane move, herdr tab create, ...).
 

@@ -63,9 +63,9 @@ export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, co
       // Gemini CLI has no flag that adds to its system prompt (GEMINI_SYSTEM_MD replaces all of it, and goes stale
       // with every update), so the protocol is its first message: -i runs it and stays interactive, and "@<file>"
       // is Gemini's own way of putting a file's text into a message (the folder must be in its workspace).
-      // --session-id: lets agent-flow find the conversation (~/.gemini/tmp/<project>/chats/session-*-<id8>.jsonl).
+      // No --session-id: answering Gemini's folder-trust dialog restarts it with the same arguments, and with a fixed
+      // session id that restart fails ("already exists") and Gemini exits. The conversation is found by folder.
       return [
-        ...(session ? ["--session-id", session] : []),
         "--include-directories",
         dirname(protocolFile),
         "-i",

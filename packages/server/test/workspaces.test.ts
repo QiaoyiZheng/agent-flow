@@ -419,6 +419,24 @@ describe("menus: an agent's question answered from the UI", () => {
   });
 });
 
+describe("choosing in claude's /model picker", () => {
+  test("arrows to the model, ←/→ to the effort, then Enter or the dialog's own key; unknown keys and levels refused", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    await w.refresh();
+    const rows = ["Default (recommended)  Use the default model", "Opus ✔                 Opus 5.5 · Best", "Fable                  Fable 5.1 · Most", "Sonnet                 Sonnet 5.5 · Efficient"];
+    backend.screens.set(ws.paneId, ["  Select model", "", ...rows.map((r, i) => `  ${i === 1 ? "❯" : " "} ${i + 1}. ${r}`), "", "  ◉ xHigh effort ←/→ to adjust", "", "  Enter to set as default · s to use this session only · Esc to cancel"].join("\n"));
+    backend.keys = [];
+    await w.choose(ws.paneId, 3, "Sonnet", undefined, { key: "s", setting: "High" });
+    expect(backend.keys.map((k) => k.keys.join(" "))).toEqual(["left", "down down s"]);
+    backend.keys = [];
+    await w.choose(ws.paneId, 0, "Default (recommended)");
+    expect(backend.keys.map((k) => k.keys.join(" "))).toEqual(["up enter"]);
+    await expect(w.choose(ws.paneId, 3, "Sonnet", undefined, { key: "q" })).rejects.toThrow(/does not offer/);
+    await expect(w.choose(ws.paneId, 3, "Sonnet", undefined, { setting: "Ultra" })).rejects.toThrow(/not one of/);
+  });
+});
+
 describe("composer: prompt with attachments, keys", () => {
   test("attachments are saved under home and listed before the message; keys are validated", async () => {
     const { home, backend, w, ws } = await setup();

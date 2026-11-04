@@ -557,3 +557,45 @@ describe("omp dialogs (oh-my-pi 18.2.3): a rounded box in place of the input box
     expect([o.hint, o.enter, o.esc]).toEqual(["Enter submit · ↑/↓ scroll · Esc cancel", true, true]);
   });
 });
+
+describe("claude's /model picker", () => {
+  const RULE = "─".repeat(100);
+  const screen = (at: number, effort = "◉ xHigh effort ←/→ to adjust", current = 2) =>
+    [
+      "❯ /model",
+      RULE,
+      "  Select model",
+      "  Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.",
+      "",
+      ...[
+        "Default (recommended)  Use the default model (currently Opus 5.5) · $4/$20 per Mtok",
+        `Opus${current === 2 ? " ✔" : "  "}                 Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok`,
+        "Fable                  Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per Mtok",
+        `Sonnet${current === 4 ? " ✔" : "  "}               Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok`,
+        "Haiku                  Haiku 5.5 · Fastest for quick answers · $0.10/$0.50 per Mtok",
+      ].map((r, i) => `  ${at === i + 1 ? "❯" : " "} ${i + 1}. ${r}`),
+      "",
+      `  ${effort}`,
+      ...(effort.startsWith("◈") ? ["  May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks."] : []),
+      "",
+      "  Enter to set as default · s to use this session only · Esc to cancel",
+    ].join("\n");
+
+  test("names and descriptions apart, the current model marked, the effort setting and the session-only key read", () => {
+    const m = parseMenu(screen(2), "claude")!;
+    expect(m.options.map((o) => [o.label, o.description?.split(" · ")[0], !!o.current])).toEqual([
+      ["Default (recommended)", "Use the default model (currently Opus 5.5)", false],
+      ["Opus", "Opus 5.5", true],
+      ["Fable", "Fable 5.1", false],
+      ["Sonnet", "Sonnet 5.5", false],
+      ["Haiku", "Haiku 5.5", false],
+    ]);
+    expect(m.question).toEqual(["Select model", expect.stringContaining("Switch between Claude models")]);
+    expect(m.setting).toEqual({ label: "effort", value: "xHigh", levels: ["Low", "Medium", "High", "xHigh", "Max"] });
+    expect(m.extraKeys).toEqual([{ key: "s", label: "use this session only" }]);
+    expect(m.hint).toContain("Enter to set as default");
+    const max = parseMenu(screen(4, "◈ Max effort ←/→ to adjust", 4), "claude")!;
+    expect(max.setting).toMatchObject({ value: "Max", note: expect.stringContaining("excessive tokens") });
+    expect(max.options.find((o) => o.current)?.label).toBe("Sonnet");
+  });
+});

@@ -1170,6 +1170,7 @@ interface MenuOption {
   freeText: boolean;
   checked?: boolean;
   action?: "primary" | "secondary";
+  current?: boolean;
 }
 interface AgentMenu {
   question: string[];
@@ -1177,6 +1178,8 @@ interface AgentMenu {
   options: MenuOption[];
   tabs?: { label: string; done: boolean; submit?: boolean; current?: boolean }[];
   review?: boolean;
+  setting?: { label: string; value: string; levels?: string[]; note?: string };
+  extraKeys?: { key: string; label: string }[];
   hint?: string;
   multiSelect: boolean;
 }
@@ -1231,6 +1234,9 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
     if (focused && typing === undefined) box.current?.focus();
   }, [focused, typing]);
 
+  // a ←/→ setting (claude's effort), and a second way to confirm ("s to use this session only")
+  const [setting, setSetting] = useState(menu.setting?.value);
+  const [via, setVia] = useState<string | undefined>(undefined);
   const choose = (o: MenuOption, withText?: string) => {
     if (o.freeText && withText === undefined) {
       setTyping(o.index);
@@ -1238,7 +1244,7 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
     }
     setBusy(true);
     setError(undefined);
-    api("POST", "/pane/choose", { pane, index: o.index, label: o.label, text: withText })
+    api("POST", "/pane/choose", { pane, index: o.index, label: o.label, text: withText, key: via, setting: setting !== menu.setting?.value ? setting : undefined })
       .catch((e) => setError(e.message))
       .finally(() => setBusy(false));
   };
@@ -1314,7 +1320,10 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
               <span className="menu-num">{o.number ?? o.index + 1}</span>
               {o.checked !== undefined && <span className={`menu-check ${o.checked ? "on" : ""}`}>{o.checked ? "✓" : ""}</span>}
               <span className="menu-label">
-                {o.label}
+                <span>
+                  {o.label}
+                  {o.current && <span className="menu-current">current</span>}
+                </span>
                 {o.description && <span className="menu-desc">{o.description}</span>}
               </span>
               {o.freeText && <span className="menu-type">type…</span>}
@@ -1326,6 +1335,42 @@ function MenuCard({ pane, menu, focused }: { pane: string; menu: AgentMenu; focu
         <pre className="menu-preview">{menu.options[hi]?.preview ?? "(no preview for this option)"}</pre>
       )}
       </div>
+      {(menu.setting || menu.extraKeys?.length) && (
+        <div className="menu-extras">
+          {menu.setting && (
+            <div className="menu-setting">
+              <span className="ms-label">{menu.setting.label[0]!.toUpperCase() + menu.setting.label.slice(1)}</span>
+              {menu.setting.levels ? (
+                <span className="seg">
+                  {menu.setting.levels.map((l) => (
+                    <button key={l} className={l.toLowerCase() === setting?.toLowerCase() ? "on" : ""} onClick={() => setSetting(l)} disabled={busy}>
+                      {l}
+                    </button>
+                  ))}
+                </span>
+              ) : (
+                <span className="ms-value">{menu.setting.value}</span>
+              )}
+            </div>
+          )}
+          {menu.setting?.note && setting === menu.setting.value && <div className="menu-desc">{menu.setting.note}</div>}
+          {menu.extraKeys?.length ? (
+            <div className="menu-setting">
+              <span className="ms-label">Apply</span>
+              <span className="seg">
+                <button className={!via ? "on" : ""} onClick={() => setVia(undefined)} disabled={busy} title="Enter">
+                  {(menu.hint?.match(/Enter to ([^·]+)/i)?.[1] ?? "as chosen").trim()}
+                </button>
+                {menu.extraKeys.map((k) => (
+                  <button key={k.key} className={via === k.key ? "on" : ""} onClick={() => setVia(k.key)} disabled={busy} title={`the "${k.key}" key`}>
+                    {k.label}
+                  </button>
+                ))}
+              </span>
+            </div>
+          ) : null}
+        </div>
+      )}
       {actions.length > 0 && (
         <div className="menu-actions">
           {actions.map((o) => (

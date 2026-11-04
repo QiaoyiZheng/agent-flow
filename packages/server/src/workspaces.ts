@@ -741,13 +741,26 @@ export class Workspaces {
    * still match, so a menu that changed in the meantime is not answered by mistake. `text` fills in a
    * free-text option ("Type something.", "No, and tell Claude what to do differently").
    */
-  async choose(pane: string, index: number, label: string, text?: string) {
+  /**
+   * Pick option `index`. `key` confirms with another key the dialog names instead of Enter (claude's /model: "s to
+   * use this session only"); `setting` first moves the dialog's ←/→ setting to that value (claude's effort).
+   */
+  async choose(pane: string, index: number, label: string, text?: string, opts: { key?: string; setting?: string } = {}) {
     const menu = await this.menu(pane);
     if (!menu) throw new AfError("no_menu", "the agent is not showing a menu any more", 409);
     const opt = menu.options[index];
     if (!opt || (label && opt.label !== label)) throw new AfError("menu_changed", "the menu changed; look again", 409);
-    const keys = keysToChoose(menu, index);
+    if (opts.key && !menu.extraKeys?.some((k) => k.key === opts.key)) throw new AfError("bad_key", `the dialog does not offer the key ${opts.key}`);
     const r = this.route(pane);
+    if (opts.setting && menu.setting?.levels && opts.setting !== menu.setting.value) {
+      const from = menu.setting.levels.findIndex((l) => l.toLowerCase() === menu.setting!.value.toLowerCase());
+      const to = menu.setting.levels.findIndex((l) => l.toLowerCase() === opts.setting!.toLowerCase());
+      if (from < 0 || to < 0) throw new AfError("bad_setting", `${opts.setting} is not one of ${menu.setting.levels.join(", ")}`);
+      await r.backend.sendKeys(r.raw, Array(Math.abs(to - from)).fill(to > from ? "right" : "left"));
+      await Bun.sleep(120);
+    }
+    const keys = keysToChoose(menu, index);
+    if (opts.key) keys.splice(keys.length - 1, 1, opts.key); // the arrows, then the dialog's own key instead of Enter
     if (text?.trim() && opt.freeText) {
       if (keys.length > 1) await r.backend.sendKeys(r.raw, keys.slice(0, -1));
       await r.backend.sendText(r.raw, text.replace(/[\r\n]+/g, " ").trim());

@@ -211,7 +211,12 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           return json({ menu: menu ?? null, overlay: st.overlay ?? null });
         }
         case "POST /pane/choose":
-          return json(await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined));
+          return json(
+            await w.choose(String(body.pane ?? ""), Number(body.index), String(body.label ?? ""), body.text ? String(body.text) : undefined, {
+              key: body.key ? String(body.key) : undefined,
+              setting: body.setting ? String(body.setting) : undefined,
+            }),
+          );
         // documents handed over by agents, and opening files in VS Code / Obsidian / their app
         case "POST /deliver": {
           const pane = String(body.pane ?? body.callerPane ?? "") || undefined;
@@ -294,16 +299,19 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
   }
   const { paneId } = await w.split(pane, direction);
   const name = `${kind}-${paneId.replace(/[^a-z0-9]/gi, "").toLowerCase()}`.slice(0, 32);
+  // claude takes a session id: agent-flow then knows which conversation file is this pane's. (gemini does too, but
+  // restarts with the same arguments after its folder-trust dialog, and then fails on the id: it is found by folder.)
   const session = kind === "claude" ? crypto.randomUUID() : undefined;
   if (session) w.rememberSession(paneId, session);
   const route = w.route(paneId);
-  const args = session
-    ? route.local
-      ? claudeExtraArgs(o.opts.config, session)
-      : ["--session-id", session]
-    : kind === "codex"
-      ? ["-c", "check_for_update_on_startup=false", "--no-alt-screen"]
-      : [];
+  const args =
+    kind === "claude" && session
+      ? route.local
+        ? claudeExtraArgs(o.opts.config, session)
+        : ["--session-id", session]
+      : kind === "codex"
+          ? ["-c", "check_for_update_on_startup=false", "--no-alt-screen"]
+          : [];
   const r = await route.backend.startAgent(name, kind, route.raw, args);
   await w.refresh();
   return { paneId, agent: name, started: r.ok };

@@ -574,6 +574,26 @@ function commandNotice(text: string, at: string | undefined, ctx: ParseCtx, s: S
   return ops;
 }
 
+/** Model names as /model prints them ("Sonnet 5.5"), as the footer shows them (the id's form). */
+const modelId = (name: string) => `claude-${name.trim().toLowerCase().replace(/\s+/g, "-").replace(/\./g, "-")}`;
+
+/**
+ * What /model and /effort changed, from their output: the footer follows at once (the transcript records the
+ * model only with the next reply). "Set model to `Sonnet 5.5` for this session only with `xhigh` effort",
+ * "Set model to Opus 5.5", "Kept model as `Sonnet 5.5`", "Set effort level to max (this session only): …".
+ */
+function settingChange(out: string, s: State): { ops: ChatOp[]; line?: string } {
+  const plain = out.replace(/`/g, "");
+  const m = plain.match(/^(?:Set model to|Kept model as) ([^\n]+?)(?: and saved as your default.*| for this session only.*)?(?: with (\S+) effort)?$/m);
+  if (m) {
+    const effort = plain.match(/with (\S+) effort/)?.[1];
+    return { ops: meta(s, { model: modelId(m[1]!), effort }), line: plain.split("\n")[0] };
+  }
+  const e = plain.match(/^Set effort level to (\S+)/m);
+  if (e) return { ops: meta(s, { effort: e[1]! }), line: plain.split(":")[0] };
+  return { ops: [] };
+}
+
 /** A command's output: folded under the command's own notice when that came just before. */
 function commandOutput(t: string, run: any, at: string | undefined, ctx: ParseCtx, s: State): ChatOp[] {
   const out = stripAnsi(tag(t, "local-command-stdout") ?? tag(t, "local-command-stderr") ?? t).trim();
@@ -581,6 +601,12 @@ function commandOutput(t: string, run: any, at: string | undefined, ctx: ParseCt
   const prev = s.command;
   s.command = undefined;
   if (!out) return [];
+  // /model, /effort: the change itself is the line (not a folded "/model"), and the footer follows
+  const change = tone ? { ops: [] as ChatOp[] } : settingChange(out, s);
+  if (change.line) {
+    const cut = prev && prev.key === s.lastKey ? [{ op: "remove" as const, keys: [prev.key] }] : [];
+    return [...cut, ...change.ops, ...emit(ctx, s, notice(change.line), at)];
+  }
   if (prev && prev.key === s.lastKey) return [{ op: "remove", keys: [prev.key] }, ...emit(ctx, s, notice(prev.text, { tone, detail: out }), at)];
   const cmd = run && typeof run.command === "string" ? `/${run.command}${run.args ? ` ${str(run.args)}` : ""}` : "Command output";
   return emit(ctx, s, notice(cmd, { tone, detail: out }), at);

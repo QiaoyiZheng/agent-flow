@@ -456,6 +456,7 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
                 <option value="claude">claude</option>
                 <option value="codex">codex</option>
                 <option value="omp">omp</option>
+                <option value="gemini">gemini</option>
               </select>
             </div>
             {!wf && (

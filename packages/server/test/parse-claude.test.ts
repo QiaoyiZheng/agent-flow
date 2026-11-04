@@ -462,3 +462,21 @@ describe("claude rewinds (Esc Esc, /rewind)", () => {
     expect(shown([a("20", "19", "late reply"), u("21", "20", "more"), a("22", "21", "ok")])).toEqual(["late reply", "more", "ok"]);
   });
 });
+
+describe("claude /model and /effort", () => {
+  const cmd = (name: string, out: string) => [
+    { type: "user", message: { role: "user", content: `<command-name>/${name}</command-name>\n<command-message>${name}</command-message>\n<command-args></command-args>` } },
+    { type: "user", message: { role: "user", content: `<local-command-stdout>${out}</local-command-stdout>` } },
+  ];
+  test("the change is the line, and the footer follows before the next reply", () => {
+    const ctx = { n: 0 };
+    const ops = [...cmd("model", "Set model to `Sonnet 5.5` for this session only with `xhigh` effort"), ...cmd("effort", "Set effort level to max (this session only): Maximum capability with deepest reasoning."), ...cmd("model", "Kept model as `Sonnet 5.5`")].flatMap((l) => parseClaude(l, ctx) as any[]);
+    const view = new Map<string, string>();
+    for (const o of ops) {
+      if (o.op === "add") view.set(o.entry.key, o.entry.block.text);
+      if (o.op === "remove") for (const k of o.keys) view.delete(k);
+    }
+    expect([...view.values()]).toEqual(["Set model to Sonnet 5.5 for this session only with xhigh effort", "Set effort level to max (this session only)", "Kept model as Sonnet 5.5"]);
+    expect(ops.filter((o) => o.op === "meta").map((o) => o.meta)).toEqual([{ model: "claude-sonnet-5-5", effort: "xhigh" }, { effort: "max" }]);
+  });
+});

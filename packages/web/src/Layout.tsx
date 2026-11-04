@@ -76,7 +76,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   const runAgent = ctx.runAgents.get(paneId);
   const [menu, setMenu] = useState(false);
   const focused = ctx.focused === paneId;
-  const renderable = !view && ["claude", "codex", "omp"].includes(p?.agent ?? runAgent?.kind ?? "");
+  const renderable = !view && ["claude", "codex", "omp", "gemini"].includes(p?.agent ?? runAgent?.kind ?? "");
   const [raw, setRaw] = useState(() => localStorage.getItem(`af-raw:${paneId}`) === "1");
   const toggleRaw = () => {
     localStorage.setItem(`af-raw:${paneId}`, raw ? "0" : "1");
@@ -156,7 +156,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
           </button>
           {menu && (
             <div className="menu" onMouseLeave={() => setMenu(false)}>
-              {(["claude", "codex", "omp"] as AgentKind[]).map((k) => (
+              {(["claude", "codex", "omp", "gemini"] as AgentKind[]).map((k) => (
                 <div key={k} className="item" onClick={() => (setMenu(false), split("right", { kind: "agent", agentKind: k }))}>
                   <span style={{ color: kindColor(k) }}>●</span> {k} agent, right
                 </div>

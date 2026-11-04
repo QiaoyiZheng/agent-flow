@@ -146,7 +146,7 @@ const HELP = `af — agent-flow CLI
 
 Run and server:
   af server [--port N]                      start the agent-flow server
-  af up [team] [--kind claude|codex|omp] [--prompt "..."] [--cwd DIR]
+  af up [team] [--kind claude|codex|omp|gemini] [--prompt "..."] [--cwd DIR]
   af up --workflow <id> --goal "..."         start from a workflow template (af workflow list)
   af here                                   make this session (any claude/codex/omp pane) the lead of a run here
   af graph apply <workflow> --goal "..."    add a template's nodes to the current run
@@ -220,7 +220,7 @@ async function main() {
     }
     case "spawn": {
       await resolveRun(flags.run);
-      if (!pos[0] || typeof flags.kind !== "string") die("usage: af spawn <name> --kind claude|codex|omp [--role ...]");
+      if (!pos[0] || typeof flags.kind !== "string") die("usage: af spawn <name> --kind claude|codex|omp|gemini [--role ...]");
       const a = await call("POST", "/spawn", { name: pos[0], kind: flags.kind, role: flags.role });
       return console.log(`spawned ${a.name} (${a.kind})`);
     }
@@ -357,7 +357,7 @@ async function main() {
     }
     case "split": {
       const pane = pos[0] ?? PANE;
-      if (!pane) die("usage: af split [<pane>] [--down] [--agent claude|codex|omp]");
+      if (!pane) die("usage: af split [<pane>] [--down] [--agent claude|codex|omp|gemini]");
       const r = await call("POST", "/pane/split", { pane, direction: flags.down ? "down" : "right", kind: typeof flags.agent === "string" ? "agent" : "shell", agentKind: flags.agent });
       return console.log(`new pane ${r.paneId}${r.agent ? ` running ${r.agent}` : ""}`);
     }
