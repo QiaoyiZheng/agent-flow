@@ -53,12 +53,26 @@ export function send(msg: ClientPush) {
   else queue.push(s);
 }
 
+/**
+ * Views with something open on the server (a chat, a terminal stream) re-open it when the connection comes back:
+ * after a server restart the new connection has none of them, and a dead server never says the old ones ended.
+ */
+const reconnectSubs = new Set<() => void>();
+export function onReconnect(fn: () => void) {
+  reconnectSubs.add(fn);
+  return () => reconnectSubs.delete(fn);
+}
+let everOpened = false;
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${TOKEN}`);
   ws.onopen = () => {
     set({ connected: true });
     if (state.runId) send({ type: "watch", run: state.runId });
+    // re-open chats and terminal streams first: keys typed during the outage need their terminal open again
+    if (everOpened) for (const f of [...reconnectSubs]) f();
+    everOpened = true;
     queue.forEach((m) => ws!.send(m));
     queue = [];
   };

@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { onTerm, send } from "./store";
+import { onReconnect, onTerm, send } from "./store";
 
 const THEME = {
   background: "#0b0c0e",
@@ -91,6 +91,9 @@ export function Terminal({
     let retry: ReturnType<typeof setTimeout> | undefined;
     const open = () => send({ type: "term.open", id, paneId, mode, cols: term.cols, rows: term.rows });
     open();
+    // the server restarted: it never said the stream ended, so open it again when the connection is back
+    // (reset first: the new stream starts with a whole screen, and the old one could leave rows behind)
+    const offReconnect = onReconnect(() => (setStatus("reconnecting"), clearTimeout(retry), term.reset(), open()));
     termRef.current = term;
     follow.current = () => {
       const st = stripRef.current;
@@ -146,6 +149,7 @@ export function Terminal({
 
     return () => {
       clearTimeout(retry);
+      offReconnect();
       ro.disconnect();
       el.removeEventListener("wheel", onWheel);
       input.dispose();

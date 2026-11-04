@@ -5,7 +5,7 @@
 
 import { memo, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ChatBlock, ChatEntry, ChatMeta, ChatOp, ChatSource, QueuedMessage } from "@af/core";
-import { TOKEN, api, failed, fileUrl, notify, onChat, openIn, send, useStore } from "./store";
+import { TOKEN, api, failed, fileUrl, notify, onChat, onReconnect, openIn, send, useStore } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
 import { basename } from "./view";
@@ -234,8 +234,11 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
     });
     chatId.current = id;
     send({ type: "chat.open", id, paneId });
+    // the server restarted (or the connection dropped): open it again; the server answers with the whole log
+    const offR = onReconnect(() => send({ type: "chat.open", id, paneId }));
     return () => {
       off();
+      offR();
       send({ type: "chat.close", id });
     };
   }, [paneId]);
@@ -1501,6 +1504,35 @@ function OverlayCard({ pane, overlay, onTerminal }: { pane: string; overlay: Age
       .catch(failed("Could not send the key"))
       .finally(() => setBusy(false));
   };
+  // gemini asking for an API key: it was started in a terminal opened before the gateway settings existed
+  if (overlay.lines.some((l) => /Enter Gemini API Key/i.test(l)))
+    return (
+      <div className="menu-card overlay-card">
+        <div className="menu-tab">Gemini started without its gateway settings</div>
+        <div className="overlay-text">
+          <div>This Gemini is asking for an API key because the terminal it runs in was opened before the gateway was set up, so ~/.gemini/gateway.env (the key and the gateway address) was never loaded there.</div>
+          <div>&nbsp;</div>
+          <div>Restart it here with the settings loaded (same arguments), or start Gemini in a new tab.</div>
+        </div>
+        <div className="menu-foot">
+          <button
+            className="btn primary"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              api("POST", "/pane/gemini-relaunch", { pane })
+                .catch(failed("Could not restart Gemini"))
+                .finally(() => setBusy(false));
+            }}
+          >
+            {busy ? "Restarting…" : "Restart Gemini with the gateway"}
+          </button>
+          <button className="c-more" onClick={onTerminal}>
+            show terminal
+          </button>
+        </div>
+      </div>
+    );
   return (
     <div className="menu-card overlay-card">
       <div className="menu-tab">The agent is showing this in its terminal</div>
