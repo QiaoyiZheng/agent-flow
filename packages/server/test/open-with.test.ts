@@ -93,3 +93,25 @@ describe("documents an agent changed during its turn", () => {
     expect(changedDocuments(root, since).map((p) => p.slice(root.length + 1)).sort()).toEqual(["docs/report.md", "docs/table.xlsx"]);
   });
 });
+
+import { deliverSkillText, installSkill, skillText } from "../src/skills.ts";
+import { readFileSync } from "node:fs";
+
+describe("skills written on server start", () => {
+  test("agent-flow and deliver-document, for each installed agent (claude, codex, gemini), with this server's af path", () => {
+    const home = tmp();
+    for (const d of [".claude", ".codex", ".gemini"]) mkdirSync(join(home, d));
+    const files = installSkill("/srv/af/bin/af", home);
+    expect(files).toEqual([".claude", ".codex", ".gemini"].flatMap((d) => [join(home, d, "skills/agent-flow/SKILL.md"), join(home, d, "skills/deliver-document/SKILL.md")]));
+    expect(readFileSync(files[0]!, "utf8")).toStartWith("---\nname: agent-flow\ndescription: ");
+    const deliver = readFileSync(files[1]!, "utf8");
+    expect(deliver).toStartWith("---\nname: deliver-document\ndescription: ");
+    expect(deliver).toContain("/srv/af/bin/af deliver <file>");
+    expect(deliver).toContain("a script"); // written by a script counts too
+    for (const t of [skillText("X"), deliverSkillText("X")]) expect(t).not.toContain("undefined");
+    // an agent that is not installed gets nothing
+    const bare = tmp();
+    mkdirSync(join(bare, ".claude"));
+    expect(installSkill("/af", bare).map((f) => f.slice(bare.length))).toEqual(["/.claude/skills/agent-flow/SKILL.md", "/.claude/skills/deliver-document/SKILL.md"]);
+  });
+});
