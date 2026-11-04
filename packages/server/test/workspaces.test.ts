@@ -8,7 +8,7 @@ import { handOver, makeHandler, watchDocuments } from "../src/api.ts";
 import { makeTranscriptAccess } from "../src/access.ts";
 import { commitAll, git } from "../src/git.ts";
 import { Orchestrator } from "../src/orchestrator.ts";
-import { Workspaces } from "../src/workspaces.ts";
+import { Workspaces, workspaceStatus } from "../src/workspaces.ts";
 import { FakeBackend } from "./fake.ts";
 
 const dirs: string[] = [];
@@ -85,6 +85,28 @@ describe("workspaces: mirror Herdr", () => {
     await third.start(60_000);
     expect(third.model.panes.find((p) => p.id === ws.paneId)!.statusAt! > t2).toBe(true);
     third.stop?.();
+  });
+
+  test("a workspace is working while any agent in it works, also when another finished (Herdr's own status says done)", async () => {
+    const { backend, w, ws } = await setup();
+    const right = await backend.splitPane(ws.paneId, "right", undefined, {});
+    const other = await backend.createTab(ws.workspaceId, "/tmp", "shell", {});
+    await backend.startAgent("left", "claude", ws.paneId, []);
+    await backend.startAgent("right", "claude", right.paneId, []);
+    await backend.startAgent("omp", "omp", other.paneId, []);
+    const status = async () => (await w.refresh(), w.model.workspaces.find((x) => x.id === ws.workspaceId)!.agentStatus);
+    backend.set("left", "idle");
+    backend.set("right", "idle");
+    backend.set("omp", "done");
+    expect(await status()).toBe("done");
+    backend.set("right", "working"); // lxc: the right-hand claude works, the omp in another tab finished earlier
+    expect(await status()).toBe("working");
+    backend.set("left", "blocked");
+    expect(await status()).toBe("blocked");
+    backend.set("left", "idle");
+    backend.set("right", "done");
+    expect(await status()).toBe("done");
+    expect(workspaceStatus([], "unknown")).toBe("unknown"); // no agents: Herdr's value
   });
 
   test("only tabs whose layout changed are exported again", async () => {

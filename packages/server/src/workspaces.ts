@@ -65,6 +65,22 @@ interface Machine {
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
 
+/**
+ * A workspace's status from its agents, most urgent first: asking (a question on screen, also one Herdr misses) >
+ * working > done > idle. Herdr's own workspace status ranks "done" (finished, not looked at yet) above "working", so
+ * a workspace with one finished agent showed "done" while another agent in it was still working.
+ */
+const STATUS_RANK = ["blocked", "working", "done", "idle", "unknown"];
+export function workspaceStatus(panes: HPane[], herdrStatus: string) {
+  const statuses = panes.filter((p) => p.agent).map((p) => (p.asking ? "blocked" : p.agentStatus));
+  if (!statuses.length) return herdrStatus;
+  const rank = (st: string) => {
+    const i = STATUS_RANK.indexOf(st);
+    return i < 0 ? STATUS_RANK.length : i;
+  };
+  return statuses.sort((a, b) => rank(a) - rank(b))[0]!;
+}
+
 export class Workspaces {
   model: HerdrModel = { machines: [], workspaces: [], tabs: [], panes: [], layouts: {} };
   views: Record<string, ViewRec> = {};
@@ -341,6 +357,7 @@ export class Workspaces {
       m.asking = next;
       if (changed) {
         m.panes = m.panes.map((x) => ({ ...x, asking: next.get(x.id) || undefined }));
+        m.workspaces = m.workspaces.map((ws) => ({ ...ws, agentStatus: workspaceStatus(m.panes.filter((x) => x.workspaceId === ws.id), ws.agentStatus) }));
         this.publish();
       }
     } finally {
@@ -396,6 +413,7 @@ export class Workspaces {
         }
       if (changed) this.saveStatus(key, since);
       m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at, asking: m.asking?.get(p(x.id)) || undefined }));
+      m.workspaces = m.workspaces.map((ws) => ({ ...ws, agentStatus: workspaceStatus(m.panes.filter((x) => x.workspaceId === ws.id), ws.agentStatus) }));
       void this.checkAsking(m);
       m.layouts = layouts;
       if (m.meta.local && m.failedPolls > 0) this.opts.notify?.("info", "herdr", "Herdr is responding again");
