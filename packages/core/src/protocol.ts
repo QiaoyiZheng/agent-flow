@@ -119,8 +119,11 @@ export interface HPane {
   scrolled?: boolean;
   /** When agentStatus last changed, if agent-flow saw it change (not set for the status found at server start). */
   statusAt?: string;
-  /** A question or approval is on its screen, whatever Herdr's status says (Herdr misses some dialogs). */
-  asking?: boolean;
+  /**
+   * The question or approval on its screen (its first lines), when Herdr does not report it blocked: Herdr misses
+   * some dialogs. Its text also tells two dialogs in a row apart.
+   */
+  asking?: string;
 }
 
 export interface HLayout {

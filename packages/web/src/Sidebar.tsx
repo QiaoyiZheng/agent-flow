@@ -348,12 +348,15 @@ function NeedsYou({
     return w ? (m && !m.local ? `${m.label} / ${w.label}` : w.label) : "";
   };
   const blocked = useMemo(() => (herdr?.panes ?? []).filter((p) => p.agent && (p.agentStatus === "blocked" || p.asking) && !hidden.has(p.workspaceId) && online(p)), [herdr, hidden]);
-  const blockedKey = blocked.map((p) => `${p.id}@${p.statusAt ?? ""}`).join(",");
+  // the question's own text in the key: two dialogs in a row can have the same statusAt
+  const qKey = (p: HPane) => `${p.id}@${p.statusAt ?? ""}@${p.asking ?? ""}`;
+  const blockedKey = blocked.map(qKey).join(",");
 
   // the question each waiting agent asks (what the rendered view's question card shows)
   useEffect(() => {
     for (const p of blocked) {
-      const k = `${p.id}@${p.statusAt ?? ""}`;
+      if (p.asking) continue; // the server sent its question
+      const k = qKey(p);
       if (k in questions) continue;
       setQuestions((q) => ({ ...q, [k]: "" }));
       api<{ menu: { question: string[] } | null; overlay: { lines: string[] } | null }>("GET", "/pane/menu", { pane: p.id, run: undefined })
@@ -389,7 +392,7 @@ function NeedsYou({
   }
   for (const p of blocked) {
     if (covered.has(p.id)) continue;
-    const q = questions[`${p.id}@${p.statusAt ?? ""}`];
+    const q = p.asking || questions[qKey(p)];
     needs.push({ key: `b:${p.id}`, kind: "blocked", label: `waiting for an answer · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: q || p.title || "Open it to answer.", at: p.statusAt ?? "", paneId: p.id, workspace: p.workspaceId });
   }
   const runWorkspaces = new Map(runs.filter((r) => !r.stopped && r.workspace).map((r) => [r.workspace!, r]));

@@ -58,7 +58,7 @@ interface Machine {
   /** Each pane's agent status and when it changed to it (undefined: it had it when we first looked). */
   since?: Map<string, { status: string; at?: string }>;
   /** Panes showing a question Herdr does not report (see checkAsking), and when they were last checked. */
-  asking?: Map<string, boolean>;
+  asking?: Map<string, string>;
   askingAt?: number;
   askingBusy?: boolean;
 }
@@ -325,13 +325,19 @@ export class Workspaces {
     m.askingBusy = true;
     m.askingAt = Date.now();
     try {
-      const next = new Map<string, boolean>();
+      const next = new Map<string, string>();
       for (const p of m.panes) {
         if (!p.agent || p.agentStatus === "blocked" || p.scrolled) continue;
         const st = await this.screenState(p.id).catch(() => ({}) as { menu?: Menu });
-        if (st.menu) next.set(p.id, true);
+        if (!st.menu) continue;
+        const q = [...st.menu.question, ...(st.menu.code ?? [])]
+          .join(" ")
+          .replace(/[─-╿▀-▟]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        next.set(p.id, (q || st.menu.options.map((o) => o.label).join(" / ")).slice(0, 300) || "a question");
       }
-      const changed = next.size !== (m.asking?.size ?? 0) || [...next.keys()].some((k) => !m.asking?.has(k));
+      const changed = next.size !== (m.asking?.size ?? 0) || [...next].some(([k, v]) => m.asking?.get(k) !== v);
       m.asking = next;
       if (changed) {
         m.panes = m.panes.map((x) => ({ ...x, asking: next.get(x.id) || undefined }));

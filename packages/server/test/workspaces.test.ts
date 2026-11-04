@@ -473,7 +473,13 @@ describe("questions Herdr does not report", () => {
     (w as any).machines.get("local").askingAt = 0;
     await w.refresh();
     for (let i = 0; i < 20 && !w.model.panes.find((p) => p.id === ws.paneId)?.asking; i++) await Bun.sleep(10);
-    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBe(true);
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBe("Do you trust the files in this folder?");
+    // another question right after: its own text
+    backend.screens.set(ws.paneId, ["Allow execution of: ls?", "", "❯ 1. Allow once", "  2. No", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n"));
+    (w as any).machines.get("local").askingAt = 0;
+    await w.refresh();
+    for (let i = 0; i < 20 && !/Allow execution/.test(w.model.panes.find((p) => p.id === ws.paneId)?.asking ?? ""); i++) await Bun.sleep(10);
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBe("Allow execution of: ls?");
     // answered: the input box is back
     backend.screens.set(ws.paneId, `done\n${rule}\n❯ \n${rule}\n`);
     (w as any).machines.get("local").askingAt = 0;
