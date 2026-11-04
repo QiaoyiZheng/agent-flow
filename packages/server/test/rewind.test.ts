@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inputText } from "../src/controls.ts";
-import { claudeHighlight, codexHighlight, firstLine, ompHighlight, sameMessage } from "../src/rewind.ts";
+import { claudeHighlight, codexHighlight, firstLine, geminiHighlight, ompHighlight, sameMessage } from "../src/rewind.ts";
 import { LocalFS, TranscriptTail, codexBases } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
@@ -41,6 +41,32 @@ describe("reading the agents' rewind pickers", () => {
     expect(ompHighlight(ompPick("Reply with just the word four."))).toBe("Reply with just the word four.");
     expect(ompHighlight("╰─ ")).toBeUndefined();
   });
+  test("gemini: the ● item under \"> Rewind\", its rows joined, without the row saying what it changed", () => {
+    const W = 60;
+    const row = (r: string) => `│ ${r.padEnd(W - 4)} │`;
+    const geminiList = (at: number) =>
+      [
+        "▄".repeat(W),
+        " > /rewind",
+        "▀".repeat(W),
+        "",
+        `╭${"─".repeat(W - 2)}╮`,
+        ...["", "> Rewind", ""].map(row),
+        ...[
+          ["Reply with just the word one.", "No files have been changed"],
+          ["Write a long note about the build and then run every test in the", "repository, one by one ...", "2 files changed +12 -3"],
+          ["Stay at current position", "Cancel rewind and stay here"],
+        ].flatMap((item, i) => [...item.map((l, k) => row(`${k === 0 && i === at ? "●" : " "} ${l}`)), row("")]),
+        ...["", "(Use Enter to select a message, Esc to close, Right/Left to expand/collapse)", ""].map(row),
+        `╰${"─".repeat(W - 2)}╯`,
+      ].join("\n");
+    expect(geminiHighlight(geminiList(2))).toBe("Stay at current position");
+    expect(geminiHighlight(geminiList(0))).toBe("Reply with just the word one.");
+    const long = geminiHighlight(geminiList(1));
+    expect(long).toBe("Write a long note about the build and then run every test in the repository, one by one ...");
+    expect(sameMessage(long, "Write a long note about the build and then run every test in the repository, one by one, and fix them.")).toBe(true);
+    expect(geminiHighlight(["▄".repeat(W), " > Reply with just the word one.", "▀".repeat(W)].join("\n"))).toBeUndefined();
+  });
   test("matching a message to what a picker shows (cut with …)", () => {
     expect(sameMessage("Reply with just the word three.", "Reply with just the word three.")).toBe(true);
     expect(sameMessage("Reply with just the…", "Reply with just the word three.")).toBe(true);
@@ -59,6 +85,20 @@ describe("reading the agents' input boxes", () => {
     expect(inputText("codex", "\x1b[1m\x1b[48;2;59;64;76m›\x1b[0m\x1b[48;2;59;64;76m typed draft      ")).toBe("typed draft");
     expect(inputText("omp", "\x1b[38;2;101;199;254m╰─ \x1b[0m      ")).toBe("");
     expect(inputText("omp", "\x1b[38;2;101;199;254m╰─ \x1b[0m\x1b[38;2;229;229;231mtyped draft\x1b[0m\x1b[38;2;110;118;129ms\x1b[0m   ")).toBe("typed draft");
+  });
+
+  test("gemini: the band at the bottom (placeholder, text, two lines), not a user message above a dialog", () => {
+    // captured colour codes (Gemini CLI 0.66, default theme): band rows, the "> " prompt, the cursor, the gray placeholder
+    const top = "\x1b[0m\x1b[38;2;67;72;82m" + "▄".repeat(40) + "\x1b[0m\r";
+    const bottom = "\x1b[0m\x1b[38;2;67;72;82m" + "▀".repeat(40) + "\x1b[0m\r";
+    const prompt = (rest: string) => `\x1b[0m\x1b[48;2;67;72;82m \x1b[0m\x1b[38;2;215;175;255m\x1b[48;2;67;72;82m> \x1b[0m${rest}\x1b[48;2;67;72;82m        \x1b[0m\r`;
+    const footer = " \x1b[0m\x1b[38;2;175;175;175mworkspace (/directory)\x1b[0m        \x1b[0m\x1b[38;2;175;175;175m/model\x1b[0m\r\n \x1b[0m\x1b[38;2;255;255;255m/tmp/proj\x1b[0m\r";
+    const screen = (...rows: string[]) => ["✦ Done.", top, ...rows, bottom, footer].join("\n");
+    expect(inputText("gemini", screen(prompt("\x1b[7m\x1b[48;2;67;72;82m \x1b[0m\x1b[38;2;175;175;175m\x1b[48;2;67;72;82m Type your message or @path/to/file\x1b[0m")))).toBe("");
+    expect(inputText("gemini", screen(prompt("\x1b[38;2;255;255;255m\x1b[48;2;67;72;82mhalf typed draft\x1b[0m\x1b[7m\x1b[48;2;67;72;82m \x1b[0m")))).toBe("half typed draft");
+    expect(inputText("gemini", screen(prompt("\x1b[38;2;255;255;255mline one\x1b[0m"), "\x1b[48;2;67;72;82m   line two\x1b[0m\r"))).toBe("line one\nline two");
+    // a dialog at the bottom: the user's message band above it is not the box
+    expect(inputText("gemini", [top, prompt("\x1b[38;2;255;255;255mRun the tests\x1b[0m"), bottom, "", "╭────╮", "│ ● 1. Allow once │", "╰────╯"].join("\n"))).toBeUndefined();
   });
 });
 

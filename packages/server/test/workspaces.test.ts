@@ -554,6 +554,35 @@ describe("controls: stop, rewind, clear, exit with each agent's own keys", () =>
     await w.refresh();
     await expect(w.control(pane, "interrupt")).rejects.toThrow(/no agent/);
   });
+
+  test("gemini: its box is cleared line by line without Ctrl+C (that would stop a turn); /rewind; exit is two Ctrl+C on an empty box", async () => {
+    const { backend, w, ws } = await setup();
+    const pane = ws.paneId;
+    backend.panes.get(pane)!.agent = { name: "g1", kind: "gemini", args: [], status: "working" };
+    await w.refresh();
+    // gemini's input band (captured layout): each Ctrl+E Ctrl+U Backspace removes the last line of the draft
+    const band = (lines: string[]) => ["✦ Working on it.", "▄".repeat(40), ` > ${lines[0] ?? "  Type your message or @path/to/file"}`, ...lines.slice(1).map((l) => `   ${l}`), "▀".repeat(40), " workspace (/directory)   /model"].join("\n");
+    let draft: string[] = [];
+    backend.onKeys = (_t, keys) => {
+      if (keys.join(" ") === "ctrl+e ctrl+u backspace") draft = draft.slice(0, -1);
+      backend.screens.set(pane, band(draft));
+    };
+    const run = async (action: string, typed: string[]) => {
+      draft = typed;
+      backend.screens.set(pane, band(draft));
+      backend.keys = [];
+      backend.texts = [];
+      const r = await w.control(pane, action);
+      return { keys: backend.keys.map((k) => k.keys.join(" ")), texts: backend.texts.map((t) => t.text), hint: r.hint, left: draft };
+    };
+    expect(await run("interrupt", [])).toMatchObject({ keys: ["esc"] });
+    expect(await run("clear", [])).toMatchObject({ keys: [] });
+    expect(await run("clear", ["first line", "second line"])).toEqual({ keys: ["ctrl+e ctrl+u backspace", "ctrl+e ctrl+u backspace"], texts: [], hint: undefined, left: [] });
+    expect(await run("rewind", ["draft"])).toMatchObject({ keys: ["ctrl+e ctrl+u backspace", "enter"], texts: ["/rewind"], hint: expect.stringContaining("Rewind conversation") });
+    expect(await run("exit", ["draft"])).toMatchObject({ keys: ["ctrl+e ctrl+u backspace", "ctrl+c", "ctrl+c"] });
+    expect(await run("exit", [])).toMatchObject({ keys: ["ctrl+c", "ctrl+c"] });
+    backend.onKeys = undefined;
+  });
 });
 
 describe("the message queue and steering", () => {
@@ -604,11 +633,11 @@ describe("the message queue and steering", () => {
     expect(w.queue[pane]).toBeUndefined();
   });
 
-  test("steer uses each agent's own send-now: claude Ctrl+Enter, codex Esc only while it holds the message, omp nothing", async () => {
+  test("steer uses each agent's own send-now: claude Ctrl+Enter, codex Esc only while it holds the message, omp nothing, gemini holds it", async () => {
     const { backend, w, ws } = await setup();
     (w as any).opts.steerPolls = 3;
     const pane = ws.paneId;
-    const steer = async (kind: "claude" | "codex" | "omp", screen: string) => {
+    const steer = async (kind: "claude" | "codex" | "omp" | "gemini", screen: string) => {
       backend.panes.get(pane)!.agent = { name: kind, kind, args: [], status: "working" };
       backend.screens.set(pane, screen);
       await w.refresh();
@@ -625,6 +654,9 @@ describe("the message queue and steering", () => {
     // codex took it straight into the turn (no held line): Esc would stop the turn, so it is not pressed
     expect(await steer("codex", `› look at b.ts too\n• Working (6s • esc to interrupt)${codexBox}`)).toEqual({ prompts: ["look at b.ts too"], keys: [], sentNow: false });
     expect(await steer("omp", " π > working\n╰─ ")).toEqual({ prompts: ["look at b.ts too"], keys: [], sentNow: true });
+    // gemini queues it until the turn ends; no key sends it sooner (Esc would stop the turn)
+    const geminiBox = `\n${"▄".repeat(40)}\n >   Type your message or @path/to/file\n${"▀".repeat(40)}\n workspace (/directory)   /model`;
+    expect(await steer("gemini", `  Queued (press ↑ to edit):\n    look at b.ts too\n\n ⠦ Thinking... (esc to cancel, 4s)${geminiBox}`)).toEqual({ prompts: ["look at b.ts too"], keys: [], sentNow: false });
   });
 
   test("right after a prompt, before Herdr sees the agent start, the next message still waits", async () => {

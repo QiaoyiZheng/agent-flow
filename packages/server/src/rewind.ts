@@ -6,13 +6,17 @@
 //                                                                                           conversation" (or "…code…")
 //   codex    Esc Esc (empty box)      Left           the prompt drawn in reverse video      Enter
 //   omp      /rewind                  Left           the dashed box (┆ … ┆)                 Enter
+//   gemini   /rewind                  Up             "● <text>" under "> Rewind" (the       Enter, then "Rewind
+//                                                    list opens on "Stay at current         conversation" (or "… and
+//                                                    position")                             revert code changes")
 //
-// All three put the message back into their own input box; it is cleared there (the UI puts it in its own box).
+// All four put the message back into their own input box; it is cleared there (the UI puts it in its own box).
+// (gemini's list also shows the messages Gemini CLI sends itself: its <session_context>, "[System: …]".)
 //
 // What the transcript shows afterwards: codex starts a new file that continues the old one up to the rewind point
-// (TranscriptTail reads both). claude and omp write nothing until the next message, whose parent is the earlier
-// point; until then the rewound turns are hidden with a cut: the byte range of the file from the message's line to
-// the end at the time of the rewind.
+// (TranscriptTail reads both). gemini appends {"$rewindTo": "<message id>"} to its file at once (and a $patch). claude
+// and omp write nothing until the next message, whose parent is the earlier point; until then the rewound turns are
+// hidden with a cut: the byte range of the file from the message's line to the end at the time of the rewind.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { TranscriptAccess } from "./access.ts";
@@ -82,6 +86,28 @@ export function ompHighlight(screen: string): string | undefined {
     if (t) return t;
   }
   return "";
+}
+
+/**
+ * The message gemini's rewind list highlights, or undefined when the list is not shown. Each item in its box is the
+ * message (up to two rows, cut with "...") and a row saying what it changed ("No files have been changed",
+ * "1 file changed +1"); the last item is "Stay at current position" / "Cancel rewind and stay here".
+ */
+export function geminiHighlight(screen: string): string | undefined {
+  const lines = plain(screen).split("\n").map((l) => l.replace(/\s+$/, ""));
+  const title = lines.findLastIndex((l) => /^\s*│ > Rewind\s*│$/.test(l));
+  if (title < 0) return undefined;
+  const rows: string[] = [];
+  for (const l of lines.slice(title + 1)) {
+    if (!/^\s*│/.test(l)) break;
+    rows.push(l.replace(/^\s*│ ?/, "").replace(/\s*│$/, ""));
+  }
+  const at = rows.findIndex((r) => /^● /.test(r));
+  if (at < 0) return "";
+  const item = [rows[at]!.slice(2).trim()];
+  for (let i = at + 1; i < rows.length && rows[i]!.trim(); i++) item.push(rows[i]!.trim());
+  if (item.length > 1) item.pop();
+  return item.join(" ");
 }
 
 const norm = (s: string) => s.replace(/\s+/g, " ").replace(/(…|\.\.\.)$/, "").trim();
@@ -155,6 +181,30 @@ const DRIVERS: Record<string, Driver> = {
     forward: "right",
     confirm: (w, pane) => w.press(pane, ["enter"]),
   },
+  gemini: {
+    // (Esc Esc opens it too, but only from an empty box of an agent that is not working)
+    open: async (w, pane) => {
+      await w.clearBox(pane);
+      await w.typeText(pane, "/rewind");
+      await sleep(120);
+      await w.press(pane, ["enter"]);
+    },
+    highlight: async (w, pane) => geminiHighlight(await w.visible(pane)),
+    pre: 1,
+    back: "up",
+    forward: "down",
+    confirm: async (w, pane, code) => {
+      await w.press(pane, ["enter"]);
+      // its question: Rewind conversation and revert code changes / Rewind conversation / Revert code changes / Do nothing
+      for (let i = 0; i < 25; i++) {
+        await sleep(80);
+        const { menu } = await w.screenState(pane);
+        const pick = menu?.options.find((o) => o.label === (code ? "Rewind conversation and revert code changes" : "Rewind conversation")) ?? menu?.options.find((o) => o.label === "Rewind conversation");
+        if (pick) return void (await w.choose(pane, pick.index, pick.label));
+      }
+      throw new AfError("rewind_failed", "gemini did not ask how to rewind; look at its terminal");
+    },
+  },
 };
 
 export interface RewindRequest {
@@ -193,8 +243,8 @@ export async function rewindTo(w: Workspaces, access: TranscriptAccess, req: Rew
         if (w.model.panes.find((x) => x.id === req.pane)?.agentStatus !== "working") break;
       }
     }
-    // where the transcript ends now: the hidden part ends here
-    const src = p.agent !== "codex" && req.ref !== undefined ? await access.resolve(req.pane).catch(() => undefined) : undefined;
+    // where the transcript ends now: the hidden part ends here (codex and gemini record the rewind themselves)
+    const src = p.agent !== "codex" && p.agent !== "gemini" && req.ref !== undefined ? await access.resolve(req.pane).catch(() => undefined) : undefined;
     const path = src && "source" in src && !src.source.pending ? src.source.path : undefined;
     const size = path ? (await access.fsFor(req.pane).fs.readFrom(path, 0, 0))?.size : undefined;
 

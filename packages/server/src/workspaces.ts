@@ -14,7 +14,7 @@ import { AfError } from "./orchestrator.ts";
 import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
-import { REWIND_HINT, STEER_NOW, controlSteps, inputText } from "./controls.ts";
+import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from "./controls.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -536,6 +536,7 @@ export class Workspaces {
     for (let i = 0; i < (this.opts.steerPolls ?? 20); i++) {
       await Bun.sleep(150);
       if (how.waiting.test(await r.backend.readScreen(r.raw))) {
+        if (!how.keys.length) return { sentNow: false }; // the agent holds it until its turn ends (gemini)
         await r.backend.sendKeys(r.raw, how.keys);
         return { sentNow: true };
       }
@@ -649,15 +650,23 @@ export class Workspaces {
     }
   }
 
-  /** Clear what is typed in the agent's own input box (Ctrl+C, only when there is text: see controls.ts). */
+  /** Clear what is typed in the agent's own input box (its clear keys, only when there is text: see controls.ts). */
   async clearBox(pane: string) {
     const p = this.pane(pane);
     const r = this.route(pane);
-    if (!inputText(p.agent, await r.backend.readScreen(r.raw, true))) return false;
-    await r.backend.sendKeys(r.raw, ["ctrl+c"]);
-    for (let i = 0; i < 15; i++) {
-      await Bun.sleep(60);
-      if (!inputText(p.agent, await r.backend.readScreen(r.raw, true))) break;
+    let text: string | undefined = inputText(p.agent, await r.backend.readScreen(r.raw, true));
+    if (!text) return false;
+    const how = clearBoxKeys(p.agent);
+    // per line: again while text is left and the last round changed it (a long draft: at most 40 rounds)
+    for (let round = 0; round < (how.perLine ? 40 : 1); round++) {
+      await r.backend.sendKeys(r.raw, how.keys);
+      const before: string = text;
+      for (let i = 0; i < 15; i++) {
+        await Bun.sleep(60);
+        text = inputText(p.agent, await r.backend.readScreen(r.raw, true));
+        if (!text || text !== before) break;
+      }
+      if (!text || text === before) break;
     }
     return true;
   }

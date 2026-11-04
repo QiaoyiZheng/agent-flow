@@ -31,6 +31,34 @@
 // the options (" ❯ Yes" / "   No", descriptions deeper) and a key hint, with no ├──┤ rules. Its idle input box
 // (default "band" shape) is a status line over "╰─ " and the text typed; the "box" shape ends in "╰─ text ─╯".
 // A dialog's bottom edge is a bare rule (╰────╯), so it is not taken for the input box.
+//
+// gemini (Gemini CLI 0.66) draws its input box as a band of background colour between half-block rows; below it
+// are only the footer and the "/" list. The user's messages in the conversation are drawn the same way, so only a
+// band with nothing but footer lines under it is the box. (Without background colours a ─── rule is above it.)
+//
+//  ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+//   > typed text                          <- ">" ("!" shell mode, "*" YOLO mode, "(r:)" history search)
+//  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+//   workspace (/directory)   /model       <- footer
+//
+// Its dialogs (tool approvals, the ask_user tool, folder trust, /model, the rewind steps) replace the box with a
+// rounded box at the bottom; lists mark the highlighted row with ● (numbered or not):
+//
+//  ╭──────────────────────────────────╮
+//  │ ? Shell  sleep 25; echo done     │  <- a tool approval: "?", the tool, what it does
+//  │ ╭──────────────────────────────╮ │
+//  │ │ sleep 25; echo done          │ │  <- the command (or the file's diff)
+//  │ ╰──────────────────────────────╯ │
+//  │ Allow execution of [Shell]?      │  <- question
+//  │                                  │
+//  │ ● 1. Allow once                  │
+//  │   2. Allow for this session      │
+//  │   3. No, suggest changes (esc)   │
+//  ╰──────────────────────────────────╯
+//
+// The ask_user dialog is titled "Answer Questions", with steps ("← □ Format │ ✓ Length │ ≡ Review →") when it asks
+// several; its last numbered option is a text field ("Enter a custom value" until something is typed: the answer
+// is typed while it is highlighted, then Enter), a multi-select ticks with Enter ("[x]") and ends with "Done".
 
 export interface MenuOption {
   index: number;
@@ -90,11 +118,13 @@ const SETTING_ROW = /^([○◐●◉◈◯◎])\s+(.+?)\s+effort\s+←\/→/i;
 /** claude's effort levels, low to high. */
 const EFFORT_LEVELS = ["Low", "Medium", "High", "xHigh", "Max"];
 
-/** claude's multi-select button under the options. */
-const ACTION = /^(Next|Submit)$/;
+/** The multi-select button under the options: claude's Next/Submit, gemini's Done. */
+const ACTION = /^(Next|Submit|Done)$/;
 const NUMBERED = /^\s*\d{1,2}[.)]\s/;
 
 const POINTER = /^(\s*)([❯›▶➤])\s+(\S.*)$/;
+/** gemini marks the highlighted row of a list with ● (claude and omp use ● as a bullet in the conversation). */
+const GEMINI_POINTER = /^(\s*)(●)\s+(\S.*)$/;
 /** A dialog's outer edge (solid rule or box corner). */
 const SEPARATOR = /^\s*[╭╰┌└├]?[─━═-]{8,}[╮╯┐┘┤]?\s*$/;
 /** A rule inside a dialog (claude draws ╌╌╌ around the command it asks about): skipped, not an edge. */
@@ -103,7 +133,7 @@ const HINT = /\b(enter|esc|escape|navigate|confirm|select|cancel)\b|↑|↓/i;
 const indentOf = (l: string) => l.length - l.replace(/^\s+/, "").length;
 const blank = (l: string) => !l.trim();
 const rule = (l?: string) => !!l && SEPARATOR.test(l);
-const AGENTS = new Set(["claude", "codex", "omp"]);
+const AGENTS = new Set(["claude", "codex", "omp", "gemini"]);
 
 /** The screen's lines, without trailing spaces and without the blank rows below the last text. */
 function screenLines(screen: string) {
@@ -118,9 +148,11 @@ function screenLines(screen: string) {
  *   claude:  ──── / ❯ … / ──── / status lines        codex:  › … / model line / "? for shortcuts"
  *   omp:     status line / ╰─ …   or   ╭─ status ─╮ / ╰─ … ─╯   (a dialog ends in a bare ╰────╯ instead);
  *            its other input shapes: a ❯ prompt, a filled field ▐ … ▌ or rail ▎ …, " text" between two bare rules
+ *   gemini:  ▄▄▄▄ / " > …" / ▀▀▀▀ / footer   (see the header comment)
  */
 function inputBoxShown(lines: string[], agent: string | undefined) {
   if (!agent || !AGENTS.has(agent)) return false;
+  if (agent === "gemini") return geminiInputRows(lines) !== undefined;
   const tail = lines.slice(-14);
   if (agent === "claude") return tail.some((l, i) => /^\s*❯(\s|$)/.test(l) && (rule(tail[i - 1]) || rule(tail[i - 2])) && tail.slice(i + 1, i + 4).some((x) => rule(x)));
   if (agent === "codex") return tail.slice(-8).some((l) => /^\s*›(\s|$)/.test(l) && !/^\s*›\s+\d+[.)]/.test(l));
@@ -129,6 +161,115 @@ function inputBoxShown(lines: string[], agent: string | undefined) {
   const last = tail.slice(-6);
   if (last.filter((l) => /^─{8,}$/.test(l)).length >= 2) return true;
   return last.some((l, i) => /^\s*[❯▐▎]/.test(l) || (/^\s*╰─/.test(l) && (!OMP_BOTTOM.test(l) || (/^\s*│/.test(last[i - 1] ?? "") && !OMP_ROW.test(last[i - 1]!)))));
+}
+
+// ---- gemini (see the header comment) ----
+
+/** The prompt row of gemini's input box: ">", "!" (shell mode), "*" (YOLO mode), "(r:)" (history search). */
+const GEMINI_PROMPT = /^ ?(?:[>!*]|\(r:\)) /;
+const HALF_TOP = /^▄{8,}$/;
+const HALF_BOTTOM = /^▀{8,}$/;
+/** A row of a box (a dialog, a tool's output): nothing like it is below gemini's input box. */
+const BOX_ROW = /^\s*[╭╰│]/;
+
+/**
+ * The rows of gemini's input box (the prompt row first, then the typed text's other lines) when the box is at the
+ * bottom of the screen; undefined when something else is (a dialog). `lines` without trailing spaces.
+ */
+export function geminiInputRows(lines: string[]): string[] | undefined {
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 24); i--) {
+    const l = lines[i]!;
+    if (BOX_ROW.test(l)) return undefined;
+    if (HALF_BOTTOM.test(l.trim())) {
+      let j = i - 1;
+      while (j > 0 && i - j < 16 && !HALF_TOP.test(lines[j - 1]!.trim())) j--;
+      return j > 0 && j < i && HALF_TOP.test(lines[j - 1]!.trim()) && GEMINI_PROMPT.test(lines[j]!) ? lines.slice(j, i) : undefined;
+    }
+    // without background colours: a rule above the prompt row, no band under it
+    if (GEMINI_PROMPT.test(l) && i > 0 && rule(lines[i - 1])) return [l];
+  }
+  return undefined;
+}
+
+/** The rows of the rounded box at the bottom of gemini's screen, without its outer edges (inner boxes kept). */
+function geminiDialog(lines: string[]): string[] | undefined {
+  for (let b = lines.length - 1; b >= Math.max(0, lines.length - 6); b--) {
+    const m = /^(\s*)╰─+╯$/.exec(lines[b]!);
+    if (!m) continue;
+    const left = m[1]!.length;
+    const rows: string[] = [];
+    for (let j = b - 1; j >= 0 && j >= b - 150; j--) {
+      const l = lines[j]!;
+      if (indentOf(l) !== left) return undefined;
+      if (/^\s*╭─+╮$/.test(l)) return rows.reverse();
+      if (l[left] !== "│") return undefined;
+      rows.push(l.slice(left + 1).replace(/│$/, "").replace(/^ /, "").trimEnd());
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/** An inner box's edge (╭──╮ ╰──╯, ┌──┐ └──┘) or a row in it ("│ text │"). */
+const INNER_EDGE = /^[╭╰┌└]─+[╮╯┐┘]$/;
+const INNER_ROW = /^│ ?(.*?) ?│$/;
+
+/**
+ * The menu in a gemini dialog box: options as in other agents' lists (● for the highlight); the question is the box's
+ * text above them, from the tool waiting for approval ("? Shell …") if there is one. A tool's command or diff (the
+ * inner box) is also `code`.
+ */
+function geminiMenu(all: string[]): Menu | undefined {
+  // the rewind list is not a menu (its rows are messages; rewind.ts reads it)
+  if (all.some((r) => /^> Rewind$/.test(r.trim()))) return undefined;
+  // a list longer than the dialog shows ▲ above and ▼ below it (the rest is reached with the arrow keys)
+  const rows = all.filter((r) => !/^[▲▼]$/.test(r.trim()));
+  const scrolled = rows.length < all.length;
+  const menu = menuIn(rows, GEMINI_POINTER);
+  if (!menu) return undefined;
+  // where the list starts: the rows above the first option are the question
+  const first = menu.options[0]!;
+  const p = rows.findIndex((r) => {
+    const m = GEMINI_POINTER.exec(r);
+    const text = (m ? m[3]! : r).trim();
+    return text === first.label || text.replace(/^\d{1,2}[.)]\s+/, "").replace(/^\[[ x]\]\s*/, "") === first.label;
+  });
+  if (p < 0) return menu;
+  const end = p - 1;
+  const tool = rows.slice(0, end + 1).findLastIndex((r) => /^\? \S/.test(r));
+  const question: string[] = [];
+  const code: string[] = [];
+  let tabs: MenuTab[] | undefined;
+  let ask = false;
+  for (const r of rows.slice(Math.max(0, tool), end + 1)) {
+    const x = r.trim();
+    if (!x || INNER_EDGE.test(x)) continue;
+    const inner = INNER_ROW.exec(x);
+    if (inner) {
+      if (!inner[1]!.trim()) continue;
+      question.push(inner[1]!.trim());
+      if (tool >= 0) code.push(inner[1]!.trim());
+    } else if (x === "Answer Questions") ask = true;
+    else if (/^← .* →$/.test(x))
+      tabs = x
+        .slice(2, -2)
+        .split(" │ ")
+        .map((s) => s.match(/^([□✓≡]) (.+)$/))
+        .filter((s): s is RegExpMatchArray => !!s)
+        .map((s) => (s[1] === "≡" ? { label: s[2]!, done: false, submit: true } : { label: s[2]!, done: s[1] === "✓" }));
+    else question.push(tool >= 0 && question.length === 0 ? x.replace(/^\? /, "").replace(/\s{2,}/g, " ") : x);
+  }
+  // the shell tool's header repeats its command ("Shell sleep 25"): keep the tool's name
+  if (tool >= 0 && code[0] && question[0]?.endsWith(` ${code[0]}`)) question[0] = question[0].slice(0, -code[0].length - 1);
+  // ask_user: the last numbered option is its text field (in a scrolled list, if it is in sight: its placeholder, or
+  // highlighted, when the hint says "Enter to submit"); " ✓" marks the answer chosen earlier (single-select)
+  const last = ask ? menu.options.findLast((o) => o.number !== undefined && !o.action) : undefined;
+  const field = last && (!scrolled || last.label === "Enter a custom value" || (last.selected && /^Enter to submit\b/.test(menu.hint ?? ""))) ? last : undefined;
+  const options = menu.options.map((o) => {
+    const earlier = !menu.multiSelect && / ✓$/.test(o.label);
+    return { ...o, label: earlier ? o.label.slice(0, -2) : o.label, freeText: o === field ? true : ask ? false : o.freeText, ...(earlier ? { checked: true } : {}) };
+  });
+  return { ...menu, question, code: code.length ? code : undefined, options, ...(tabs?.length ? { tabs } : {}) };
 }
 
 // ---- omp dialogs (see the header comment) ----
@@ -283,13 +424,22 @@ export function parseMenu(screen: string, agent?: string): Menu | undefined {
     const box = ompDialog(shown);
     if (box) return ompMenu(box); // a box that is not a menu (a text prompt, the answers to review) is an overlay
   }
-  let raw = screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/\u00a0/g, " "));
+  if (agent === "gemini") {
+    const rows = geminiDialog(shown);
+    if (rows) return geminiMenu(rows); // a box that is not a menu (the rewind list, a text question, a panel) is an overlay
+  }
+  let raw =screen.replace(/\r/g, "").split("\n").map((l) => l.replace(/\u00a0/g, " "));
   const side = sideBoxColumn(raw);
   if (side !== undefined) raw = raw.map((l) => (l.length > side && /\s/.test(l[side - 1] ?? " ") ? l.slice(0, side) : l));
   // box sides (│ … │) become spaces so indentation is kept
   const lines = raw.map((l) => l.replace(/^(\s*)[│┃]/, "$1 ").replace(/[│┃]\s*$/, "").replace(/\s+$/, ""));
+  return menuIn(lines, agent === "gemini" ? GEMINI_POINTER : POINTER);
+}
+
+/** The menu around the highlight nearest the bottom of `lines`. */
+function menuIn(lines: string[], pointer: RegExp): Menu | undefined {
   for (let p = lines.length - 1; p >= 0 && p >= lines.length - 60; p--) {
-    const m = lines[p]!.match(POINTER);
+    const m = lines[p]!.match(pointer);
     if (!m) continue;
     let t = lines[p]!.length - m[3]!.length; // column where the option text starts
     let action = false;
@@ -528,8 +678,17 @@ export function screenOverlay(screen: string, agent: string | undefined): Overla
   if (lines.length < 3) return undefined; // not drawn yet
   if (inputBoxShown(lines, agent)) return undefined;
   const box = agent === "omp" ? ompDialog(lines) : undefined;
+  const gemini = agent === "gemini" ? geminiDialog(lines) : undefined;
   let body: string[];
-  if (box) {
+  if (gemini) {
+    // gemini's dialog box: its rows, inner boxes without their edges
+    body = gemini
+      .map((r) => r.trim())
+      .filter((r) => !INNER_EDGE.test(r))
+      .map((r) => INNER_ROW.exec(r)?.[1]?.trim() ?? r)
+      .filter((l, i, all) => l || all[i - 1]);
+    while (body.length && !body.at(-1)) body.pop();
+  } else if (box) {
     // omp's dialog box: its title and rows (the ask dialog's list is padded with blank rows)
     body = [...(box.title && !OMP_ASK_TITLE.test(box.title) ? [box.title] : []), ...box.parts.flat().map((l) => l.trim())].filter((l, i, all) => l || all[i - 1]);
     while (body.length && !body.at(-1)) body.pop();
@@ -548,7 +707,7 @@ export function screenOverlay(screen: string, agent: string | undefined): Overla
   const hintIdx = body.findLastIndex((l) => HINT.test(l) && l.length < 160);
   const hint = hintIdx >= 0 ? body[hintIdx] : undefined;
   const text = hintIdx >= 0 ? body.filter((_, i) => i !== hintIdx) : body;
-  if (box) while (text.length && !text.at(-1)) text.pop();
+  if (box || gemini) while (text.length && !text.at(-1)) text.pop();
   const k = (hint ?? "").toLowerCase();
   return { lines: text, hint, enter: !hint || /enter|continue|confirm|return/.test(k), esc: !hint || /esc/.test(k) };
 }
