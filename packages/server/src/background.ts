@@ -91,3 +91,49 @@ const safeReal = (p: string) => {
     return p;
   }
 };
+
+// ---------------------------------------------------------------------------------------------
+// The same check on a remote machine, in one shell command over its SSH connection: claude's registry there gives
+// each pane's session, its tasks folder is under the remote user's tmp, and lsof (or, without it, /proc/*/fd on
+// Linux) tells which output files are open. Checked on Linux machines (tea2: /tmp/claude-<uid>/<slug>/<sid>/tasks).
+
+const PANE_ID = /^[A-Za-z0-9:_.~-]+$/;
+
+/**
+ * A shell script printing "<pane> <count>" per pane: the background tasks the claude in that pane (one of `pids`)
+ * still runs. A pane whose session or folder is not found prints 0.
+ */
+export function remoteCheckScript(entries: { pane: string; pids: number[] }[]) {
+  const calls = entries
+    .filter((e) => PANE_ID.test(e.pane))
+    .map((e) => `chk '${e.pane}' ${e.pids.filter((p) => Number.isInteger(p) && p > 1).join(" ")}`)
+    .join("\n");
+  return String.raw`u=$(id -u)
+cnt() {
+  if command -v lsof >/dev/null 2>&1; then lsof -Fn +d "$1" 2>/dev/null | sed -n 's/^n//p'
+  else find /proc/[0-9]*/fd -lname "$1/*" -printf '%l\n' 2>/dev/null; fi | grep '\.output$' | sort -u | wc -l | tr -d ' '
+}
+chk() {
+  pane=$1; shift
+  for pid in "$@"; do
+    f="$HOME/.claude/sessions/$pid.json"; [ -f "$f" ] || continue
+    sid=$(sed -n 's/.*"sessionId" *: *"\([0-9a-fA-F-]*\)".*/\1/p' "$f" | head -n 1); [ -n "$sid" ] || continue
+    for d in /tmp/claude-$u/*/"$sid"/tasks "$${"{"}TMPDIR:-/tmp}"/claude-$u/*/"$sid"/tasks "$HOME"/.claude-$u/*/"$sid"/tasks; do
+      if [ -d "$d" ]; then echo "$pane $(cnt "$d")"; return; fi
+    done
+  done
+  echo "$pane 0"
+}
+${calls}
+`;
+}
+
+/** The answer of remoteCheckScript: pane → count. */
+export function parseRemoteCounts(out: string): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const l of out.split("\n")) {
+    const r = l.trim().match(/^(\S+) (\d+)$/);
+    if (r) m.set(r[1]!, Number(r[2]));
+  }
+  return m;
+}

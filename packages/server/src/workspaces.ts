@@ -15,7 +15,7 @@ import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
 import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from "./controls.ts";
-import { claudeSession, runningTasks, taskDir } from "./background.ts";
+import { claudeSession, parseRemoteCounts, remoteCheckScript, runningTasks, taskDir } from "./background.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -64,6 +64,9 @@ interface Machine {
   since?: Map<string, { status: string; at?: string }>;
   /** Background tasks each claude pane still waits on (see background.ts), and when each was last checked. */
   background?: Map<string, { n: number; at: number }>;
+  /** Remote machines: panes whose check is on its way over SSH (their turn end waits for it), and whether one runs. */
+  bgPending?: Set<string>;
+  bgRunning?: boolean;
   /** When each pane last became active (working, or waiting on background work), for turn ends. */
   activeSince?: Map<string, number>;
   /** Panes showing a question Herdr does not report (see checkAsking), and when they were last checked. */
@@ -386,6 +389,47 @@ export class Workspaces {
   private taskDirs = new Map<string, string>();
 
   /**
+   * The same on a remote machine, without holding up the refresh (an SSH round trip): due panes are marked pending,
+   * one script runs over the machine's connection (background.ts remoteCheckScript), and its answer is applied on
+   * the next refresh, which it starts. Rechecked every 6 s while a pane waits on background work. A failed or slow
+   * check counts 0, so nothing waits forever.
+   */
+  private checkBackgroundRemote(m: Machine, panes: { id: string; agent?: string; agentStatus: string }[]) {
+    const state = (m.background ??= new Map());
+    const pending = (m.bgPending ??= new Set());
+    const prev = m.since;
+    for (const x of panes) if (x.agent !== "claude" || x.agentStatus === "working" || x.agentStatus === "blocked") (state.delete(x.id), pending.delete(x.id));
+    for (const id of state.keys()) if (!panes.some((x) => x.id === id)) state.delete(id);
+    const due = panes.filter((x) => {
+      if (x.agent !== "claude" || (x.agentStatus !== "done" && x.agentStatus !== "idle") || pending.has(x.id)) return false;
+      const was = prev?.get(x.id)?.status;
+      const st = state.get(x.id);
+      return !st || was === "working" || (st.n > 0 && Date.now() - st.at >= 6000);
+    });
+    if (due.length && !m.bgRunning && m.remote && m.backend) {
+      for (const x of due) pending.add(x.id);
+      m.bgRunning = true;
+      const remote = m.remote;
+      const backend = m.backend;
+      void (async () => {
+        const counts = new Map<string, number>();
+        try {
+          const entries = await Promise.all(due.map(async (x) => ({ pane: x.id, pids: (await backend.processes(x.id).catch(() => [])).map((q) => q.pid) })));
+          const r = await remote.exec(remoteCheckScript(entries), { timeoutMs: 15_000 });
+          for (const [k, v] of parseRemoteCounts(r.out.toString())) counts.set(k, v);
+        } catch {}
+        for (const x of due) {
+          state.set(x.id, { n: counts.get(x.id) ?? 0, at: Date.now() });
+          pending.delete(x.id);
+        }
+        m.bgRunning = false;
+        void this.changed(m.meta.id);
+      })();
+    }
+    return new Map([...state].map(([k, v]) => [k, v.n]));
+  }
+
+  /**
    * The agent's work has really ended: it is not working, not asking anything, not just given a prompt it has
    * not started on, and not waiting on background work (a Monitor, a background command). For teams and anything
    * else that waits for an agent to finish.
@@ -452,7 +496,8 @@ export class Workspaces {
       m.workspaces = snap.workspaces.map((w) => ({ ...w, machine: key, id: p(w.id), activeTabId: w.activeTabId ? p(w.activeTabId) : undefined }));
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
       // background work claude still waits on after its turn ended (local only: see background.ts)
-      const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : new Map<string, number>();
+      const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : m.remote ? this.checkBackgroundRemote(m, snap.panes) : new Map<string, number>();
+      const bgPending = m.bgPending ?? new Set<string>();
       // when each agent's status changed: "finished" in Needs you means finished after the user last looked.
       // Saved across restarts: a status that changed while the server was down changed now. The status tracked is
       // the effective one: done/idle while background work runs counts as "background", not done.
@@ -463,6 +508,8 @@ export class Workspaces {
       for (const x of snap.panes) {
         const eff = effectiveStatus(x.agentStatus, bg.get(x.id) ?? 0);
         const was = since.get(x.id);
+        // a remote pane just went done while its background check is on its way: not finished until it answers
+        if (bgPending.has(x.id) && (eff === "done" || eff === "idle") && (was?.status === "working" || was?.status === "background")) continue;
         if (eff === "working" || eff === "background") {
           if (!active.has(x.id)) active.set(x.id, was && was.status !== eff ? Date.now() : (Date.parse(was?.at ?? "") || Date.now()));
         }

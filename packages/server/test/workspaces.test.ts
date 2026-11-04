@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LayoutNode } from "@af/core";
@@ -182,6 +182,86 @@ describe("workspaces: mirror Herdr", () => {
     await Bun.sleep(150); // debounce
     expect(leaves(w.model.layouts[ws.tabId]!.root).length).toBe(2);
     expect(pushes).toBeGreaterThan(0);
+  });
+});
+
+describe("background work on a remote machine", () => {
+  test("checked over SSH with one script; the turn end waits for its answer; a job ending later ends the turn then", async () => {
+    const home = tmp("af-ws-bgremote-");
+    const local = new FakeBackend();
+    local.saved = [{ id: "p1", label: "tea2", target: "tea2", session: "default" }];
+    const remoteBackend = new FakeBackend();
+    // the remote machine: its "SSH" runs the real script in a local shell, with HOME pointing at a fake remote home
+    const rhome = tmp("af-rhome-");
+    const uid = process.getuid!();
+    const tasks = join(rhome, `.claude-${uid}`, "-home-u-exp", "aaaaaaaa-0000-0000-0000-00000000000a", "tasks");
+    mkdirSync(tasks, { recursive: true });
+    mkdirSync(join(rhome, ".claude/sessions"), { recursive: true });
+    writeFileSync(join(rhome, ".claude/sessions/7001.json"), JSON.stringify({ pid: 7001, sessionId: "aaaaaaaa-0000-0000-0000-00000000000a" }));
+    const scripts: string[] = [];
+    let gate: Promise<void> = Promise.resolve();
+    const w = new Workspaces({
+      home,
+      backend: local,
+      paneEnv: () => ({}),
+      remotePollMs: 0,
+      remote: (_spec, onChange) => {
+        const r = {
+          state: "offline" as any,
+          home: rhome,
+          async connect() {
+            r.state = "online";
+            onChange();
+          },
+          close() {},
+          async exec(cmd: string) {
+            scripts.push(cmd);
+            await gate; // an SSH round trip that takes its time
+            const p = Bun.spawnSync(["sh", "-c", cmd], { env: { ...process.env, HOME: rhome, TMPDIR: join(rhome, "tmp") }, stdout: "pipe" });
+            return { code: 0, out: Buffer.from(p.stdout), err: "" };
+          },
+        };
+        return { remote: r, backend: () => remoteBackend };
+      },
+    });
+    await w.start(60_000);
+    await w.connect("tea2");
+    const rws = await remoteBackend.createWorkspace("exp", "/home/u/exp");
+    await remoteBackend.startAgent("t1", "claude", rws.paneId, []);
+    remoteBackend.procs.set(rws.paneId, [{ pid: 7001, argv: ["claude"] }]);
+    const id = `tea2~${rws.paneId}`;
+    const ends: string[] = [];
+    w.onTurnEnd((t) => ends.push(t.pane));
+    const pane = () => w.model.panes.find((p) => p.id === id)!;
+    const settle = async () => {
+      for (let i = 0; i < 20 && (w as any).machines.get("tea2").bgRunning; i++) await Bun.sleep(25);
+      await w.refresh();
+    };
+    remoteBackend.set("t1", "working");
+    await w.refresh();
+    // T1 starts its experiment in the background and ends its turn; the check is slow to answer
+    const job = Bun.spawn(["sh", "-c", `exec >>'${join(tasks, "bexp.output")}' 2>&1; exec sleep 30`]);
+    await Bun.sleep(300);
+    let open!: () => void;
+    gate = new Promise((r) => (open = r));
+    remoteBackend.set("t1", "done");
+    await w.refresh();
+    expect(ends).toEqual([]); // not ended while the answer is on its way
+    open();
+    await settle();
+    expect(pane()).toMatchObject({ agentStatus: "done", background: 1 });
+    expect(ends).toEqual([]);
+    expect(w.settled(id)).toBe(false);
+    expect(scripts.at(-1)).toContain(`chk '${rws.paneId}' 7001`);
+    // the job ends; the 6 s recheck finds nothing open: the turn ends then
+    job.kill();
+    await job.exited;
+    (w as any).machines.get("tea2").background.forEach((v: any) => (v.at = 0));
+    await w.refresh();
+    await settle();
+    expect(pane().background).toBeUndefined();
+    expect(ends).toEqual([id]);
+    expect(w.settled(id)).toBe(true);
   });
 });
 
