@@ -596,8 +596,7 @@ async function setupRemote() {
 }
 
 describe("members on another machine", () => {
-  // waits on a fix in workspaces.ts (agent-flow-1b): a remote pane going working -> idle loops on its background check
-  test.skipIf(!process.env.AF_TEST_REMOTE_IDLE)("af task --on: a plain member in the team's workspace there; its task typed in; its reply comes back", async () => {
+  test("af task --on: a plain member in the team's workspace there; its task typed in; its reply comes back", async () => {
     const { o, remote, call, step, replies, lead, rhome } = await setupRemote();
     const r = await call("/task", { callerPane: lead, kind: "claude", task: "run the profile on the GPUs", name: "profile", machine: "gpu", cwd: "~/proj" });
     expect(r.status).toBe(200);
