@@ -531,8 +531,11 @@ function readAround(lines: string[], p: number, t: number, pointerText: string, 
     options.forEach((o, k) => (o.index = k));
   }
   // ... and an unnumbered key hint after the last option is the hint (codex indents it like its options too)
-  while (options.length && options.at(-1)!.number === undefined && options.some((o) => o.number !== undefined) && HINT.test(options.at(-1)!.label) && !options.at(-1)!.selected)
-    hint ??= options.pop()!.label;
+  // (pop first: with a hint already found, "hint ??= options.pop()" would not pop, and this loop never ended)
+  while (options.length && options.at(-1)!.number === undefined && options.some((o) => o.number !== undefined) && HINT.test(options.at(-1)!.label) && !options.at(-1)!.selected) {
+    const last = options.pop()!.label;
+    hint ??= last;
+  }
   if (options.length < 2) return undefined;
   const numbered = options.filter((o) => o.number !== undefined).length;
   // the agent's own input line also starts with ❯: only accept real lists

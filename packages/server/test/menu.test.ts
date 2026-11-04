@@ -27,6 +27,38 @@ const ASK = [
 ].join("\n");
 
 describe("parsing agent menus", () => {
+  test("claude's rewind list ends: a scroll row under the options and a key hint below (it used to loop forever)", () => {
+    const screen = [
+      "✻ Churned for 1m 20s · done 19:25",
+      "",
+      "─".repeat(84),
+      "  Rewind",
+      "",
+      "  Restore the code and/or conversation to the point before…",
+      "",
+      "    ↑ 22 more",
+      "    1. c1这个论断nebulasd中有没有单独的实验？",
+      "    No code changes",
+      "",
+      "    你先给我把overleaf同步了",
+      "    No code changes",
+      "",
+      "    1.ok 2.同意 3.同意 4.正文推到就不用说了",
+      "    No code changes",
+      "",
+      "  ❯ 我觉得可以加进去吧 2 和 6",
+      "    实验配置定稿.md +29 -6",
+      "",
+      "    ↓ 4 more",
+      "",
+      "  Enter to continue · Esc to cancel",
+    ].join("\n");
+    const t0 = performance.now();
+    parseMenu(screen, "claude");
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+
   test("claude question: title, question, options with descriptions, an option past the separator, key hint", () => {
     const m = parseMenu(ASK)!;
     expect(m.question).toEqual(["Which output format do you prefer for the report?"]);
