@@ -5,6 +5,8 @@
 //   claude: `skill_listing` attachments in its transcript ("- name: description" lines; includes plugin skills)
 //   codex:  the "### Available skills" catalog in its session's instructions; invoked as $name
 //   omp:    SKILL.md files in the folders it discovers; invoked as /skill:name
+//   gemini: SKILL.md files in the folders it discovers, invoked as /name; and its custom commands, TOML files in
+//           ~/.gemini/commands and <project>/.gemini/commands (commands/git/commit.toml is /git:commit)
 
 import type { CommandItem } from "@af/core";
 import { sq } from "./remote.ts";
@@ -12,7 +14,7 @@ import type { TranscriptFS } from "./transcripts/index.ts";
 
 const cmd = (name: string, description: string): CommandItem => ({ name, insert: `/${name}`, description, kind: "command" });
 
-const BUILTIN: Record<"claude" | "codex" | "omp", CommandItem[]> = {
+const BUILTIN: Record<"claude" | "codex" | "omp" | "gemini", CommandItem[]> = {
   // Claude Code 2.1.317 ("/cost" and "/stats" are aliases of /usage; /agents was removed)
   claude: [
     cmd("help", "Show help and available commands"),
@@ -104,6 +106,46 @@ const BUILTIN: Record<"claude" | "codex" | "omp", CommandItem[]> = {
     cmd("logout", "Logout from OAuth provider"),
     cmd("quit", "Quit the application"),
   ],
+  // Gemini CLI 0.66, in the order of its /help (left out: /bug-memory, /oncall, /gemma, /setup-github, /terminal-setup)
+  gemini: [
+    cmd("about", "Show version info"),
+    cmd("agents", "Manage agents"),
+    cmd("auth", "Manage authentication"),
+    cmd("bug", "Submit a bug report"),
+    cmd("chat", "Browse auto-saved conversations and manage chat checkpoints"),
+    cmd("clear", "Clear the screen and start a new session"),
+    cmd("commands", "Manage custom slash commands. Usage: /commands [list|reload]"),
+    cmd("compress", "Compresses the context by replacing it with a summary"),
+    cmd("copy", "Copy the last result or code snippet to clipboard"),
+    cmd("docs", "Open full Gemini CLI documentation in your browser"),
+    cmd("export-session", "Export the current session to a JSON file"),
+    cmd("directory", "Manage workspace directories"),
+    cmd("editor", "Set external editor preference"),
+    cmd("extensions", "Manage extensions"),
+    cmd("help", "For help on gemini-cli"),
+    cmd("footer", "Configure which items appear in the footer (statusline)"),
+    cmd("shortcuts", "Toggle the shortcuts panel above the input"),
+    cmd("hooks", "Manage hooks"),
+    cmd("rewind", "Jump back to a specific message and restart the conversation"),
+    cmd("ide", "Manage IDE integration"),
+    cmd("init", "Analyzes the project and creates a tailored GEMINI.md file"),
+    cmd("mcp", "Manage configured Model Context Protocol (MCP) servers"),
+    cmd("memory", "Commands for interacting with memory"),
+    cmd("model", "Manage model configuration"),
+    cmd("permissions", "Manage folder trust settings and other permissions"),
+    cmd("plan", "Switch to Plan Mode and view current plan"),
+    cmd("policies", "Manage policies"),
+    cmd("privacy", "Display the privacy notice"),
+    cmd("quit", "Exit the cli"),
+    cmd("resume", "Browse auto-saved conversations and manage chat checkpoints"),
+    cmd("stats", "Check session stats. Usage: /stats [session|model|tools]"),
+    cmd("theme", "Change the theme"),
+    cmd("tools", "List available Gemini CLI tools. Use /tools desc to include descriptions."),
+    cmd("skills", "List, enable, disable, or reload Gemini CLI agent skills"),
+    cmd("settings", "View and edit Gemini CLI settings"),
+    cmd("tasks", "Toggle background tasks view"),
+    cmd("vim", "Toggle vim mode on/off"),
+  ],
 };
 
 /** "- name: description" lines → skills. */
@@ -177,10 +219,65 @@ export async function ompSkills(fs: TranscriptFS, cwd: string): Promise<CommandI
   return [...byName.values()];
 }
 
+/**
+ * Skills Gemini CLI can see: SKILL.md in ~/.gemini/skills, ~/.agents/skills, <project>/.gemini/skills and
+ * <project>/.agents/skills (a later folder wins a name; project folders only count in a trusted folder). Invoked as
+ * /name, spaces made "-". Its built-in skills are not offered as commands.
+ */
+export async function geminiSkills(fs: TranscriptFS, cwd: string): Promise<CommandItem[]> {
+  const dirs = ['"$HOME/.gemini/skills"', '"$HOME/.agents/skills"', ...[".gemini/skills", ".agents/skills"].map((d) => sq(`${cwd}/${d}`))];
+  const out = await fs.sh(`for d in ${dirs.join(" ")}; do for f in "$d"/SKILL.md "$d"/*/SKILL.md; do [ -f "$f" ] || continue; echo "@@@ $f"; head -n 15 "$f"; done; done 2>/dev/null`);
+  const byName = new Map<string, CommandItem>();
+  for (const chunk of out.split("@@@ ").slice(1)) {
+    const { name, description } = skillFromFrontmatter(chunk.slice(chunk.indexOf("\n") + 1));
+    if (!name) continue; // Gemini skips a SKILL.md without a name
+    const n = name.trim().replace(/\s+/g, "-");
+    byName.delete(n);
+    byName.set(n, { name: n, insert: `/${n}`, description: description || `Activate the ${name} skill`, kind: "skill" });
+  }
+  return [...byName.values()];
+}
+
+/** A custom command file's description (TOML `description = "…"` or '…'), if it has one. */
+export function tomlDescription(text: string): string | undefined {
+  const m = text.match(/^\s*description\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/m);
+  if (!m) return undefined;
+  return m[1] !== undefined ? m[1].replace(/\\n/g, " ").replace(/\\(.)/g, "$1") : m[2];
+}
+
+/** Gemini's custom commands: <commands folder>/a/b.toml is /a:b (characters other than letters, digits, _ - . become _). */
+export async function geminiCommands(fs: TranscriptFS, cwd: string): Promise<CommandItem[]> {
+  const dirs = ['"$HOME/.gemini/commands"', sq(`${cwd}/.gemini/commands`)];
+  const out = await fs.sh(
+    `for d in ${dirs.join(" ")}; do [ -d "$d" ] || continue; (cd "$d" && find -L . -name '*.toml' -type f | sort | while IFS= read -r f; do echo "@@@ $f"; grep -m 1 -E '^[[:space:]]*description[[:space:]]*=' "$f"; done); done 2>/dev/null`,
+  );
+  const byName = new Map<string, CommandItem>();
+  for (const chunk of out.split("@@@ ").slice(1)) {
+    const nl = chunk.indexOf("\n");
+    const file = (nl < 0 ? chunk : chunk.slice(0, nl)).trim().replace(/^\.\//, "");
+    if (!file.endsWith(".toml")) continue;
+    const name = file
+      .slice(0, -5)
+      .split("/")
+      .map((seg) => {
+        const x = seg.replace(/[^a-zA-Z0-9_\-.]/g, "_");
+        return x.length > 50 ? `${x.slice(0, 47)}...` : x;
+      })
+      .join(":");
+    const description = (nl < 0 ? undefined : tomlDescription(chunk.slice(nl + 1))) ?? `Custom command from ${file.split("/").at(-1)}`;
+    // the project's file wins over the user's with the same name
+    byName.delete(name);
+    byName.set(name, { name, insert: `/${name}`, description, kind: "command" });
+  }
+  return [...byName.values()];
+}
+
 export async function commandsFor(agent: string, fs: TranscriptFS, transcript: string | undefined, cwd: string): Promise<CommandItem[]> {
-  if (agent !== "claude" && agent !== "codex" && agent !== "omp") return [];
+  if (agent !== "claude" && agent !== "codex" && agent !== "omp" && agent !== "gemini") return [];
   let skills: CommandItem[] = [];
   if (agent === "omp") skills = await ompSkills(fs, cwd);
+  // gemini keeps a built-in's name for the built-in (the other one is renamed)
+  else if (agent === "gemini") skills = [...(await geminiCommands(fs, cwd)), ...(await geminiSkills(fs, cwd))].filter((s) => !BUILTIN.gemini.some((b) => b.insert === s.insert));
   else if (transcript) {
     const head = await fs.readFrom(transcript, 0, 3 * 1024 * 1024);
     const text = head?.data.toString("utf8") ?? "";

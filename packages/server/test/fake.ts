@@ -121,8 +121,11 @@ export class FakeBackend implements TerminalBackend {
     this.prompts.push({ name, text });
   }
   keys: { target: string; keys: string[] }[] = [];
+  /** Lets a test redraw the screen as keys are pressed. */
+  onKeys?: (target: string, keys: string[]) => void;
   async sendKeys(target: string, keys: string[]) {
     this.keys.push({ target, keys });
+    this.onKeys?.(target, keys);
   }
   texts: { pane: string; text: string }[] = [];
   screens = new Map<string, string>();

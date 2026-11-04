@@ -318,7 +318,7 @@ describe("panels and notices instead of the input box", () => {
     expect(screenOverlay(["• done", "", "› Ask Codex to do anything", "", "  GPT-6-Astra xhigh · ~/proj", "  ? for shortcuts"].join("\n"), "codex")).toBeUndefined();
     expect(screenOverlay(["  Sign in with ChatGPT", "", "  1) open the link", "  Press Enter to continue"].join("\n"), "codex")!.enter).toBe(true);
     expect(screenOverlay(["Submitted pass.", "╭─ π > demo", "╰─ "].join("\n"), "omp")).toBeUndefined();
-    expect(screenOverlay("anything\nat all\nhere", "gemini")).toBeUndefined();
+    expect(screenOverlay("anything\nat all\nhere", "aider")).toBeUndefined();
     expect(screenOverlay("\n\n", "claude")).toBeUndefined();
   });
 });
@@ -555,5 +555,156 @@ describe("omp dialogs (oh-my-pi 18.2.3): a rounded box in place of the input box
     const o = screenOverlay(review, "omp")!;
     expect(o.lines).toEqual(["Parts    Submit", "Review answers", "1. Parts: Background, Causes", "", "❯ Submit"]);
     expect([o.hint, o.enter, o.esc]).toEqual(["Enter submit · ↑/↓ scroll · Esc cancel", true, true]);
+  });
+});
+
+describe("gemini dialogs (Gemini CLI 0.66): a rounded box in place of its input box", () => {
+  const W = 70;
+  // as Gemini CLI draws them (captured, made narrower): the box, a box inside it, the input band, the footer
+  const box = (rows: string[], indent = "") => [`${indent}╭${"─".repeat(W - 2)}╮`, ...rows.map((r) => `${indent}│ ${r.padEnd(W - 4)} │`), `${indent}╰${"─".repeat(W - 2)}╯`];
+  const inner = (rows: string[]) => [`╭${"─".repeat(W - 6)}╮`, ...rows.map((r) => `│ ${r.padEnd(W - 8)} │`), `╰${"─".repeat(W - 6)}╯`];
+  const band = (first: string, more: string[] = []) => ["▄".repeat(W), ` > ${first}`, ...more.map((r) => `   ${r}`), "▀".repeat(W)];
+  const PLACEHOLDER = "  Type your message or @path/to/file";
+  const FOOTER = [" workspace (/directory)              sandbox             /model", " /tmp/proj                           no sandbox  gemini-4-argon"];
+  const STATUS = [`${" ".repeat(W - 16)}? for shortcuts`, "─".repeat(W), " Shift+Tab to accept edits                                 30 skills"];
+  const ASKED = [...band("Run the tests and fix what fails."), "✦ I will run the tests first."];
+  const idle = (above: string[], first = PLACEHOLDER, more: string[] = []) => [...above, "", ...STATUS, ...band(first, more), ...FOOTER].join("\n");
+
+  test("its input box: idle, working with a queued message, the / list under it; the conversation's boxes are not menus", () => {
+    const about = box(["", "About Gemini CLI", "", "CLI Version          0.66.0", "Model                gemini-4-argon", ""]);
+    for (const screen of [
+      idle([...band("/about"), "", ...about]),
+      idle([...ASKED, "", "  Queued (press ↑ to edit):", "    also check the docs", "", " ⠦ Thinking... (esc to cancel, 2s)"]),
+      [...ASKED, ...STATUS, ...band("/ab"), " about   Show version info", ...FOOTER].join("\n"),
+      // a quoted dialog in the conversation, the shell-mode placeholder, a two-line draft
+      idle(box(["Allow execution of [Shell]?", "", "● 1. Allow once", "  2. No, suggest changes (esc)"]), "  Type your shell command"),
+      idle(ASKED, "first line", ["second line"]),
+    ]) {
+      expect(parseMenu(screen, "gemini")).toBeUndefined();
+      expect(screenOverlay(screen, "gemini")).toBeUndefined();
+    }
+    // a terminal without background colours: a rule above the prompt row instead of the band
+    expect(screenOverlay([...ASKED, ...STATUS, "─".repeat(W), " >   Type your message or @path/to/file", ...FOOTER].join("\n"), "gemini")).toBeUndefined();
+  });
+
+  test("folder trust: the question, numbered options marked with ●, arrows and Enter", () => {
+    const screen = [
+      "ℹ Skipping project agents due to untrusted folder.",
+      "",
+      ...box(["", "Do you trust the files in this folder?", "", "Trusting a folder allows Gemini CLI to load its local configurations.", "", "", "● 1. Trust folder (proj)", "  2. Trust parent folder (tmp)", "  3. Don't trust", ""], " "),
+    ].join("\n");
+    const m = parseMenu(screen, "gemini")!;
+    expect(m.question).toEqual(["Do you trust the files in this folder?", "Trusting a folder allows Gemini CLI to load its local configurations."]);
+    expect(m.options.map((o) => [o.number, o.label, o.selected])).toEqual([
+      [1, "Trust folder (proj)", true],
+      [2, "Trust parent folder (tmp)", false],
+      [3, "Don't trust", false],
+    ]);
+    expect(keysToChoose(m, 2)).toEqual(["down", "down", "enter"]);
+  });
+
+  test("tool approvals: the tool, its command or diff (also as code), the question; the user's message above is not the input box", () => {
+    const shell = [
+      ...ASKED,
+      "",
+      ...box(["? Shell  npm test -- --watch=false", ...inner(["npm test -- --watch=false"]), "Allow execution of [Shell]?", "", "● 1. Allow once", "  2. Allow for this session", "  3. No, suggest changes (esc)"]),
+    ].join("\n");
+    const m = parseMenu(shell, "gemini")!;
+    expect(m.question).toEqual(["Shell", "npm test -- --watch=false", "Allow execution of [Shell]?"]);
+    expect(m.code).toEqual(["npm test -- --watch=false"]);
+    expect(m.options.map((o) => [o.label, o.freeText])).toEqual([
+      ["Allow once", false],
+      ["Allow for this session", false],
+      ["No, suggest changes (esc)", false],
+    ]);
+    expect(keysToChoose(m, 1)).toEqual(["down", "enter"]);
+
+    // earlier tools of the same turn are boxes above it; an edit shows the diff; a warning line may follow the box
+    const edit = [
+      ...box(["✓  Shell npm test -- --watch=false", "", "2 failing", ""]),
+      ...box(["? WriteFile  Writing to notes.txt", ...inner(["1 first note", "2 second note"]), "Apply this change?", "", "● 1. Allow once", "  2. Allow for this session", "  3. Modify with external editor", "  4. No, suggest changes (esc)"]),
+      "",
+      " Press Ctrl+C again to exit.",
+    ].join("\n");
+    const e = parseMenu(edit, "gemini")!;
+    expect(e.question).toEqual(["WriteFile Writing to notes.txt", "1 first note", "2 second note", "Apply this change?"]);
+    expect(e.code).toEqual(["1 first note", "2 second note"]);
+    expect(e.options.map((o) => o.label)).toEqual(["Allow once", "Allow for this session", "Modify with external editor", "No, suggest changes (esc)"]);
+  });
+
+  test("ask_user: descriptions, the text field last (typed while highlighted, then Enter), the hint", () => {
+    const ask = (rows: string[], hint = "Enter to select · ↑/↓ to navigate · Esc to cancel") => [...ASKED, "", ...box(["Answer Questions", "", "Which output format?", "", ...rows, "", hint])].join("\n");
+    const m = parseMenu(ask(["● 1.  Markdown", "      Plain text with headings", "  2.  LaTeX", "      For the paper", "  3.  Enter a custom value"]), "gemini")!;
+    expect(m.question).toEqual(["Which output format?"]);
+    expect(m.options.map((o) => [o.number, o.label, o.description ?? "", o.selected, o.freeText])).toEqual([
+      [1, "Markdown", "Plain text with headings", true, false],
+      [2, "LaTeX", "For the paper", false, false],
+      [3, "Enter a custom value", "", false, true],
+    ]);
+    expect(m.hint).toBe("Enter to select · ↑/↓ to navigate · Esc to cancel");
+    expect([m.multiSelect, m.keys]).toEqual([false, undefined]);
+    expect(keysToChoose(m, 2)).toEqual(["down", "down", "enter"]);
+    // something typed in the field: it shows the text; the answer chosen before carries " ✓"
+    const typed = parseMenu(ask(["  1.  Markdown ✓", "      Plain text with headings", "  2.  LaTeX", "● 3.  Plain text"], "Enter to submit · Esc to cancel"), "gemini")!;
+    expect(typed.options.map((o) => [o.label, o.freeText, o.checked])).toEqual([
+      ["Markdown", false, true],
+      ["LaTeX", false, undefined],
+      ["Plain text", true, undefined],
+    ]);
+  });
+
+  test("ask_user, several questions: steps, a multi-select that ticks with Enter and ends with Done, a scrolled list", () => {
+    const page = (rows: string[]) => box(["Answer Questions", "", "← ✓ Parts │ □ Length │ ≡ Review →", "", "Which parts?", "(Select all that apply)", "", "▲", ...rows, "▼", "", "Enter to select · ←/→ to switch questions · Esc to cancel"]).join("\n");
+    const top = parseMenu(page(["● 1. [x] Background", "         Background information", "  2. [ ] Causes", "         Causes and origins", "  3. [ ] All of the above", "         Select all options"]), "gemini")!;
+    expect(top.tabs).toEqual([{ label: "Parts", done: true }, { label: "Length", done: false }, { label: "Review", done: false, submit: true }]);
+    expect(top.question).toEqual(["Which parts?", "(Select all that apply)"]);
+    expect(top.multiSelect).toBe(true);
+    // the text field is below, out of sight: no option is taken for it
+    expect(top.options.map((o) => [o.label, o.checked, o.freeText])).toEqual([
+      ["Background", true, false],
+      ["Causes", false, false],
+      ["All of the above", false, false],
+    ]);
+    expect(top.hint).toBe("Enter to select · ←/→ to switch questions · Esc to cancel");
+    expect(keysToChoose(top, 1)).toEqual(["down", "enter"]);
+    const done = parseMenu(page(["  3. [ ] All of the above", "         Select all options", "  4. [ ] Enter a custom value", "●  Done", "   Finish selection"]), "gemini")!;
+    expect(done.options.map((o) => [o.label, o.action, o.freeText, o.selected])).toEqual([
+      ["All of the above", undefined, false, false],
+      ["Enter a custom value", undefined, true, false],
+      ["Done", "primary", false, true],
+    ]);
+    expect(keysToChoose(done, 0)).toEqual(["up", "up", "enter"]);
+  });
+
+  test("other selection dialogs: /model, the rewind confirmation", () => {
+    const model = box(["", "Select Model", "", "  1. Auto", "     Let Gemini CLI decide the best model for the task", "● 2. Manual", "     Manually select a model", "", "Remember model for future sessions: false (Press Tab to toggle)", "", "(Press Esc to close)", ""]);
+    const m = parseMenu([...band("/model"), "", ...model].join("\n"), "gemini")!;
+    expect(m.question).toEqual(["Select Model"]);
+    expect(m.options.map((o) => [o.label, o.description, o.selected])).toEqual([
+      ["Auto", "Let Gemini CLI decide the best model for the task", false],
+      ["Manual", "Manually select a model", true],
+    ]);
+    const confirm = box(["", "Confirm Rewind", "", "┌──────────────────────────────────────────┐", "│ File: notes.txt                          │", "│ Lines added: 2 Lines removed: 0 (3m ago) │", "└──────────────────────────────────────────┘", "", "Select an action:", "", "● 1. Rewind conversation and revert code changes", "  2. Rewind conversation", "  3. Revert code changes", "  4. Do nothing (esc)", ""]);
+    const c = parseMenu(confirm.join("\n"), "gemini")!;
+    expect(c.question).toEqual(["Confirm Rewind", "File: notes.txt", "Lines added: 2 Lines removed: 0 (3m ago)", "Select an action:"]);
+    expect(c.code).toBeUndefined();
+    expect(c.options.map((o) => o.label)).toEqual(["Rewind conversation and revert code changes", "Rewind conversation", "Revert code changes", "Do nothing (esc)"]);
+  });
+
+  test("boxes that are not menus are overlays: the rewind list, the answers to review", () => {
+    const list = box(["", "> Rewind", "", "  Run the tests and fix what fails.", "  1 file changed +2", "", "● Stay at current position", "  Cancel rewind and stay here", "", "", "(Use Enter to select a message, Esc to close, Right/Left to expand/collapse)", ""]);
+    const screen = [...band("/rewind"), "", ...list].join("\n");
+    expect(parseMenu(screen, "gemini")).toBeUndefined();
+    expect(screenOverlay(screen, "gemini")).toEqual({
+      lines: ["> Rewind", "", "Run the tests and fix what fails.", "1 file changed +2", "", "● Stay at current position", "Cancel rewind and stay here"],
+      hint: "(Use Enter to select a message, Esc to close, Right/Left to expand/collapse)",
+      enter: true,
+      esc: true,
+    });
+    const review = box(["Answer Questions", "", "← ✓ Parts │ ✓ Length │ ≡ Review →", "", "Review your answers:", "", "Parts → Background", "Length → Long", "", "Enter to submit · Tab/Shift+Tab to edit answers · Esc to cancel"]).join("\n");
+    expect(parseMenu(review, "gemini")).toBeUndefined();
+    const o = screenOverlay(review, "gemini")!;
+    expect(o.lines).toEqual(["Answer Questions", "", "← ✓ Parts │ ✓ Length │ ≡ Review →", "", "Review your answers:", "", "Parts → Background", "Length → Long"]);
+    expect([o.hint, o.enter, o.esc]).toEqual(["Enter to submit · Tab/Shift+Tab to edit answers · Esc to cancel", true, true]);
   });
 });
