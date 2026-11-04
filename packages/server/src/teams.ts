@@ -411,6 +411,15 @@ export class Teams {
       session: a.kind === "claude" ? crypto.randomUUID() : undefined,
     };
     this.emit(t, { type: "member.added", at: this.now(), member: m });
+    // gemini cannot add to its system prompt; a protocol file passed with "@file" needs its folder added to gemini's
+    // workspace, which makes it ask whether to trust that folder. So the protocol is its first message instead.
+    const typedProtocol = a.kind === "gemini" && a.protocol !== "none";
+    if (typedProtocol)
+      this.queueMessage(t, {
+        member: a.name,
+        kind: "brief",
+        text: `${readFileSync(join(t.dir, "protocol", `${a.protocol}.md`), "utf8").trim()}\n\n[agent-flow] These are your agent-flow instructions for this whole session (your team is ${t.id}, your name ${a.name}). Reply only: ready`,
+      });
     t.starting.add(a.name);
     try {
       const env = this.env(t, a.protocol === "none" ? undefined : a.name);
@@ -418,7 +427,7 @@ export class Teams {
       this.emit(t, { type: "member.placed", at: this.now(), name: a.name, paneId: tab.paneId, tabId: tab.tabId });
       if (m.session) this.opts.w.rememberSession(tab.paneId, m.session);
       const args = () =>
-        a.protocol === "none" ? plainArgs(a.kind, this.opts.config, m.session) : launchArgs(a.kind, a.protocol as Role, join(t.dir, "protocol", `${a.protocol}.md`), this.opts.config, m.session);
+        a.protocol === "none" || typedProtocol ? plainArgs(a.kind, this.opts.config, m.session) : launchArgs(a.kind, a.protocol as Role, join(t.dir, "protocol", `${a.protocol}.md`), this.opts.config, m.session);
       const herdr = herdrMemberName(t.id, a.name);
       // a new tab's shell takes a moment to be ready; until then Herdr says the pane is busy
       let res = await this.opts.backend.startAgent(herdr, a.kind, tab.paneId, args());
@@ -597,7 +606,7 @@ export class Teams {
 
     const id = this.newId();
     const dir = join(this.opts.home, "teams", id);
-    const ws = await this.opts.backend.createWorkspace(`◆ ${name}`, cwd, {
+    const ws = await this.opts.backend.createWorkspace(name, cwd, {
       AF_TEAM: id,
       AF_AGENT: "router",
       AF_SOCK: this.opts.sock,
@@ -615,12 +624,13 @@ export class Teams {
     }
     const t = this.create({ name, mode: "router", cwd, manager: { member: "router" }, workspace: ws.workspaceId, parent: parentRef, playbook: pb?.id, playbookPath: pb?.path, goal }, id);
     await this.opts.backend.renameTab(ws.tabId, "router").catch(() => {});
-    this.queueMessage(t, { member: "router", kind: "brief", text: this.brief(t) });
-    // the router starts in the workspace's first pane; it gets the brief once it is free
+    // the router starts in the workspace's first pane; it gets the brief once it is free (a gemini router gets its
+    // protocol first: spawn queues it before its first await)
     const p = this.spawn(t, { name: "router", kind: router, protocol: "router", pane: { paneId: ws.paneId, tabId: ws.tabId } })
       .catch((e) => this.raise(t, { id: "startup:router", kind: "startup", member: "router", text: `The router did not start: ${(e as Error).message}` }))
       .finally(() => this.pending.delete(p));
     this.pending.add(p);
+    this.queueMessage(t, { member: "router", kind: "brief", text: this.brief(t) });
     if (parent) this.emitParentPane(parent, t);
     return { team: t.id, name, workspace: ws.workspaceId, parent: t.state.meta!.parent, playbook: pb?.id };
   }
@@ -669,6 +679,9 @@ export class Teams {
       branch: existing?.branch ?? (req.worktree ? memberBranch(t.id, name) : undefined),
     });
     if (!existing) this.spawnLater(t, { name, kind, protocol: "member", role: req.role, worktree: !!req.worktree }, k.id);
+    // a new ticket acts on the requests the router took (the user's, a report from a nested team)
+    const asked = takenUnhandled(t.state).filter((q) => (q.kind === "user" || q.kind === "report") && !q.ticket).map((q) => q.seq);
+    if (asked.length) this.emit(t, { type: "queue.handled", at: this.now(), seqs: asked });
     return { ticket: k.id, member: name, thread: k.thread, round: k.round, dir: this.ticketDir(t, k.id), started: !existing };
   }
 
@@ -782,12 +795,13 @@ export class Teams {
       }
       this.enqueue(parent, { kind: "report", ticket: k?.id, from: member?.name ?? t.id, text: `${done ? "Team finished" : "Team update"} (${t.state.meta!.name}): ${text}`, path: done && k ? join(this.ticketDir(parent, k.id), "result.md") : file });
     } else this.raise(t, { id: `report:${t.state.queue.length}:${Date.now()}`, kind: "report", text: `${done ? "Finished" : "Update"}: ${firstLine(text, 300)}` });
-    // a report answers what the router took from above (the user's requests, a nested team's report)
+    // a report answers what the router took from above (the user's requests, a nested team's report), and problems
+    // only the user can solve (a prompt that waits for them, a member that stopped); results still need routing
     const seqs = takenUnhandled(t.state)
-      .filter((q) => q.kind === "user" || q.kind === "report" || !q.ticket)
+      .filter((q) => !["submit", "turn", "ask", "asking"].includes(q.kind) || !q.ticket)
       .map((q) => q.seq);
     if (seqs.length) this.emit(t, { type: "queue.handled", at: this.now(), seqs });
-    return { to: parent ? `team ${parent.id}` : "the user", file };
+    return { to: parent ? `the session that started this team (it gets it in its queue; its own team is ${parent.id})` : "the user (in Needs you)", file };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -871,6 +885,7 @@ export class Teams {
       user: "new request",
       ask: "asks",
       asking: "is asking on screen",
+      approval: "waits for the user",
       stuck: "may be stuck",
       exited: "exited",
       error: "error",
@@ -1003,16 +1018,24 @@ export class Teams {
     if (p.asking || p.agentStatus === "blocked") {
       const menu = await w.menu(m.paneId!).catch(() => undefined);
       const question = menu ? [...menu.question, ...(menu.code ?? [])].join(" ").replace(/\s+/g, " ").trim() : (p.asking ?? "");
-      if (k && menu && question && !isApproval(question) && !isApproval(menu.options.map((o) => o.label).join(" ")) && t.asked.get(m.name) !== question) {
+      const approval = !menu || isApproval(question) || isApproval(menu.options.map((o) => o.label).join(" "));
+      const about = k ?? waitingTickets(t.state, m.name)[0];
+      // once per question, also across restarts: an item about the same question since it appeared (the pane's status
+      // changed when the dialog came up, and that time is kept across restarts)
+      const since = p.statusAt ? Date.parse(p.statusAt) : 0;
+      const known = t.state.queue.some((q) => q.from === m.name && (q.kind === "asking" || q.kind === "approval") && q.text.includes(firstLine(question, 200)) && (q.state !== "handled" || Date.parse(q.at) >= since));
+      if (about && question && t.asked.get(m.name) !== question && !known) {
         t.asked.set(m.name, question);
-        this.enqueue(t, { kind: "asking", ticket: k.id, from: m.name, text: question, options: menu.options.map((o) => o.label) });
+        if (!approval && k) this.enqueue(t, { kind: "asking", ticket: k.id, from: m.name, text: question, options: menu!.options.map((o) => o.label) });
+        // a permission or trust prompt is the user's: the manager only hears that it waits (so it can say so)
+        else this.enqueue(t, { kind: "approval", ticket: about.id, from: m.name, text: `Waiting for the user to answer a prompt on its screen: "${firstLine(question, 200)}". Only the user can answer it (it is in their Needs you); do not answer it yourself.` });
       }
       return;
     }
     if (t.asked.has(m.name)) {
       // answered (by the manager, or the user on its card): an item nobody took is out of date
       t.asked.delete(m.name);
-      const stale = t.state.queue.filter((q) => q.kind === "asking" && q.from === m.name && q.state === "queued").map((q) => q.seq);
+      const stale = t.state.queue.filter((q) => (q.kind === "asking" || q.kind === "approval") && q.from === m.name && q.state === "queued").map((q) => q.seq);
       if (stale.length) this.emit(t, { type: "queue.handled", at: this.now(), seqs: stale });
     }
 
@@ -1203,7 +1226,7 @@ export class Teams {
 
   private shortItem(t: Team, q: QueueItem) {
     const who = q.from ?? "";
-    const what: Record<QueueKind, string> = { user: "new request", ask: "asks a question", asking: "is asking", stuck: "may be stuck", exited: "exited", error: "error", submit: "submitted", turn: t.state.meta!.mode === "direct" ? "finished" : "stopped without submitting", report: "reported" };
+    const what: Record<QueueKind, string> = { user: "new request", ask: "asks a question", asking: "is asking", approval: "waits for the user's approval", stuck: "may be stuck", exited: "exited", error: "error", submit: "submitted", turn: t.state.meta!.mode === "direct" ? "finished" : "stopped without submitting", report: "reported" };
     return `${q.ticket ? `${q.ticket} ` : ""}${who} ${what[q.kind]}`.replace(/\s+/g, " ").trim();
   }
 }

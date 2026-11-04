@@ -77,13 +77,16 @@ export async function main(argv: string[]) {
   access = makeTranscriptAccess(o, w);
   const n = o.load();
   o.start(1000);
-  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access });
+  // AF_SECOND_SERVER=1: a server next to the main one (tests, trying a branch): it does not rewrite the skills in the
+  // user's skill folders, and does not hand over documents agents change (the main server does both)
+  const second = process.env.AF_SECOND_SERVER === "1";
+  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access, watchDocs: !second });
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));
   console.log(`agent-flow server: ${n} team(s) loaded`);
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
   console.log(`  socket: ${sock}`);
   console.log(`  af CLI: ${join(binDir, "af")}  (add ${binDir} to PATH)`);
-  for (const f of installSkill(join(binDir, "af"))) console.log(`  skill:  ${f}`);
+  if (!second) for (const f of installSkill(join(binDir, "af"))) console.log(`  skill:  ${f}`);
   const shutdown = () => {
     o.stop();
     w.stop();

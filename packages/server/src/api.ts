@@ -483,10 +483,10 @@ interface WsData {
   cutsUnsub?: () => void;
 }
 
-export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices; access?: TranscriptAccess }) {
+export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices; access?: TranscriptAccess; watchDocs?: boolean }) {
   const access = opts.access ?? makeTranscriptAccess(o, w);
   const handler = makeHandler(o, w, opts.backend, access);
-  watchDocuments(w, access);
+  if (opts.watchDocs !== false) watchDocuments(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue } satisfies ServerPush);
   w.onChange(() => {

@@ -183,6 +183,16 @@ describe("mode 1: a session hands out tasks", () => {
     await w.refresh();
     await o.flush();
     expect(o.get(team).queue.filter((x) => x.kind === "asking").length).toBe(1);
+    // the session only hears that it waits for the user, once
+    expect(o.get(team).queue.at(-1)).toMatchObject({ kind: "approval", ticket: "T1", from: "writer" });
+    await step();
+    expect(o.get(team).queue.filter((x) => x.kind === "approval").length).toBe(1);
+    // the session dealt with it; a new server (no memory of what it saw) does not report the same dialog again
+    await call("/team/take", { callerPane: lead });
+    const o2 = new Teams({ ...o.opts });
+    o2.load();
+    await o2.flush();
+    expect(o2.get(team).queue.filter((x) => x.kind === "approval").length).toBe(1);
     expect(ticketStage(o.get(team).tickets.T1!, o.get(team).members.writer, { status: "blocked", asking: "Bash command rm -rf build Do you want to proceed?" })).toBe("approval");
     const refused = await call("/team/answer", { callerPane: lead, ref: "writer", option: 1 });
     expect(refused.status).toBe(403);
@@ -332,6 +342,13 @@ describe("mode 2: an agent team with a router", () => {
     expect(Object.values(o.get(id).attention).map((a) => a.kind)).not.toContain("loop_limit");
     expect((await call("/team/ticket", { ...R, member: "writer", title: "fix again", task: "Apply it.", from: "T4" })).body).toMatchObject({ ticket: "T5", round: 3 });
 
+    // the caller adds a request; the router takes it and opens a ticket for it: that deals with the request
+    await call("/team/tell", { callerPane: lead, ref: "T1", text: "also a second haiku about snow" });
+    expect(o.get(id).queue.at(-1)).toMatchObject({ kind: "user", text: "also a second haiku about snow" });
+    await call("/team/take", R);
+    await call("/team/ticket", { ...R, member: "writer2", kind: "claude", title: "snow", task: "Write a haiku about snow." });
+    expect(o.get(id).queue.at(-1)!.state).toBe("handled");
+
     // the final report goes to the caller's queue and finishes the team's ticket there
     const rep = await call("/team/report", { ...R, text: "Done: the haiku is in haiku.md", done: true });
     expect(rep.status).toBe(200);
@@ -343,6 +360,29 @@ describe("mode 2: an agent team with a router", () => {
     expect(top.body.text).toContain("Team finished");
     expect(top.body.text).toContain("haiku.md");
     expect(o.get(parent.meta!.id).tickets.T1!.status).toBe("closed");
+  });
+
+  test("a gemini member gets its protocol as its first message (no extra folder to trust), then its ticket", async () => {
+    const { o, backend, call, step, turn, typed, lead } = await setup();
+    const made = await call("/team/new", { callerPane: lead, goal: "g", router: "gemini" });
+    await step();
+    const id = made.body.team;
+    const router = o.get(id).members.router!;
+    const rargs = backend.panes.get(router.paneId!)!.agent!.args.join(" ");
+    expect(rargs).not.toContain("--include-directories");
+    expect(rargs).not.toContain("-i");
+    expect(typed(router.paneId!)[0]).toStartWith("# agent-flow router protocol");
+    await turn(herdrMemberName(id, "router")); // "ready"
+    expect(typed(router.paneId!)[1]).toContain("You are the router of team");
+    await turn(herdrMemberName(id, "router"));
+    await call("/team/ticket", { team: id, agent: "router", member: "rev", kind: "gemini", title: "review", task: "Review it." });
+    await step();
+    const rev = o.get(id).members.rev!;
+    expect(typed(rev.paneId!)[0]).toStartWith("# agent-flow member protocol");
+    expect(typed(rev.paneId!)[0]).toContain(`your team is ${id}, your name rev`);
+    expect(o.get(id).tickets.T1!.status).toBe("open"); // the ticket waits for "ready"
+    await turn(herdrMemberName(id, "rev"));
+    expect(typed(rev.paneId!)[1]).toStartWith("[agent-flow] Ticket T1 for you: review.");
   });
 
   test("ask and reply; tell reaches a member when it is free; a router reminded of items it took and left", async () => {

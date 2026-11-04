@@ -240,7 +240,7 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 
 - `packages/skill/router.md`：router 的规则（不干活、不改写、每项用一个动作结束、只在里程碑和需要用户时汇报、做完就结束这一轮、不轮询）。
 - `packages/skill/member.md`：成员的规则（读 task.md、写 result.md、`af submit` 正好一次、提问用 `af ask`、不和别的成员说话）。
-- 注入方式和原来一样（claude `--append-system-prompt-file`，codex profile，omp `--append-system-prompt=`，gemini 第一条消息 `@<文件>`）。**协议文本绝不能放在命令行上**（macOS 单行 1024 字节）。
+- 注入方式：claude `--append-system-prompt-file`，codex profile，omp `--append-system-prompt=`。gemini 没有追加系统提示的参数，协议作为它的**第一条消息打进去**（再等它回 ready 才送工单）。不用 `-i "@<文件>"`：那要把协议所在的文件夹加进 gemini 的 workspace，gemini 会为这个文件夹弹"是否信任"（2026-11-04 实测，每个 gemini 成员都会卡住）。**协议文本绝不能放在命令行上**（macOS 单行 1024 字节）。
 - 模式一的成员不注入协议，用平常的启动参数（claude 带 `--session-id` 和 SessionStart hook，codex `--no-alt-screen`，gemini YOLO）。
 - `agent-flow` skill（server 启动时写进 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`）教会用户的 session 两件事：直接派活用 `af task`；要循环或长期运转的活用 `af team new`。
 
@@ -414,6 +414,10 @@ agent-flow/
 | S2 | claude / codex / omp 拿到 skill 后会不会老实用 `af done` 交结果 | 每种 agent 跑 5 个小任务，交结果的格式正确、outcome 合法的比例不低于 90% | 加强 skill；加超时提醒；或者让 server 在 agent 变 idle 时追问一次 |
 | S3 | 派发时能不能自动给新开的 agent 注入 skill、角色和环境变量 | 三种 agent 都能用一条命令起来，并且拿到任务 | 某种 agent 只能退回"第一条 prompt 里写全部说明" |
 
+### 9.1 第二个 server
+
+`AF_SECOND_SERVER=1`（配合自己的 `AF_HOME`、`AF_SOCK`、`--port`）：在主 server 旁边再开一个（测试、试一个分支）。它不改写用户 skill 目录里的 skill，也不交付 agent 改过的文档（这两件事由主 server 做），所以不会影响用户正在用的 session。
+
 ## 14. 验收场景
 
 用沙盒仓库（不用 agent-flow 自己）：
@@ -422,6 +426,11 @@ agent-flow/
 2. 一个成员屏幕上出现任务问题时，主 agent 用 `af answer` 回答；出现权限审批时进"需要你"，主 agent 不碰。
 3. **模式二**：`af team new --playbook humanize-loop --goal …`。router 开 coder 和 reviewer，至少发生一次 fail → 改 → pass；泳道图上看得到每一轮；router 最后 `af report --done`，主 agent 收到。
 4. 中途重启 af server，再打开时队列、工单、时间轴都完整，没送达的通知照样送达。
+
+2026-11-04 实测（第二个 server，沙盒 `.sandbox/modes`）：
+- 模式一：主 claude 读 skill 后两次 `af task`（codex、gemini），结束这一轮不等待。gemini 做完 6 秒内结果进队列，主 agent `af queue take` 拿到。codex 卡在"信任此文件夹"（会信任整个仓库），没有替用户点；重启 server 后主 agent 收到"等你批准"的通知，向用户说明了后果，没有去点。
+- 模式二：主 claude `af team new --playbook humanize-loop`；router 开 writer（claude），交了以后 `--from` 开 reviewer（gemini）。gemini 卡在 agent-flow 自己的协议文件夹的信任框（已修，见第 9 节），router `af report` 给主 agent，主 agent 告诉用户。用户让换人后，主 agent `af tell T3`，router 开 reviewer2（gemini，协议作为第一条消息，不再弹框），审核 PASS，router `af report --done`，主 agent 汇报了俳句、每行音节、季语和轮数。
+- 这次跑出来并修掉的：重启后同一个对话框重复通知；`af report` 没有算作处理了"等你批准"这类项；开工单没有算作处理了用户的新要求；`af report` 的输出让 router 误以为发错了地方；团队工单在时间轴上显示"空闲"。
 
 ## 15. 以后再做
 

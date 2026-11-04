@@ -110,7 +110,7 @@ export interface Ticket {
   team?: string;
 }
 
-export type QueueKind = "user" | "ask" | "asking" | "stuck" | "exited" | "error" | "submit" | "turn" | "report";
+export type QueueKind = "user" | "ask" | "asking" | "approval" | "stuck" | "exited" | "error" | "submit" | "turn" | "report";
 export type QueueState = "queued" | "taken" | "handled";
 
 export interface QueueItem {
@@ -333,7 +333,7 @@ export const roundsIn = (s: TeamState, thread: string, member: string) => ticket
 export const threadMax = (s: TeamState, thread: string) => s.tickets[thread]?.max ?? DEFAULT_MAX_ROUNDS;
 
 /** Queue items in the order the manager should handle them: the user first, then problems, then results. */
-const PRIORITY: Record<QueueKind, number> = { user: 0, ask: 1, asking: 1, stuck: 1, exited: 1, error: 1, submit: 2, turn: 2, report: 2 };
+const PRIORITY: Record<QueueKind, number> = { user: 0, ask: 1, asking: 1, approval: 1, stuck: 1, exited: 1, error: 1, submit: 2, turn: 2, report: 2 };
 export const byPriority = (items: QueueItem[]) => [...items].sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind] || a.seq - b.seq);
 
 /** Messages for a member not typed in yet, oldest first. */
@@ -377,8 +377,12 @@ export interface PaneLook {
 export function ticketStage(k: Ticket, member: Member | undefined, pane?: PaneLook): StageKey {
   if (k.status === "closed") return k.outcome === "failed" ? "failed" : k.outcome === "dropped" ? "dropped" : k.outcome === "cancelled" ? "cancelled" : "done";
   if (k.deliveryError) return "undelivered";
-  const live = k.status === "working" || k.status === "submitted";
-  if (live && (pane?.asking || pane?.status === "blocked")) return isApproval(pane?.asking) ? "approval" : "asking";
+  // a ticket a whole team works on: working until its router reports it done
+  if (k.team) return k.status === "submitted" ? "review" : k.status === "open" ? "queued" : "working";
+  // a question on the member's screen: about this ticket when it is the one being worked on, or when the member is
+  // stuck on a prompt while starting (folder trust, login) before it got any ticket
+  const live = k.status === "working" || k.status === "submitted" || (k.status === "open" && member?.status === "blocked");
+  if (live && (pane?.asking || pane?.status === "blocked")) return isApproval(pane?.asking) || k.status === "open" ? "approval" : "asking";
   if (k.status === "submitted") {
     const r = k.report?.status;
     return r === "blocked" ? "blocked" : r === "failed" ? "failed" : r === "dropped" ? "dropped" : "review";

@@ -38,7 +38,8 @@ When a session finishes its turn, a line like this is typed here:
 Run \`${af} queue take\`: you get each session's final reply (the full text is in the file it names). Then hand out
 the next task, tell a session more (\`${af} tell T1 "<text>"\`), or report to the user. The queue also tells you when
 a session asks a question on its screen (answer it with \`${af} answer T2 <option number>\` if it is about the task;
-permission prompts are the user's), may be stuck, or exited (\`${af} status <name>\` shows what it is doing).
+permission prompts are the user's: when a session waits for one, tell the user), may be stuck, or exited
+(\`${af} status <name>\` shows what it is doing).
 
 ## Mode 2: an agent team with a router (loops, longer work)
 

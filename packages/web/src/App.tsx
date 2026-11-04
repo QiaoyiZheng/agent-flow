@@ -168,7 +168,7 @@ export function App() {
     focused: focusedPane,
     onFocus: (p) => selectedWs && setFocused((f) => ({ ...f, [selectedWs]: p })),
     runAgents,
-    leadPane: managerPane,
+    leadPane: undefined, // routers are named router; a session that hands out work is not a member
   };
   const showFile = (target: string) => {
     const of = focusedPane ?? managerPane;
