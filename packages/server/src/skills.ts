@@ -84,6 +84,9 @@ When a document for the user is done, run (one shell command; use the full path)
 - Hand over a document once when it is ready, and again only after a revision the user should look at.
 - Then, in your reply, say what the document is and where it is (its path).
 
+This applies however you wrote the file: with your edit tools, a script, a shell command, or a tool that generates
+it (python-pptx, pandoc, LaTeX). Hand it over before your final reply, at the end of the turn that produced it.
+
 If the command fails (agent-flow is not running, or this session is not in it), just give the file's path in your
 reply. Do not retry, and do not open the file with other commands.
 `;

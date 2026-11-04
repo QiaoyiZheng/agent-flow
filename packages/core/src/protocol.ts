@@ -315,6 +315,8 @@ export interface Delivery {
   opened?: string;
   /** Opened or dismissed by the user: no longer in "Needs you". */
   done?: boolean;
+  /** Found by agent-flow (the agent changed it during its turn), not handed over with af deliver. */
+  found?: boolean;
   at: string;
 }
 

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LayoutNode } from "@af/core";
 import { DEFAULT_CONFIG } from "../src/agents.ts";
-import { makeHandler } from "../src/api.ts";
+import { handOver, makeHandler, watchDocuments } from "../src/api.ts";
+import { makeTranscriptAccess } from "../src/access.ts";
 import { commitAll, git } from "../src/git.ts";
 import { Orchestrator } from "../src/orchestrator.ts";
 import { Workspaces } from "../src/workspaces.ts";
@@ -475,6 +476,32 @@ describe("af deliver: a finished document handed to the user", () => {
     expect(loose.body.delivery.viewer).toBeUndefined();
     // a file that is not there is refused before any app starts
     expect((await post("/open-with", { path: "/x/a.md", app: "obsidian" })).status).toBe(404);
+  });
+});
+
+describe("documents found at the end of a turn", () => {
+  test("a document the agent changed but did not hand over is handed over when its turn ends; one it handed over is not doubled", async () => {
+    const { home, backend, w, ws } = await setup();
+    const proj = tmp("af-proj-");
+    backend.panes.get(ws.paneId)!.cwd = proj;
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    await w.refresh();
+    const o = new Orchestrator({ home, backend, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG });
+    const access = makeTranscriptAccess(o, w);
+    watchDocuments(w, access);
+    backend.set("a1", "working");
+    await w.refresh();
+    await Bun.sleep(20);
+    writeFileSync(join(proj, "report.md"), "# R\n");
+    writeFileSync(join(proj, "handed.md"), "# H\n");
+    writeFileSync(join(proj, "code.ts"), "x");
+    await handOver(w, access, { path: join(proj, "handed.md"), pane: ws.paneId }); // the agent ran af deliver for this one
+    backend.set("a1", "done");
+    await w.refresh();
+    await Bun.sleep(1700);
+    const open = access.deliveries.list.filter((d) => !d.done);
+    expect(open.map((d) => d.path.split("/").at(-1)).sort()).toEqual(["handed.md", "report.md"]);
+    expect(open.find((d) => d.path.endsWith("report.md"))).toMatchObject({ found: true, pane: ws.paneId, title: "claude changed report.md" });
   });
 });
 

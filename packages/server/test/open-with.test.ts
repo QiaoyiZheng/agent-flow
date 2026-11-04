@@ -63,3 +63,33 @@ describe("documents handed over", () => {
     expect(again.list.length).toBe(1);
   });
 });
+
+import { changedDocuments, isDocument } from "../src/doc-watch.ts";
+import { mkdirSync, utimesSync } from "node:fs";
+
+describe("documents an agent changed during its turn", () => {
+  test("documents count; code, data, build outputs, agents' own files and hidden folders do not", () => {
+    for (const f of ["/p/docs/实验预测表.md", "/p/paper/main.tex", "/p/deck.pptx", "/p/report.pdf", "/p/notes.txt", "/p/index.html"]) expect(isDocument(f)).toBe(true);
+    for (const f of ["/p/src/a.ts", "/p/data.json", "/p/AGENTS.md", "/p/CLAUDE.md", "/p/paper/main.aux", "/p/paper/main.log", "/p/a.md.bak", "/p/.notes.md"]) expect(isDocument(f)).toBe(false);
+  });
+
+  test("only files changed after the turn started, newest first", () => {
+    const root = tmp();
+    for (const d of ["docs", "node_modules/x", ".claude", "build"]) mkdirSync(join(root, d), { recursive: true });
+    const old = Date.now() / 1000 - 3600;
+    const write = (rel: string, text = "x", mtime?: number) => {
+      writeFileSync(join(root, rel), text);
+      if (mtime) utimesSync(join(root, rel), mtime, mtime);
+    };
+    write("docs/old.md", "old", old);
+    write("docs/report.md", "new");
+    write("docs/table.xlsx", "PK");
+    write("src.ts", "code");
+    write("node_modules/x/README.md", "dep");
+    write(".claude/plan.md", "agent");
+    write("build/out.html", "built");
+    write("docs/empty.md", "");
+    const since = Date.now() - 60_000;
+    expect(changedDocuments(root, since).map((p) => p.slice(root.length + 1)).sort()).toEqual(["docs/report.md", "docs/table.xlsx"]);
+  });
+});

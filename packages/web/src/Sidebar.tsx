@@ -408,7 +408,7 @@ function NeedsYou({
     needs.push({
       key: `d:${d.id}`,
       kind: "delivery",
-      label: `ready · ${name}`,
+      label: `${d.found ? "changed" : "ready"} · ${name}`,
       where: [wsLabel(d.workspace), d.agent ?? ag?.agentName ?? ag?.agent].filter(Boolean).join(" · "),
       text: [d.title, d.note].filter(Boolean).join(" — "),
       at: d.at,

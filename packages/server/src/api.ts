@@ -18,6 +18,7 @@ import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
 import { rewindTo } from "./rewind.ts";
 import { type Remote, fileKind, installedApps, openWith } from "./open-with.ts";
+import { changedDocuments, docLabel } from "./doc-watch.ts";
 import { enrichFromTranscript } from "./menu.ts";
 import type { Notices } from "./notices.ts";
 import { checkReadable, findFiles, listDir, readableRoots, statPath } from "./files.ts";
@@ -214,36 +215,11 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         // documents handed over by agents, and opening files in VS Code / Obsidian / their app
         case "POST /deliver": {
           const pane = String(body.pane ?? body.callerPane ?? "") || undefined;
-          const p = pane ? w.model.panes.find((x) => x.id === pane) : undefined;
           const file = String(body.path ?? "");
           if (!file.startsWith("/")) throw new AfError("bad_path", "give the file's absolute path");
           if (!existsSync(file) || statSync(file).isDirectory()) throw new AfError("not_found", `${file} is not a file`, 404);
-          const d = access.deliveries;
-          // shown next to the agent that wrote it: in the viewer its last document went to, else a new one
-          let viewer: string | undefined;
-          if (p && p.machine === "local" && body.show !== false) {
-            const last = [...d.list].reverse().find((x) => x.pane === pane && x.viewer && w.views[x.viewer]);
-            const rec = last ? await w.show({ target: file, in: last.viewer }, caller.agent ?? "agent") : await w.show({ target: file, of: pane, split: "right" }, caller.agent ?? "agent");
-            viewer = rec.paneId;
-          }
-          let opened: string | undefined;
-          if (d.settings.auto) {
-            const app = d.appFor(file);
-            opened = (await openWith(app, file).catch(() => undefined))?.app;
-          }
-          const rec = d.add({
-            path: file,
-            machine: "local",
-            pane,
-            workspace: p?.workspaceId,
-            agent: caller.agent,
-            title: body.title ? String(body.title).slice(0, 200) : undefined,
-            note: body.note ? String(body.note).slice(0, 1000) : undefined,
-            viewer,
-            opened,
-            done: !!opened,
-          });
-          return json({ delivery: rec, kind: fileKind(file), app: d.appFor(file) });
+          const rec = await handOver(w, access, { path: file, pane, agent: caller.agent, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined, show: body.show !== false });
+          return json({ delivery: rec, kind: fileKind(file), app: access.deliveries.appFor(file) });
         }
         case "POST /deliver/done":
           return json({ ok: !!access.deliveries.done(String(body.id ?? "")) });
@@ -345,6 +321,57 @@ const RUN_LIST_EVENTS = new Set(["run.created", "run.stopped", "run.quiescent", 
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".json": "application/json" };
 
 /** Serve a file the UI asked to preview. Only paths inside a run's directories or ~/.agent-flow are allowed. */
+/**
+ * When an agent's turn ends, the documents it changed in its folder during the turn are handed over (see
+ * doc-watch.ts), unless it handed them over itself. Local agents only: a remote folder would need a walk over SSH.
+ */
+export function watchDocuments(w: Workspaces, access: TranscriptAccess) {
+  return w.onTurnEnd((t) => {
+    if (t.machine !== "local" || !t.cwd || t.cwd === "/" || t.cwd === (process.env.HOME ?? "")) return;
+    // the turn's start (when Herdr saw it), a little early for safety; at most an hour back
+    const since = Math.max((t.started ?? t.ended - 3600_000) - 2000, t.ended - 3600_000);
+    setTimeout(async () => {
+      try {
+        const found = changedDocuments(t.cwd, since);
+        const recent = access.deliveries.list.filter((d) => d.pane === t.pane && Date.parse(d.at) >= since);
+        for (const path of found.reverse()) {
+          if (recent.some((d) => d.path === path)) continue; // handed over by the agent during this turn
+          await handOver(w, access, { path, pane: t.pane, title: `${t.agent} changed ${docLabel(t.cwd, path)}`, found: true });
+        }
+      } catch {}
+    }, 1500); // the agent's last writes may land just after Herdr shows it done
+  });
+}
+
+/**
+ * Hand a document over to the user: shown next to the agent that wrote it (in the viewer its last document went
+ * to, else a new one), listed in "Needs you", or opened in its app at once when the settings say so.
+ */
+export async function handOver(w: Workspaces, access: TranscriptAccess, d: { path: string; pane?: string; agent?: string; title?: string; note?: string; show?: boolean; found?: boolean }) {
+  const p = d.pane ? w.model.panes.find((x) => x.id === d.pane) : undefined;
+  const list = access.deliveries;
+  let viewer: string | undefined;
+  if (p && p.machine === "local" && d.show !== false) {
+    const last = [...list.list].reverse().find((x) => x.pane === d.pane && x.viewer && w.views[x.viewer]);
+    const rec = last ? await w.show({ target: d.path, in: last.viewer }, d.agent ?? "agent") : await w.show({ target: d.path, of: d.pane, split: "right" }, d.agent ?? "agent");
+    viewer = rec.paneId;
+  }
+  const opened = list.settings.auto ? (await openWith(list.appFor(d.path), d.path).catch(() => undefined))?.app : undefined;
+  return list.add({
+    path: d.path,
+    machine: "local",
+    pane: d.pane,
+    workspace: p?.workspaceId,
+    agent: d.agent,
+    title: d.title?.slice(0, 200),
+    note: d.note?.slice(0, 1000),
+    viewer,
+    opened,
+    done: !!opened,
+    ...(d.found ? { found: true } : {}),
+  });
+}
+
 /** Folders the UI may read files from: home, temp, agent-flow's home, and every run's folders. */
 function fileRoots(o: Orchestrator, home: string) {
   return readableRoots([
@@ -378,6 +405,7 @@ interface WsData {
 export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices }) {
   const access = makeTranscriptAccess(o, w);
   const handler = makeHandler(o, w, opts.backend, access);
+  watchDocuments(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue } satisfies ServerPush);
   w.onChange(() => {

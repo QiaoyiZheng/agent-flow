@@ -205,6 +205,13 @@ export class Workspaces {
     }
   }
 
+  /** Called when an agent's turn ends (Herdr status working → done or idle). */
+  onTurnEnd(fn: (t: { pane: string; machine: string; agent: string; cwd: string; started?: number; ended: number }) => void) {
+    this.turnListeners.add(fn);
+    return () => this.turnListeners.delete(fn);
+  }
+  private turnListeners = new Set<(t: { pane: string; machine: string; agent: string; cwd: string; started?: number; ended: number }) => void>();
+
   onChange(fn: () => void) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
@@ -339,6 +346,9 @@ export class Workspaces {
         if (!was || was.status !== x.agentStatus) {
           since.set(x.id, { status: x.agentStatus, at: was ? now : undefined });
           changed = true;
+          // a turn ended (working → done/idle): tell who wants to know, with when it started
+          if (was?.status === "working" && x.agent && (x.agentStatus === "done" || x.agentStatus === "idle"))
+            for (const l of this.turnListeners) l({ pane: p(x.id), machine: key, agent: x.agent, cwd: x.cwd, started: was.at ? Date.parse(was.at) : undefined, ended: Date.parse(now) });
         }
       }
       for (const id of since.keys())
