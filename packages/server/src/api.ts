@@ -61,6 +61,8 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(await o.newTeam(who, { goal: String(body.goal ?? ""), playbook: str(body.playbook), router: body.router, name: str(body.name), cwd: str(body.cwd), machine: str(body.machine) }, !!body.ui));
         case "POST /team/stop":
           return json(o.stopTeam(who, str(body.id)));
+        case "GET /machines":
+          return json(w.model.machines.map((m) => ({ id: m.id, label: m.label, state: m.state, error: m.error })));
         case "GET /playbooks": {
           const cwd = body.cwd ? String(body.cwd) : undefined;
           return json(o.opts.playbooks?.list(cwd ? (repoRootOf(cwd) ?? cwd) : undefined) ?? []);

@@ -31,7 +31,7 @@ The af command is \`${af}\` (use this full path; it may not be on PATH). Each ca
   the same repository. Nothing is merged for you; tell the user which branch has the work.
   --no-worktree: it works in the folder itself (read-only work, or it is the only one editing).
   If you cannot tell whether sessions will edit the same files, ask the user.
-- --on <machine> [--cwd '<folder there>']: start it on a connected SSH machine (\`${af} ls\` lists machines; quote a
+- --on <machine> [--cwd '<folder there>']: start it on a connected SSH machine (\`${af} machines\` lists them; quote a
   ~ path so it means that machine's home). Use it for work that belongs there: GPUs, data, a remote checkout.
 - --prepare "<command>": run a command once in its folder before it starts (an install, a link to data). Off unless
   given; only when the session cannot do its task without it.

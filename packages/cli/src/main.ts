@@ -137,7 +137,7 @@ Mode 2 — agent teams with a router:
            af tell / af answer / af status (as above)    af report "<text>" [--done]
   member:  af submit --status ready|blocked|failed|dropped --note "..." [--to <member>]
            af progress "<text>"    af ask "<question>"
-  af whoami
+  af whoami    af machines                   (the machines --on can name: this Mac and connected SSH machines)
 
 Panes (everyone; Herdr owns the layout, the web UI shows it):
   af ls [--json]                                 machines, workspaces, tabs, panes (agents, viewers, shells)
@@ -387,6 +387,11 @@ async function main() {
     }
     case "viewer":
       return (await import("./viewer.ts")).runViewer(SOCK, PANE);
+    case "machines": {
+      // the machines members can run on (--on): this Mac and the connected SSH machines
+      const r = await call("GET", "/machines");
+      return out(flags, r, () => (r as { id: string; label: string; state: string; error?: string }[]).map((m) => `${m.id.padEnd(22)} ${m.state}${m.error ? `: ${m.error}` : ""}${m.label !== m.id ? `  (${m.label})` : ""}`).join("\n"));
+    }
     case "ls": {
       const r = await call("GET", "/ls");
       return out(flags, r, () => formatLs(r));

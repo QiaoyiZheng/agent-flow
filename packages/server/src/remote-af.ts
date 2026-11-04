@@ -43,6 +43,7 @@ const ALLOWED = new Set([
   "POST /team/new",
   "POST /team/stop",
   "GET /playbooks",
+  "GET /machines",
   "GET /team/queue",
   "POST /team/take",
   "POST /team/handled",
@@ -185,7 +186,7 @@ export class RemoteAf {
       if (key === "POST /remote/read") return await this.read(machine, String(body.path ?? ""));
       if (key === "POST /pane/read") return await this.readPane(machine, body);
       if (!ALLOWED.has(key))
-        return fail("mac_only", `that works only on the Mac that runs agent-flow. From ${label}: af task, af team, af playbook, af queue, af ticket(s), af tell / answer / reply / status / report, af submit / progress / ask, af read, af whoami`, 403);
+        return fail("mac_only", `that works only on the Mac that runs agent-flow. From ${label}: af task, af team, af playbook, af machines, af queue, af ticket(s), af tell / answer / reply / status / report, af submit / progress / ask, af read, af whoami`, 403);
       if (key === "POST /team/stop" && body.id) return fail("mac_only", `from ${label}, af team stop stops your own team only (no id)`, 403);
       const fwd =
         req.method === "POST"
