@@ -485,6 +485,26 @@ describe("composer: prompt with attachments, keys", () => {
   });
 });
 
+describe("gemini: a prompt left unsent in its box", () => {
+  test("when the box still holds the text after typing it, Enter is pressed once more", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("g1", "gemini", ws.paneId, []);
+    backend.set("g1", "idle");
+    await w.refresh();
+    const band = (t: string) => [`${"▄".repeat(60)}`, ` > ${t}`, `${"▀".repeat(60)}`, " workspace (/directory)        sandbox", " /tmp/x                        no sandbox"].join("\n");
+    // gemini kept the pasted text in its box
+    backend.screens.set(ws.paneId, band("Reply with just the word pong."));
+    backend.keys = [];
+    await w.prompt(ws.paneId, "Reply with just the word pong.");
+    expect(backend.keys.map((k) => k.keys.join(" "))).toEqual(["enter"]);
+    // sent normally: the box is empty, nothing more is pressed
+    backend.screens.set(ws.paneId, band("  Type your message or @path/to/file"));
+    backend.keys = [];
+    await w.prompt(ws.paneId, "Reply with just the word pong.");
+    expect(backend.keys).toEqual([]);
+  });
+});
+
 describe("questions Herdr does not report", () => {
   test("an agent Herdr calls idle but showing a dialog is marked asking, until the dialog is gone", async () => {
     const { backend, w, ws } = await setup();

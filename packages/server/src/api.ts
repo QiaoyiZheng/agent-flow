@@ -244,6 +244,8 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           if (body.delivery) access.deliveries.done(String(body.delivery));
           return json(r);
         }
+        case "POST /pane/gemini-relaunch":
+          return json(await relaunchGemini(w, backend, String(body.pane ?? "")));
         case "POST /pane/rewind":
           return json(
             await rewindTo(w, access, {
@@ -311,10 +313,48 @@ async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBacke
         : ["--session-id", session]
       : kind === "codex"
           ? ["-c", "check_for_update_on_startup=false", "--no-alt-screen"]
-          : [];
+          : kind === "gemini"
+            ? (o.opts.config.args.gemini ?? [])
+            : [];
   const r = await route.backend.startAgent(name, kind, route.raw, args);
   await w.refresh();
   return { paneId, agent: name, started: r.ok };
+}
+
+/**
+ * A gemini that shows "Enter Gemini API Key" was started in a shell without the gateway settings (a terminal opened
+ * before ~/.gemini/gateway.env existed). Quit it — Esc goes from the key box to "Get started", where Ctrl+C twice
+ * quits (Ctrl+C in the key box would clear a stored key) — and start it again with the settings loaded, with
+ * the same arguments.
+ */
+async function relaunchGemini(w: Workspaces, backend: TerminalBackend, pane: string) {
+  const p = w.model.panes.find((x) => x.id === pane);
+  if (!p || p.agent !== "gemini") throw new AfError("not_gemini", "this pane has no gemini");
+  const route = w.route(pane);
+  const procs = await w.processes(pane).catch(() => [] as { pid: number; argv: string[] }[]);
+  // its arguments, without node and the script (npm's link or our launcher)
+  const cmd = procs.map((x) => x.argv).find((a) => a.some((s) => /gemini(\.js)?$/.test(s)));
+  const args = cmd ? cmd.slice(cmd.findIndex((s) => /gemini(\.js)?$/.test(s)) + 1).filter((s) => !/^--max-old-space-size=/.test(s)) : [];
+  const screen = () => route.backend.readScreen(route.raw);
+  if (/Enter Gemini API Key/i.test(await screen())) {
+    await route.backend.sendKeys(route.raw, ["esc"]);
+    await Bun.sleep(600);
+  }
+  for (let i = 0; i < 2; i++) {
+    await route.backend.sendKeys(route.raw, ["ctrl+c"]);
+    await Bun.sleep(500);
+  }
+  // back at the shell: no gemini among the pane's processes
+  for (let i = 0; i < 30; i++) {
+    const now = await w.processes(pane).catch(() => []);
+    if (!now.some((x) => x.argv.some((s) => /gemini/.test(s)))) break;
+    await Bun.sleep(200);
+    if (i === 29) throw new AfError("still_running", "gemini did not quit; look at its terminal");
+  }
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  // the Enter goes with the text: sendKeys addresses the agent, and there is none in the pane now, only the shell
+  await route.backend.sendText(route.raw, `${`. "$HOME/.gemini/gateway.env" && gemini ${args.map(q).join(" ")}`.trim()}\r`);
+  return { ok: true, args };
 }
 
 /** Open a file in the user's editor: VS Code when installed, else the system default. */

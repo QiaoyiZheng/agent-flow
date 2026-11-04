@@ -33,6 +33,8 @@ export interface WorkspacesOptions {
   now?: () => string;
   /** Screen checks (150 ms apart) for a steered message to show up as waiting (tests make it short). */
   steerPolls?: number;
+  /** How long a gemini prompt is watched for staying unsent in its box (tests make it short). */
+  submitCheckMs?: number;
   /** How often remote machines are polled (local: every refresh). */
   remotePollMs?: number;
 }
@@ -577,7 +579,34 @@ export class Workspaces {
     if (st.menu || st.overlay) throw new AfError("agent_asking", "the agent is showing a question or a notice; answer it first", 409);
     await r.backend.prompt(r.raw, text);
     this.promptedAt.set(pane, Date.now());
+    if (this.pane(pane).agent === "gemini") await this.submitIfLeft(pane, text);
   }
+
+  /**
+   * gemini takes an Enter that comes right after pasted text as part of the paste, so a prompt can stay in its box
+   * unsent (seen with Gemini CLI 0.66 right after it starts). If the box still holds the start of the text a moment
+   * later, press Enter once more.
+   */
+  private async submitIfLeft(pane: string, text: string) {
+    const p = this.pane(pane);
+    const r = this.route(pane);
+    const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+    const head = norm(text).slice(0, 24);
+    // the box can read empty for a moment before the pasted text is drawn: watch it for a while, and press Enter
+    // only when the text has stayed in it for half a second (being sent, it leaves at once)
+    const until = Date.now() + (this.opts.submitCheckMs ?? 3000);
+    let seenAt = 0;
+    while (Date.now() < until) {
+      await Bun.sleep(200);
+      const box = inputText(p.agent, await r.backend.readScreen(r.raw, true).catch(() => ""));
+      if (box === undefined) return; // the box is gone: the agent took it (or shows something else)
+      if (box && norm(box).startsWith(head)) {
+        if (!seenAt) seenAt = Date.now();
+        else if (Date.now() - seenAt >= 500) return void (await r.backend.sendKeys(r.raw, ["enter"]));
+      } else seenAt = 0;
+    }
+  }
+
 
   /**
    * Send a message into the agent's running turn now, as its own "send now" does (see STEER_NOW): type it with

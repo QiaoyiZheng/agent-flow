@@ -33,7 +33,9 @@ export function claudeExtraArgs(config: AgentConfig, session: string) {
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
-  args: { claude: ["--permission-mode", "auto"] },
+  // gemini: YOLO (no approval prompt per command or file write; the user's choice). Gemini allows YOLO only as a
+  // flag, not in its settings file. Override in ~/.agent-flow/config.json: {"args": {"gemini": []}}.
+  args: { claude: ["--permission-mode", "auto"], gemini: ["--approval-mode=yolo"] },
 };
 
 export function loadConfig(home: string): AgentConfig {

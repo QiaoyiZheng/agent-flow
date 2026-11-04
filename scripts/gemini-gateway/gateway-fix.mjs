@@ -8,6 +8,9 @@
 //      with made-up or empty arguments; the same schema sent as "parameters" works.
 //   3. a streamed tool call comes back in two parts, {name, args: {}} then {name: "", args}, so Gemini CLI runs a
 //      call without arguments and an unnamed one. The parts are joined again here.
+//   4. some of its upstream channels drop the names of tool results ("function_response.name: Name cannot be
+//      empty", 400) or answer "No available channel" now and then; the same request sent again usually goes through
+//      another channel. Such requests are retried up to 3 times.
 //
 // Only requests to the gateway are touched. When the gateway is fixed, each step finds nothing to do.
 
@@ -110,6 +113,9 @@ function fixStream(body) {
   ).pipeThrough(new TextEncoderStream());
 }
 
+/** Gateway errors worth sending the same request again for (another upstream channel usually works). */
+const RETRY = /function_response\.name: Name cannot be empty|No available channel for model/;
+
 const target = (input) => (typeof input === "string" ? input : input instanceof URL ? input.href : input?.url);
 
 if (BASE && typeof original === "function" && !globalThis.__afGatewayFix) {
@@ -125,7 +131,13 @@ if (BASE && typeof original === "function" && !globalThis.__afGatewayFix) {
         if (moveSchemas(j)) body = JSON.stringify(j);
       } catch {}
     }
-    const res = await original.call(this, fixedUrl, { ...init, body });
+    let res = await original.call(this, fixedUrl, { ...init, body });
+    for (let attempt = 1; attempt <= 3 && res.status >= 400 && res.status < 600; attempt++) {
+      const text = await res.text();
+      if (!RETRY.test(text) || init?.signal?.aborted) return new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers });
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+      res = await original.call(this, fixedUrl, { ...init, body });
+    }
     if (!res.ok || !res.body) return res;
     const headers = new Headers(res.headers);
     headers.delete("content-length");
