@@ -6,8 +6,8 @@ description: 一个成员写，另一个成员独立审；不通过就带着审�
 # Humanize loop
 
 Members:
-- writer: does the work. For code use --kind codex and --worktree when other members change the same repository; for documents use --kind claude (or what the goal asks for).
-- reviewer: checks it independently. Use a different kind from the writer (for example claude when the writer is codex) so the review is not the writer's own view again. The reviewer never edits the work.
+- writer: does the work. For code use --kind codex; for documents --kind claude (or what the goal asks for). In a git repository: --worktree when other members change the same repository at the same time, else --no-worktree (it is the only one editing).
+- reviewer: checks it independently. Use a different kind from the writer (for example claude when the writer is codex) so the review is not the writer's own view again. The reviewer never edits the work: --no-worktree (when the writer has a worktree, tell the reviewer its folder; it is in the writer's result).
 
 Steps:
 1. T1 for writer: the goal in the user's words. Open it with --max 5 (the thread's round limit).

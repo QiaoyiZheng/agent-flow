@@ -11,7 +11,12 @@ const HOME = process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const SOCK = process.env.AF_SOCK ?? join(HOME, "server.sock");
 const AGENT = process.env.AF_AGENT || undefined;
 
-const BOOL = new Set(["json", "all", "help", "down", "right", "tab", "worktree", "done", "failed", "dropped", "cancelled"]);
+const BOOL = new Set(["json", "all", "help", "down", "right", "tab", "worktree", "no-worktree", "done", "failed", "dropped", "cancelled"]);
+/**
+ * Set when this af runs on the Mac for a session on another machine (its af script sends the command here): paths are
+ * on that machine, relative to its folder AF_CWD, and files it names are read there.
+ */
+const REMOTE = process.env.AF_REMOTE || undefined;
 const PANE = process.env.HERDR_PANE_ID || undefined;
 
 function parse(argv: string[]) {
@@ -62,8 +67,18 @@ const TEAM: string | undefined = process.env.AF_TEAM || undefined;
 
 const out = (flags: Record<string, unknown>, data: unknown, text: () => string) => console.log(flags.json ? JSON.stringify(data, null, 2) : text());
 const str = (v: string | true | undefined) => (typeof v === "string" ? v : undefined);
-const readTask = (flags: Record<string, string | true>, pos: string[]) =>
-  typeof flags["task-file"] === "string" ? readFileSync(absolute(flags["task-file"]), "utf8") : typeof flags.task === "string" ? flags.task : pos.join(" ");
+async function readTask(flags: Record<string, string | true>, pos: string[]) {
+  if (typeof flags["task-file"] !== "string") return typeof flags.task === "string" ? flags.task : pos.join(" ");
+  const file = absolute(flags["task-file"]);
+  if (REMOTE) return (await call<{ text: string }>("POST", "/remote/read", { path: file })).text;
+  return readFileSync(file, "utf8");
+}
+
+/** --worktree / --no-worktree: a new member in a git repository needs one of them (undefined: not given). */
+const worktreeFlag = (flags: Record<string, string | true>) => (flags.worktree ? true : flags["no-worktree"] ? false : undefined);
+
+/** --cwd for another machine stays as written ("~/x" is its home); here it is made absolute. */
+const cwdFlag = (flags: Record<string, string | true>) => (typeof flags.cwd !== "string" ? undefined : typeof flags.on === "string" && flags.on !== "local" ? flags.cwd : flags.cwd.startsWith("~") ? flags.cwd : absolute(flags.cwd));
 
 function showTickets(list: (Ticket & { stage: string })[]) {
   if (!list.length) return "(no tickets yet)";
@@ -99,7 +114,10 @@ Server:
   af guide router|member                    the instructions routers and members are started with
 
 Mode 1 — hand out tasks from this session (it gets each session's final reply in its queue):
-  af task <claude|codex|omp|gemini> "<task>" [--name N] [--worktree] [--title T]   a new session in a new tab
+  af task <claude|codex|omp|gemini> "<task>" --worktree|--no-worktree [--name N] [--title T]   a new session in a new tab
+                                            (--worktree|--no-worktree: required in a git repository; see below)
+         [--on <machine> [--cwd DIR]]       start it on a connected SSH machine (af ls lists them)
+         [--prepare "<command>"]            run a command once in its folder first (installs, links); off by default
   af task --to <name> "<task>"              more work for a session you started (same context)
   af queue [--all]                          what waits in your queue    af queue take   take all of it
   af tell <ticket|name> "<text>"            add to a ticket (typed in when the session is free)
@@ -109,10 +127,11 @@ Mode 1 — hand out tasks from this session (it gets each session's final reply 
 
 Mode 2 — agent teams with a router:
   af playbook list
-  af team new --goal "..." [--playbook P] [--router claude|codex|omp|gemini] [--name N] [--cwd DIR]
+  af team new --goal "..." [--playbook P] [--router claude|codex|omp|gemini] [--name N] [--cwd DIR] [--on <machine>]
   af team list | stop [<team>]
   router:  af ticket open <member> --title T (--task "..." | --task-file F) [--kind K] [--from T] [--max N]
-                                   [--note "..."] [--role "..."] [--worktree]
+                                   [--worktree|--no-worktree] [--on <machine>] [--cwd DIR] [--prepare "<command>"]
+                                   [--note "..."] [--role "..."]
            af ticket close <T> [--failed|--dropped|--cancelled] [--note "..."]    af thread max <T> <N>
            af queue take    af queue done <seq>...|--all    af reply <seq> "<answer>"
            af tell / af answer / af status (as above)    af report "<text>" [--done]
@@ -157,11 +176,22 @@ async function main() {
     }
     case "task": {
       const kind = flags.to ? undefined : pos[0];
-      const text = readTask(flags, flags.to ? pos : pos.slice(1));
-      if ((!flags.to && !kind) || !text.trim()) die('usage: af task <claude|codex|omp|gemini> "<task>" [--name N] [--worktree]   or   af task --to <name> "<task>"');
-      const r = await call("POST", "/task", { kind, task: text, name: str(flags.name), to: str(flags.to), title: str(flags.title), worktree: !!flags.worktree });
+      const text = await readTask(flags, flags.to ? pos : pos.slice(1));
+      if ((!flags.to && !kind) || !text.trim()) die('usage: af task <claude|codex|omp|gemini> "<task>" --worktree|--no-worktree [--name N] [--on M --cwd D] [--prepare "..."]   or   af task --to <name> "<task>"');
+      const r = await call("POST", "/task", {
+        kind,
+        task: text,
+        name: str(flags.name),
+        to: str(flags.to),
+        title: str(flags.title),
+        worktree: worktreeFlag(flags),
+        machine: str(flags.on),
+        cwd: cwdFlag(flags),
+        prepare: str(flags.prepare),
+      });
+      const where = r.machine && r.machine !== "local" ? ` on ${r.machine} in ${r.cwd}` : "";
       return out(flags, r, () =>
-        `${r.ticket} for ${r.member}${r.started ? " (starting in a new tab)" : ""}${r.branch ? ` on branch ${r.branch}` : ""}. Its final reply comes to your queue; end your turn now.`,
+        `${r.ticket} for ${r.member}${r.started ? ` (starting in a new tab${where})` : ""}${r.branch ? ` on branch ${r.branch}` : ""}. Its final reply comes to your queue; end your turn now.`,
       );
     }
     case "team": {
@@ -175,8 +205,10 @@ async function main() {
       if (sub === "new") {
         const goal = str(flags.goal) ?? pos.slice(1).join(" ");
         if (!goal.trim()) die('usage: af team new --goal "..." [--playbook P] [--router K] [--name N] [--cwd DIR]');
-        const r = await call("POST", "/team/new", { goal, playbook: str(flags.playbook), router: str(flags.router), name: str(flags.name), cwd: typeof flags.cwd === "string" ? absolute(flags.cwd) : undefined });
-        return out(flags, r, () => `team ${r.team} (${r.name}) is starting in its own workspace${r.playbook ? ` with playbook ${r.playbook}` : ""}${r.parent ? `; it is ${r.parent.ticket} in your tickets, and its reports come to your queue` : ""}.`);
+        const r = await call("POST", "/team/new", { goal, playbook: str(flags.playbook), router: str(flags.router), name: str(flags.name), cwd: cwdFlag(flags), machine: str(flags.on) });
+        return out(flags, r, () =>
+          `team ${r.team} (${r.name}) is starting in its own workspace${r.machine && r.machine !== "local" ? ` on ${r.machine}` : ""}${r.playbook ? ` with playbook ${r.playbook}` : ""}${r.parent ? `; it is ${r.parent.ticket} in your tickets, and its reports come to your queue` : ""}.`,
+        );
       }
       if (sub === "stop") {
         const r = await call("POST", "/team/stop", { id: pos[1] });
@@ -212,8 +244,9 @@ async function main() {
       const sub = pos[0];
       if (sub === "open") {
         const member = pos[1];
-        const task = readTask(flags, []);
-        if (!member || !task.trim() || typeof flags.title !== "string") die('usage: af ticket open <member> --title "..." (--task "..." | --task-file F) [--kind K] [--from T] [--max N] [--note "..."] [--worktree]');
+        const task = await readTask(flags, []);
+        if (!member || !task.trim() || typeof flags.title !== "string")
+          die('usage: af ticket open <member> --title "..." (--task "..." | --task-file F) [--kind K] [--from T] [--max N] [--note "..."] [--worktree|--no-worktree] [--on M --cwd D] [--prepare "..."]');
         const r = await call("POST", "/team/ticket", {
           member,
           title: flags.title,
@@ -224,7 +257,10 @@ async function main() {
           max: typeof flags.max === "string" ? Number(flags.max) : undefined,
           note: str(flags.note),
           inputs: typeof flags.input === "string" ? flags.input.split(",").map((x) => absolute(x.trim())) : undefined,
-          worktree: !!flags.worktree,
+          worktree: worktreeFlag(flags),
+          machine: str(flags.on),
+          cwd: cwdFlag(flags),
+          prepare: str(flags.prepare),
         });
         return out(flags, r, () => `${r.ticket} for ${r.member}${r.round > 1 ? ` (round ${r.round} of thread ${r.thread})` : ""}${r.started ? "; starting it in a new tab" : ""}. Folder: ${r.dir}`);
       }
@@ -391,6 +427,6 @@ async function main() {
   }
 }
 
-const absolute = (p: string) => (isAbsolute(p) ? p : resolve(process.cwd(), p));
+const absolute = (p: string) => (isAbsolute(p) ? p : resolve(process.env.AF_CWD || process.cwd(), p));
 
 await main();

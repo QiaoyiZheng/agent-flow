@@ -98,6 +98,17 @@ export class RemoteMachine {
     return { code: p.exitCode ?? -1, out: Buffer.from(out), err: err.trim() };
   }
 
+  /**
+   * Make a Unix socket on the remote machine (`remotePath`) lead to one on this Mac (`localPath`), through the master
+   * connection: ssh -O forward -R. A stale socket file left at `remotePath` (an earlier connection's) is removed
+   * first, since sshd does not replace it by default. Lives as long as the master connection.
+   */
+  async forwardRemoteSocket(remotePath: string, localPath: string) {
+    await this.exec(`rm -f ${sq(remotePath)}`);
+    const r = Bun.spawnSync([...this.sshBase(["-O", "forward", "-R", `${remotePath}:${localPath}`]), this.spec.target], { stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`could not forward ${remotePath} on ${this.spec.label}: ${r.stderr.toString().trim() || `exit ${r.exitCode}`}`);
+  }
+
   /** Connect (or reuse a live connection). Resolves when online; rejects with a readable reason. Keeps retrying afterwards. */
   connect(): Promise<void> {
     this.wanted = true;

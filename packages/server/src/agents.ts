@@ -72,7 +72,7 @@ export function loadConfig(home: string): AgentConfig {
  * a typed line at 1024 bytes (MAX_CANON), so the protocol text never goes on the command line: claude and
  * omp take a file path, codex takes a profile name.
  */
-export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, config: AgentConfig, session?: string): string[] {
+export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, config: AgentConfig, session?: string, codexProfile?: string): string[] {
   const extra = config.args[kind] ?? [];
   switch (kind) {
     case "claude":
@@ -80,7 +80,8 @@ export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, co
       return ["--append-system-prompt-file", protocolFile, ...(session ? ["--session-id", session] : []), ...(config.claudeSettings ? ["--settings", config.claudeSettings] : []), ...extra];
     case "codex":
       // --no-alt-screen: in the alternate screen Herdr keeps no scrollback, so the UI could not scroll codex back
-      return ["-p", writeCodexProfile(role, protocolFile), "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];
+      // codexProfile: the profile is already written where codex runs (another machine: see codexProfileToml)
+      return ["-p", codexProfile ?? writeCodexProfile(role, protocolFile), "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];
     case "omp":
       return [`--append-system-prompt=${protocolFile}`, ...extra];
     case "gemini":
@@ -101,12 +102,10 @@ export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, co
 
 const TOML_LITERAL_FENCE = "'".repeat(3);
 
-/** codex reads $CODEX_HOME/<name>.config.toml for `-p <name>`. Writes agent-flow-<role>.config.toml and returns <name>. */
-export function writeCodexProfile(role: Role, protocolFile: string, codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex")) {
+/** The codex profile for `codex -p agent-flow-<role>`: the protocol as its developer instructions. */
+export function codexProfileToml(role: Role, text: string) {
   const name = `agent-flow-${role}`;
-  const text = readFileSync(protocolFile, "utf8");
-  if (text.includes(TOML_LITERAL_FENCE)) throw new Error(`${protocolFile} must not contain ${TOML_LITERAL_FENCE}; it is embedded as a TOML literal string`);
-  mkdirSync(codexHome, { recursive: true });
+  if (text.includes(TOML_LITERAL_FENCE)) throw new Error(`the ${role} protocol must not contain ${TOML_LITERAL_FENCE}; it is embedded as a TOML literal string`);
   const toml = [
     `# Written by agent-flow for agents it starts with \`codex -p ${name}\`. Safe to delete.`,
     "check_for_update_on_startup = false",
@@ -114,8 +113,15 @@ export function writeCodexProfile(role: Role, protocolFile: string, codexHome = 
     `${text}${TOML_LITERAL_FENCE}`,
     "",
   ].join("\n");
-  writeFileSync(join(codexHome, `${name}.config.toml`), toml);
-  return name;
+  return { name, file: `${name}.config.toml`, toml };
+}
+
+/** codex reads $CODEX_HOME/<name>.config.toml for `-p <name>`. Writes agent-flow-<role>.config.toml and returns <name>. */
+export function writeCodexProfile(role: Role, protocolFile: string, codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex")) {
+  const p = codexProfileToml(role, readFileSync(protocolFile, "utf8"));
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(join(codexHome, p.file), p.toml);
+  return p.name;
 }
 
 

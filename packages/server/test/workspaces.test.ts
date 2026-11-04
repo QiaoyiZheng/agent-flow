@@ -265,6 +265,60 @@ describe("background work on a remote machine", () => {
   });
 });
 
+describe("background work on a remote machine: a plain turn end", () => {
+  test("working → idle with no background work: one check, the turn ends, no loop of checks", async () => {
+    const home = tmp("af-ws-bgloop-");
+    const local = new FakeBackend();
+    local.saved = [{ id: "p1", label: "tea2", target: "tea2", session: "default" }];
+    const remoteBackend = new FakeBackend();
+    let execs = 0;
+    const w = new Workspaces({
+      home,
+      backend: local,
+      paneEnv: () => ({}),
+      remotePollMs: 0,
+      remote: (_spec, onChange) => {
+        const r = {
+          state: "offline" as any,
+          home: "/home/u",
+          async connect() {
+            r.state = "online";
+            onChange();
+          },
+          close() {},
+          async exec() {
+            execs++;
+            return { code: 0, out: Buffer.from(""), err: "" }; // answers at once: no background work
+          },
+        };
+        return { remote: r, backend: () => remoteBackend };
+      },
+    });
+    await w.start(60_000);
+    await w.connect("tea2");
+    const rws = await remoteBackend.createWorkspace("exp", "/home/u/exp");
+    await remoteBackend.startAgent("t1", "claude", rws.paneId, []);
+    const id = `tea2~${rws.paneId}`;
+    const ends: string[] = [];
+    w.onTurnEnd((t) => ends.push(t.pane));
+    remoteBackend.set("t1", "working");
+    await w.refresh();
+    const before = execs;
+    remoteBackend.set("t1", "idle");
+    // the bug: each answer started a refresh that found the check due again, so refresh() never resolved
+    const done = await Promise.race([w.refresh().then(() => "resolved"), Bun.sleep(3000).then(() => "hung")]);
+    expect(done).toBe("resolved");
+    for (let i = 0; i < 20 && (w as any).machines.get("tea2").bgRunning; i++) await Bun.sleep(25);
+    await Promise.race([w.refresh(), Bun.sleep(3000)]);
+    await Bun.sleep(100);
+    expect(execs - before).toBe(1);
+    expect(ends).toEqual([id]);
+    expect(w.model.panes.find((p) => p.id === id)!.agentStatus).toBe("idle");
+    expect(w.settled(id)).toBe(true);
+    w.stop();
+  });
+});
+
 describe("workspaces: viewer panes", () => {
   test("show splits the caller's pane, starts the viewer, and registers it; --in retargets; close forgets it", async () => {
     const { home, backend, w, ws } = await setup();
@@ -932,7 +986,7 @@ describe("workspaces: API used by agents", () => {
     const ws = await backend.createWorkspace("proj", repo);
     await backend.startAgent("lead", "claude", ws.paneId, []);
     await w.refresh();
-    const task = await call("/task", { callerPane: ws.paneId, kind: "codex", task: "count the files", name: "counter" });
+    const task = await call("/task", { callerPane: ws.paneId, kind: "codex", task: "count the files", name: "counter", worktree: false });
     expect(task.status).toBe(200);
     await o.flush();
     await w.refresh();

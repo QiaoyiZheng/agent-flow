@@ -5,7 +5,7 @@ description: 先复现并定位，再修复并加回归测试，最后独立验�
 
 # Bug fix
 
-Members: reproducer (claude), fixer (codex, --worktree when the repository is git), verifier (claude).
+Members: reproducer (claude, --no-worktree), fixer (codex, --worktree in a git repository), verifier (claude, --no-worktree: it works in the fixer's worktree folder).
 
 1. T1 for reproducer: the problem in the user's words. Task: do not change files; reproduce it; write the smallest reproduction (commands, input, actual and expected result) and the likely cause (file:line) in result.md. Submit ready, or failed if it does not reproduce (what was tried).
 2. Reproduced: a ticket for fixer --from T1 --max 3: fix it, add a test that would have caught it, run the reproduction again, commit on its branch. Submit ready with the cause and the fix in the note.

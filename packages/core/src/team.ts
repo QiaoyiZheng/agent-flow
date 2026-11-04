@@ -31,6 +31,10 @@ export interface TeamMeta {
   manager: { pane?: string; member?: string };
   /** Herdr workspace new members open in (as tabs). */
   workspace: string;
+  /** The machine the manager is on (its Herdr ids carry its prefix); members go there unless told otherwise. */
+  machine?: string;
+  /** Workspaces for members on other machines than the manager's, by machine (one per team and machine). */
+  workspaces?: Record<string, string>;
   /** The ticket on another team's timeline that stands for this team (a session that opened it, or a nested team). */
   parent?: { team: string; ticket: string };
   playbook?: string;
@@ -45,6 +49,8 @@ export interface Member {
   protocol: "none" | "member" | "router";
   role?: string;
   cwd: string;
+  /** The machine it runs on ("local" when absent). */
+  machine?: string;
   /** --worktree: its own git worktree and branch (never merged by agent-flow). */
   branch?: string;
   worktree?: string;
@@ -166,6 +172,7 @@ type E<T extends string, P> = { type: T; at: string } & P;
 export type TeamEvent = (
   | E<"team.created", { meta: TeamMeta }>
   | E<"team.stopped", {}>
+  | E<"team.workspace", { machine: string; workspace: string }>
   | E<"member.added", { member: Member }>
   | E<"member.placed", { name: string; paneId: string; tabId: string }>
   | E<"member.status", { name: string; status: AgentStatus }>
@@ -214,6 +221,9 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
       break;
     case "team.stopped":
       s.stopped = true;
+      break;
+    case "team.workspace":
+      if (s.meta) s.meta.workspaces = { ...(s.meta.workspaces ?? {}), [ev.machine]: ev.workspace };
       break;
     case "member.added":
       s.members[ev.member.name] = { ...ev.member };
@@ -382,10 +392,17 @@ export type StageKey = "undelivered" | "asking" | "approval" | "review" | "block
 
 /** What the member's pane shows, as far as the stage needs it. */
 export interface PaneLook {
+  /** Herdr's status, or "background": done/idle while background work it started still runs. */
   status?: string;
   /** The question on its screen, if any. */
   asking?: string;
 }
+
+/** A pane as the ticket stage sees it (from HPane: agentStatus, background, asking). */
+export const paneLook = (p: { agentStatus: string; background?: number; asking?: string }): PaneLook => ({
+  status: (p.agentStatus === "done" || p.agentStatus === "idle") && (p.background ?? 0) > 0 ? "background" : p.agentStatus,
+  asking: p.asking,
+});
 
 /**
  * A ticket's stage: the one answer the timeline, the swim lanes and Needs you all use (docs/design.md 4.7). The
@@ -406,7 +423,7 @@ export function ticketStage(k: Ticket, member: Member | undefined, pane?: PaneLo
   }
   if (k.status === "open") return "queued";
   if (member?.status === "exited") return "exited";
-  return pane?.status === "working" ? "working" : "idle";
+  return pane?.status === "working" || pane?.status === "background" ? "working" : "idle";
 }
 
 export const STAGE_LABEL: Record<StageKey, string> = {

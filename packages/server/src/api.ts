@@ -39,7 +39,9 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
     const body: any = req.method === "POST" ? await req.json().catch(() => ({})) : Object.fromEntries(url.searchParams);
     // members and routers carry AF_TEAM/AF_AGENT; any other session is known by its Herdr pane (callerPane)
     const who: Who = o.who({ team: body.team || undefined, agent: body.agent || undefined, pane: body.callerPane || undefined });
-    const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
+    const str = (v: unknown) => (v === undefined || v === null || v === "" ? undefined : String(v));
+    // a yes/no the caller must give (worktree): absent stays undefined, so agent-flow can ask for it
+    const bool = (v: unknown) => (v === undefined || v === null || v === "" ? undefined : v === true || v === "true" || v === "1");
     try {
       switch (`${req.method} ${path}`) {
         case "GET /health":
@@ -52,9 +54,11 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
         case "GET /team":
           return json(o.get(str(body.team) ?? (who.kind === "router" || who.kind === "member" ? who.team : who.kind === "pane" ? o.directTeamOf(who.pane)?.id : undefined)));
         case "POST /task":
-          return json(await o.task(who, { kind: body.kind, task: String(body.task ?? ""), title: str(body.title), name: str(body.name), to: str(body.to), worktree: !!body.worktree }));
+          return json(
+            await o.task(who, { kind: body.kind, task: String(body.task ?? ""), title: str(body.title), name: str(body.name), to: str(body.to), worktree: bool(body.worktree), machine: str(body.machine), cwd: str(body.cwd), prepare: str(body.prepare) }),
+          );
         case "POST /team/new":
-          return json(await o.newTeam(who, { goal: String(body.goal ?? ""), playbook: str(body.playbook), router: body.router, name: str(body.name), cwd: str(body.cwd) }, !!body.ui));
+          return json(await o.newTeam(who, { goal: String(body.goal ?? ""), playbook: str(body.playbook), router: body.router, name: str(body.name), cwd: str(body.cwd), machine: str(body.machine) }, !!body.ui));
         case "POST /team/stop":
           return json(o.stopTeam(who, str(body.id)));
         case "GET /playbooks": {
@@ -79,7 +83,10 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
               max: body.max === undefined ? undefined : Number(body.max),
               note: str(body.note),
               inputs: Array.isArray(body.inputs) ? body.inputs.map(String) : undefined,
-              worktree: !!body.worktree,
+              worktree: bool(body.worktree),
+              machine: str(body.machine),
+              cwd: str(body.cwd),
+              prepare: str(body.prepare),
             }),
           );
         case "POST /team/close":
@@ -101,7 +108,7 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
         case "POST /team/report":
           return json(o.report(who, String(body.text ?? ""), !!body.done));
         case "POST /team/submit":
-          return json(o.submit(who, { status: body.status ?? "ready", note: str(body.note), to: str(body.to), ticket: str(body.ticket) }));
+          return json(await o.submit(who, { status: body.status ?? "ready", note: str(body.note), to: str(body.to), ticket: str(body.ticket) }));
         case "POST /team/progress":
           return json(o.progress(who, String(body.text ?? "")));
         case "POST /team/ask":
@@ -617,5 +624,5 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
     },
   });
 
-  return { unix, tcp, stop: () => (unix.stop(true), tcp.stop(true)) };
+  return { unix, tcp, handler, stop: () => (unix.stop(true), tcp.stop(true)) };
 }

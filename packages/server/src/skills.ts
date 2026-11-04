@@ -18,7 +18,7 @@ The af command is \`${af}\` (use this full path; it may not be on PATH). Each ca
 
 ## Mode 1: hand out tasks yourself (quick work, you decide the order)
 
-    ${af} task claude|codex|omp|gemini "<task>" [--name <name>] [--worktree]
+    ${af} task claude|codex|omp|gemini "<task>" --worktree|--no-worktree [--name <name>]
     ${af} task --to <name> "<more work for the same session>"
 
 - Each call opens a ticket and starts a new session in a new tab of this workspace (or, with --to, gives it to a
@@ -26,8 +26,15 @@ The af command is \`${af}\` (use this full path; it may not be on PATH). Each ca
 - Write the task so a fresh agent can do it without this conversation: the goal in the user's words, the files,
   how to check the result. Independent tasks run at the same time; for a step that needs an earlier result, wait
   for that result and then hand out the next task.
-- --worktree: its own git worktree and branch (af/<team>/<name>), for code changes running in parallel. Nothing
-  is merged for you; tell the user which branch has the work.
+- In a git repository, every new session needs one of these (af refuses without it), so decide each time:
+  --worktree: its own git worktree and branch (af/<team>/<name>), when it changes files while other sessions change
+  the same repository. Nothing is merged for you; tell the user which branch has the work.
+  --no-worktree: it works in the folder itself (read-only work, or it is the only one editing).
+  If you cannot tell whether sessions will edit the same files, ask the user.
+- --on <machine> [--cwd '<folder there>']: start it on a connected SSH machine (\`${af} ls\` lists machines; quote a
+  ~ path so it means that machine's home). Use it for work that belongs there: GPUs, data, a remote checkout.
+- --prepare "<command>": run a command once in its folder before it starts (an install, a link to data). Off unless
+  given; only when the session cannot do its task without it.
 
 Then tell the user what is running and end your turn. Do not wait or poll.
 
@@ -44,7 +51,7 @@ permission prompts are the user's: when a session waits for one, tell the user),
 ## Mode 2: an agent team with a router (loops, longer work)
 
     ${af} playbook list
-    ${af} team new --goal "<the goal in the user's words>" [--playbook humanize-loop|super-agent|bugfix|...] [--router claude]
+    ${af} team new --goal "<the goal in the user's words>" [--playbook humanize-loop|super-agent|bugfix|...] [--router claude] [--on <machine> --cwd '<folder>']
 
 A router agent starts in its own workspace and runs the team: it opens tickets for members, passes results between
 them, and counts the rounds of a loop. You only hear its reports (in your queue, as above). More for the team:

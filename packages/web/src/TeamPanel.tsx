@@ -7,7 +7,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { HPane, QueueItem, TeamState, TeamSummary, Ticket } from "@af/core";
-import { ticketList, ticketStage } from "@af/core";
+import { paneLook, ticketList, ticketStage } from "@af/core";
 import { renderDoc } from "./markdown";
 import { TOKEN, fileUrl } from "./store";
 import { Terminal } from "./Terminal";
@@ -28,7 +28,7 @@ export interface TeamPanelProps {
 const look = (s: TeamState, k: Ticket, panes: Map<string, HPane>) => {
   const m = s.members[k.assignee];
   const p = m?.paneId ? panes.get(m.paneId) : undefined;
-  return stageLook(ticketStage(k, m, p ? { status: p.agentStatus, asking: p.asking } : undefined));
+  return stageLook(ticketStage(k, m, p ? paneLook(p) : undefined));
 };
 
 export function TeamPanel(props: TeamPanelProps) {

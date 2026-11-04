@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { herdrMemberName, ticketStage } from "@af/core";
@@ -10,6 +10,7 @@ import { PlaybookLibrary } from "../src/playbooks.ts";
 import { Teams, type TeamsOptions } from "../src/teams.ts";
 import { lastReply } from "../src/transcripts/peek.ts";
 import { Workspaces } from "../src/workspaces.ts";
+import { REMOTE_AF, RemoteAf, parseCliBody } from "../src/remote-af.ts";
 import { FakeBackend } from "./fake.ts";
 
 const dirs: string[] = [];
@@ -491,5 +492,228 @@ describe("reading what an agent said last", () => {
     const lines = [claude("user", "first"), claude("assistant", [{ type: "text", text: "old answer" }]), claude("user", "count them"), claude("assistant", [{ type: "text", text: "There are 4." }]), claude("assistant", [{ type: "text", text: "Done." }])];
     expect(lastReply("claude", lines)).toEqual({ reply: "There are 4.\n\nDone.", error: undefined });
     expect(lastReply("claude", ["not json", ...lines.slice(0, 3)])).toEqual({ reply: undefined, error: undefined });
+  });
+});
+
+describe("choosing a worktree, and preparing a member's folder", () => {
+  test("in a git repository a new member must say --worktree or --no-worktree; elsewhere it need not", async () => {
+    const { o, w, backend, call, step, lead, cwd } = await setup();
+    // not a repository: no choice to make
+    expect((await call("/task", { callerPane: lead, kind: "claude", task: "look around", name: "a" })).status).toBe(200);
+    git(cwd, ["init", "-q", "-b", "main"]);
+    writeFileSync(join(cwd, "f.txt"), "f\n");
+    commitAll(cwd, "init");
+    backend.panes.get(lead)!.cwd = cwd;
+    await w.refresh();
+    const r = await call("/task", { callerPane: lead, kind: "codex", task: "change f.txt", name: "b" });
+    expect(r.status).toBe(400);
+    expect(r.body.error.code).toBe("worktree_choice");
+    expect(r.body.error.message).toContain("--worktree if it changes files while other sessions change the same repository");
+    const team = o.get(r.body.error ? (await call("/task", { callerPane: lead, kind: "codex", task: "read f.txt", name: "c", worktree: false })).body.team : "");
+    await step();
+    expect(team.members.c).toMatchObject({ cwd, branch: undefined });
+    // an existing member needs no choice
+    expect((await call("/task", { callerPane: lead, to: "c", task: "read it again" })).status).toBe(200);
+  });
+
+  test("--prepare runs once in the member's folder before it starts; a failure fails the ticket with the output", async () => {
+    const { o, backend, call, step, typed, lead, cwd } = await setup();
+    const ok = await call("/task", { callerPane: lead, kind: "claude", task: "use the data", name: "loader", prepare: "echo prepared > ready.txt && echo done" });
+    await step();
+    const team = ok.body.team;
+    expect(readFileSync(join(cwd, "ready.txt"), "utf8")).toBe("prepared\n");
+    expect(readFileSync(join(o.opts.home, "teams", team, "tickets", "T1", "prepare.log"), "utf8")).toContain("done");
+    expect(typed(o.get(team).members.loader!.paneId!)[0]).toStartWith("use the data");
+    expect((await call("/task", { callerPane: lead, kind: "claude", task: "x", name: "user" })).body.error.code).toBe("bad_name");
+
+    const bad = await call("/task", { callerPane: lead, kind: "claude", task: "never", name: "broken", prepare: "echo missing dependency; exit 3" });
+    expect(bad.status).toBe(200);
+    await step();
+    expect(o.get(team).tickets.T2).toMatchObject({ status: "closed", outcome: "failed" });
+    expect(o.get(team).members.broken!.status).toBe("exited");
+    expect(o.get(team).queue.at(-1)).toMatchObject({ kind: "error", ticket: "T2" });
+    expect(o.get(team).queue.at(-1)!.text).toContain("missing dependency");
+    expect([...backend.panes.values()].some((p) => p.agent?.name === herdrMemberName(team, "broken"))).toBe(false);
+  });
+});
+
+/** A session on the Mac and a connected SSH machine "gpu": its SSH runs commands in a local shell with a fake home. */
+async function setupRemote() {
+  const home = tmp("af-teams-rhome-local-");
+  const rhome = tmp("af-teams-rhome-");
+  const local = new FakeBackend();
+  local.saved = [{ id: "p1", label: "gpu", target: "gpu", session: "default" }];
+  const remote = new FakeBackend();
+  const execs: string[] = [];
+  const w = new Workspaces({
+    home,
+    backend: local,
+    paneEnv: () => ({}),
+    remotePollMs: 0,
+    remote: (_spec, onChange) => {
+      const r = {
+        state: "offline" as any,
+        home: rhome,
+        async connect() {
+          r.state = "online";
+          onChange();
+        },
+        close() {},
+        async exec(cmd: string, opts: { stdin?: Uint8Array } = {}) {
+          execs.push(cmd);
+          // Workspaces' background-work check (background.ts): nothing runs in the background on this fake machine
+          if (cmd.startsWith("u=$(id -u)")) return { code: 0, out: Buffer.from(""), err: "" };
+          // stdin like ssh's: what is given, else nothing (never the test runner's own stdin)
+          const p = Bun.spawnSync(["sh", "-c", cmd], { env: { ...process.env, HOME: rhome }, stdin: Buffer.from(opts.stdin ?? new Uint8Array()), stdout: "pipe", stderr: "pipe" });
+          return { code: p.exitCode ?? 1, out: Buffer.from(p.stdout), err: p.stderr.toString() };
+        },
+      };
+      return { remote: r, backend: () => remote };
+    },
+  });
+  await w.start(60_000);
+  await w.connect("gpu");
+  const replies = new Map<string, { reply?: string; error?: string; size?: number }>();
+  const o = new Teams({ home, backend: local, w, sock: "/s", binDir: "/af/bin", protocolDir: SKILL, config: DEFAULT_CONFIG, playbooks: new PlaybookLibrary(join(SKILL, "playbooks"), join(home, "playbooks")), peek: async (pane) => replies.get(pane), settleMs: 0, noSubmitMs: 0 });
+  o.load();
+  const cwd = tmp("af-teams-rproj-local-");
+  const ws = await local.createWorkspace("proj", cwd);
+  await local.startAgent("lead", "claude", ws.paneId, []);
+  mkdirSync(join(rhome, "proj"), { recursive: true });
+  await w.refresh();
+  const h = makeHandler(o, w, local);
+  const call = async (path: string, body: object) => {
+    const r = await h(new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+    return { status: r.status, body: (await r.json()) as any };
+  };
+  const step = async () => {
+    for (let i = 0; i < 2; i++) {
+      await w.refresh();
+      await o.flush();
+    }
+  };
+  return { home, rhome, local, remote, execs, w, o, call, step, replies, lead: ws.paneId, h };
+}
+
+describe("members on another machine", () => {
+  // waits on a fix in workspaces.ts (agent-flow-1b): a remote pane going working -> idle loops on its background check
+  test.skipIf(!process.env.AF_TEST_REMOTE_IDLE)("af task --on: a plain member in the team's workspace there; its task typed in; its reply comes back", async () => {
+    const { o, remote, call, step, replies, lead, rhome } = await setupRemote();
+    const r = await call("/task", { callerPane: lead, kind: "claude", task: "run the profile on the GPUs", name: "profile", machine: "gpu", cwd: "~/proj" });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ machine: "gpu", cwd: join(rhome, "proj") });
+    await step();
+    const team = r.body.team;
+    const m = o.get(team).members.profile!;
+    expect(m).toMatchObject({ machine: "gpu", cwd: join(rhome, "proj") });
+    expect(m.paneId).toStartWith("gpu~");
+    const raw = m.paneId!.slice(4);
+    const pane = remote.panes.get(raw)!;
+    // the team's workspace on that machine (the session's is on the Mac); its PATH has that machine's af first
+    expect(o.get(team).meta!.workspaces!.gpu).toBe(`gpu~${pane.workspaceId}`);
+    expect(pane.env.PATH).toStartWith(`${rhome}/.agent-flow/bin:`);
+    expect(pane.env.AF_OUT).toBe(`${rhome}/.agent-flow/teams/${team}/out`);
+    // claude's SessionStart hook is a file on the Mac: not for another machine
+    expect(pane.agent!.args.join(" ")).not.toContain("--settings");
+    expect(pane.agent!.args).toContain("--session-id");
+    expect(remote.prompts.at(-1)!.text).toStartWith("run the profile on the GPUs");
+    replies.set(m.paneId!, { reply: "42 tokens/s on 2 GPUs" });
+    remote.set(herdrMemberName(team, "profile"), "working");
+    await step();
+    await Bun.sleep(5);
+    remote.set(herdrMemberName(team, "profile"), "idle");
+    // a remote pane that went idle is finished once its background check (over SSH) has answered
+    for (let i = 0; i < 4; i++) {
+      await step();
+      await Bun.sleep(20);
+    }
+    expect(o.get(team).queue.at(-1)).toMatchObject({ kind: "turn", ticket: "T1", from: "profile" });
+    expect(readFileSync(join(o.opts.home, "teams", team, "tickets", "T1", "result.md"), "utf8")).toContain("42 tokens/s");
+  });
+
+  test("a router's member there: protocol and codex profile written there, task.md mirrored, result.md brought back", async () => {
+    const { o, remote, call, step, rhome, lead, execs } = await setupRemote();
+    const made = await call("/team/new", { callerPane: lead, goal: "profile it" });
+    await step();
+    const id = made.body.team;
+    const R = { team: id, agent: "router" };
+    const t1 = await call("/team/ticket", { ...R, member: "worker", kind: "codex", title: "profile", task: "Profile the engine.", machine: "gpu", cwd: "~/proj" });
+    expect(t1.status).toBe(200);
+    await step();
+    const m = o.get(id).members.worker!;
+    const pane = remote.panes.get(m.paneId!.slice(4))!;
+    expect(pane.env).toMatchObject({ AF_TEAM: id, AF_AGENT: "worker" });
+    expect(pane.agent!.args.slice(0, 2)).toEqual(["-p", "agent-flow-member"]);
+    expect(readFileSync(join(rhome, ".codex", "agent-flow-member.config.toml"), "utf8")).toContain("agent-flow member protocol");
+    const there = join(rhome, ".agent-flow", "teams", id, "tickets", "T1");
+    expect(readFileSync(join(there, "task.md"), "utf8")).toBe("Profile the engine.\n");
+    expect(remote.prompts.at(-1)!.text).toContain(`Read ${there}/task.md`);
+    expect(remote.prompts.at(-1)!.text).toContain(`write ${there}/result.md`);
+    // it writes its result there and submits: the Mac gets the copy
+    writeFileSync(join(there, "result.md"), "done on the GPU\n");
+    const sub = await call("/team/submit", { team: id, agent: "worker", status: "ready", note: "ok" });
+    expect(sub.status).toBe(200);
+    expect(readFileSync(join(o.opts.home, "teams", id, "tickets", "T1", "result.md"), "utf8")).toBe("done on the GPU\n");
+    expect(o.get(id).queue.at(-1)!.text).toContain("done on the GPU");
+    expect(execs.some((c) => c.includes("git rev-parse --show-toplevel"))).toBe(true);
+  });
+
+  test("the machine's af: only work commands, the caller's pane gets the machine's prefix, members speak for themselves", async () => {
+    const { home, o, w, call, step, h, lead, rhome } = await setupRemote();
+    const remoteBackend = (w as any).machines.get("gpu").backend as FakeBackend;
+    const rws = await remoteBackend.createWorkspace("exp", join(rhome, "proj"));
+    await remoteBackend.startAgent("me", "claude", rws.paneId, []);
+    await w.refresh();
+    const raf = new RemoteAf({ home, w, teams: o, handler: h, cliMain: join(import.meta.dir, "../../cli/src/main.ts") });
+    const post = (path: string, body: object) => raf.serve("gpu", new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+    // a session there hands out work: it is known as gpu~<its pane>, and its members go to gpu by default
+    const r = await post("/task", { callerPane: rws.paneId, kind: "claude", task: "count files", name: "counter", worktree: false });
+    const res = (await r.json()) as any;
+    expect(r.status).toBe(200);
+    await step();
+    expect(o.get(res.team).meta).toMatchObject({ manager: { pane: `gpu~${rws.paneId}` }, machine: "gpu" });
+    expect(o.get(res.team).members.counter!.paneId).toStartWith("gpu~");
+    // not allowed from there
+    expect((await post("/prompt", { pane: lead, text: "hi" })).status).toBe(403);
+    expect((await post("/open-with", { path: "/etc/passwd" })).status).toBe(403);
+    // a team member on the Mac cannot be spoken for from there
+    const made = await call("/team/new", { callerPane: lead, goal: "g" });
+    await step();
+    expect((await post("/team/report", { team: made.body.team, agent: "router", text: "pretend" })).status).toBe(403);
+    expect(parseCliBody(new TextEncoder().encode("/home/u/x\0t1\0dev\0w1:p2\0task\0claude\0do it\0"))).toEqual({ cwd: "/home/u/x", team: "t1", agent: "dev", pane: "w1:p2", argv: ["task", "claude", "do it"] });
+  });
+
+  test("the af script: sends the command, prints the answer, and exits with its code", async () => {
+    const dir = tmp("af-shim-");
+    mkdirSync(join(dir, ".agent-flow", "bin"), { recursive: true });
+    writeFileSync(join(dir, ".agent-flow", "bin", "af"), REMOTE_AF, { mode: 0o755 });
+    let got: ReturnType<typeof parseCliBody> | undefined;
+    const server = Bun.serve({
+      unix: join(dir, ".agent-flow", "af.sock"),
+      async fetch(req) {
+        got = parseCliBody(new Uint8Array(await req.arrayBuffer()));
+        return new Response(got.argv[0] === "fail" ? "3\naf: it failed\n" : `0\nran ${got.argv.join("|")}\n`);
+      },
+    });
+    try {
+      // async: the server answering it runs in this same process
+      const run = async (args: string[]) => {
+        const p = Bun.spawn([join(dir, ".agent-flow", "bin", "af"), ...args], { cwd: dir, env: { ...process.env, HOME: dir, AF_TEAM: "t9", AF_AGENT: "", HERDR_PANE_ID: "w2:p5" }, stdout: "pipe", stderr: "pipe" });
+        const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+        return { code: await p.exited, out, err };
+      };
+      const a = await run(["task", "codex", 'say "hi" & $HOME', "--no-worktree"]);
+      expect(a.code).toBe(0);
+      expect(a.out).toBe('ran task|codex|say "hi" & $HOME|--no-worktree\n');
+      expect(got).toMatchObject({ cwd: realpathSync(dir), team: "t9", agent: "", pane: "w2:p5" });
+      const b = await run(["fail"]);
+      expect(b.code).toBe(3);
+      expect(b.err).toBe("af: it failed\n");
+    } finally {
+      server.stop(true);
+    }
+    const none = Bun.spawnSync([join(dir, ".agent-flow", "bin", "af"), "whoami"], { env: { ...process.env, HOME: tmp("af-shim-none-") }, stdout: "pipe", stderr: "pipe" });
+    expect(none.exitCode).toBe(1);
+    expect(none.stderr.toString()).toContain("agent-flow is not connected to this machine");
   });
 });

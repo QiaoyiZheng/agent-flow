@@ -5,7 +5,7 @@ description: 先调研整理材料，再写正文，codex 以审稿人身份严�
 
 # Research, write, review
 
-Members: researcher (claude), writer (claude), critic (codex).
+Members: researcher (claude), writer (claude), critic (codex), all --no-worktree (only the writer edits files).
 
 1. T1 for researcher: the topic in the user's words. Task: collect the material the text needs (files in the repository, the web when needed); do not write the text and do not change files; result.md holds the key points, the source of each, and open questions.
 2. A ticket for writer --from T1 --max 2: write the text from the research notes; if the task does not say where, a new Markdown file under docs/; claims backed by sources; formulas in LaTeX. Submit ready with the file's path in the note.

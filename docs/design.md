@@ -110,7 +110,9 @@ af task gemini "根据 plan.md 写一份发布说明" --name write
 ```
 
 - 第一次调用时自动建 team，不用先 `af here`。新成员开在主 agent 所在 workspace 的新 tab 里，任务就是它收到的第一条消息（末尾加一句"最后用几句话总结结果"）。
-- 成员默认在主 agent 的目录里工作；`--worktree` 在 `<repo>/.agent-flow/worktrees/<team>/<成员>` 开一个 git worktree，分支 `af/<team>/<成员>`，从当前 HEAD 切出。**不自动合并**，分支名写在工单里，由主 agent 或用户决定怎么合。
+- 成员默认在主 agent 的目录里工作。**在 git 仓库里，新成员必须选 `--worktree` 或 `--no-worktree`**（2026-11-04 用户要求：不替它猜，每个都问）：`--worktree` 在 `<repo>/.agent-flow/worktrees/<team>/<成员>` 开 worktree，分支 `af/<team>/<成员>`，从主 agent 目录当前的 HEAD 切出，用于几个 session 同时改同一个仓库；`--no-worktree` 就在目录里工作（只读的活，或只有它在改）。都不给时 af 拒绝，并说明怎么选；拿不准就问用户。**不自动合并**，分支名写在工单里。不在 git 仓库里时不用选。
+- `--prepare "<命令>"`（可选，默认没有）：成员启动前在它的目录里跑一次（装依赖、链数据）。最多 10 分钟，输出存进工单的 `prepare.log`；失败时工单关成 failed，管理者在队列里收到最后几行。用户的意见：大多数活用不上，所以不设默认的准备脚本。
+- `--on <机器> [--cwd <那台机器上的目录>]`：成员开在一台已连接的 SSH 机器上，见 4.8。
 - `af task --to plan "…"` 把新工单交给已有的成员（同一个 session）；`af tell T1 "…"` 在同一张工单上追加要求。
 - 成员做完一轮（working → idle，6 秒后仍空闲，防止状态抖动），agent-flow 从它的对话记录里取这一轮最后的回复，写进 `result.md`，工单变 submitted，队列里进一条 `turn`。取不到对话记录就用屏幕最后 60 行。
 - 模式一里 `af queue take` 取走即算处理完；工单不需要显式关闭。
@@ -183,6 +185,23 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 
 时间轴的框、泳道图、"需要你"都用这一个函数。
 
+### 4.8 远程机器上的 team（2026-11-04）
+
+用户要求三步都做：
+
+1. **Mac 上的 session 把成员开在远程。** `af task claude "…" --on allinai2plus --cwd '~/nagas'`。成员开在那台机器上 team 自己的 workspace 里（第一次用这台机器时建），命令、GPU、文件都在那台机器上。监视（屏幕、对话记录、后台任务）走已有的 SSH 连接；结果拷回 Mac 上 team 的文件夹。
+2. **router 的成员开在远程。** 同上，另外：成员的协议文件、codex 的 profile 写在那台机器上；`task.md` 和输入在送达前拷到那台机器的 `~/.agent-flow/teams/<team>/tickets/<T>/`，成员 `af submit` 时 server 把那边的 `result.md` 拷回 Mac。
+3. **远程的 router 或 session 自己派活。** `af team new --on <机器>` 把 router 开在远程；远程机器上用户自己开的 session 也能直接 `af task`，它的成员默认开在同一台机器上。
+
+**远程的 `af`**（`packages/server/src/remote-af.ts`）：
+- 每台连上的机器，server 在 Mac 上开一个只服务它的 socket（`~/.agent-flow/ssh/<机器>.af.sock`），用这台机器的 SSH 主连接反向转发到那边的 `~/.agent-flow/af.sock`（`ssh -O forward -R`），并写一个 `~/.agent-flow/bin/af` 脚本（只要 sh 和 curl）。
+- 那边执行 `af …` 时，脚本把参数、目录、`AF_TEAM` / `AF_AGENT` / `HERDR_PANE_ID` 送过来，server 在 Mac 上用 `AF_REMOTE=<机器>` 跑同一个 af CLI，输出和退出码送回去。所以所有命令在哪里都一样。
+- 只开放派活、工单、队列相关的命令；不能往 pane 里打字，也不能读 Mac 上的文件。调用者的 pane 加上机器前缀；成员只能代表在这台机器上跑的成员说话。`af read` 只读这台机器上的 pane。
+- 远程机器上有 `~/.claude`、`~/.codex`、`~/.gemini` 时，写入 agent-flow skill（af 路径是那台机器上的）。
+- 后台任务的判断由 agent-flow-1b 的 `background.ts` 负责，对远程机器同样有效（通过 SSH 检查）。
+- claude 的 SessionStart hook（`--settings`）是 Mac 上的文件，不用于远程成员；远程 claude 的对话记录按 `--session-id` 找。
+- 第二个 server（`AF_SECOND_SERVER=1`）不接管远程的 `af.sock`。
+
 ## 5. 借鉴 DeepSeek Super-Agent 的地方
 
 来源：`deepseek-ai/dsh-superagent-prototype`（2026-10-31 开源）的源码和设计文章。
@@ -196,7 +215,7 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 ## 6. 仓库
 
 - 成员默认在管理者的目录里工作（模式二是 team 的目录），和用户平时开一个新 session 一样。
-- `--worktree`（`af task` 和 `af ticket open` 都有）：在 `<repo>/.agent-flow/worktrees/<team>/<成员>` 开 worktree，分支 `af/<team>/<成员>`，从管理者目录当前的 HEAD 切出；写进 `.git/info/exclude`（claude 的文件夹信任按仓库算，worktree 不会再弹框）。
+- `--worktree` / `--no-worktree`（`af task` 和 `af ticket open` 都有；在 git 仓库里新成员必须二选一，见 4.3）：`--worktree` 在 `<repo>/.agent-flow/worktrees/<team>/<成员>` 开 worktree，分支 `af/<team>/<成员>`，从管理者目录当前的 HEAD 切出；写进 `.git/info/exclude`（claude 的文件夹信任按仓库算，worktree 不会再弹框）。远程成员的 worktree 通过 SSH 在那台机器上建。
 - agent-flow 不替成员提交、不合并。成员自己提交（剧本会说明），分支名写在工单里。
 - 原来的集成分支、自动提交、accept 时合并、合并冲突处理都去掉了。
 
@@ -220,11 +239,12 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 
 | 命令 | 谁用 | 作用 |
 |---|---|---|
-| `af task <kind> "<任务>" [--name N] [--to 成员] [--worktree] [--task-file F]` | 主 agent | 开一张工单，交给新成员或已有成员 |
-| `af team new --goal "…" [--playbook P] [--router K] [--name N] [--cwd D]` | 主 agent、用户 | 开一个 agent team |
+| `af task <kind> "<任务>" --worktree\|--no-worktree [--name N] [--on 机器 --cwd D] [--prepare "…"] [--task-file F]` | 主 agent | 开一张工单，交给新成员（git 仓库里必须选 worktree） |
+| `af task --to <成员> "<任务>"` | 主 agent | 交给已有成员 |
+| `af team new --goal "…" [--playbook P] [--router K] [--name N] [--cwd D] [--on 机器]` | 主 agent、用户 | 开一个 agent team |
 | `af team list` · `af team stop [T]` · `af playbook list` | 所有人 | |
 | `af queue` · `af queue take` · `af queue done <seq>` | 管理者 | 看队列、一次取走全部、手动标为处理完 |
-| `af ticket open <成员> --title "…" (--task "…" \| --task-file F) [--from T] [--max N] [--kind K] [--worktree] [--note "…"]` | router | 开工单（成员不存在就按 `--kind` 新开） |
+| `af ticket open <成员> --title "…" (--task "…" \| --task-file F) [--from T] [--max N] [--kind K] [--worktree\|--no-worktree] [--on 机器 --cwd D] [--prepare "…"] [--note "…"]` | router | 开工单（成员不存在就按 `--kind` 新开） |
 | `af ticket close <T> [--failed\|--dropped\|--cancelled] [--note "…"]` · `af ticket show <T>` · `af tickets` | 管理者 | |
 | `af thread max <T> <N>` | 管理者 | 改线程的轮数上限 |
 | `af tell <T\|成员> "…"` | 管理者 | 追加要求（对 team 工单就是给 router 的新要求） |

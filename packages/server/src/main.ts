@@ -13,7 +13,8 @@ import { Workspaces } from "./workspaces.ts";
 import { RemoteMachine } from "./remote.ts";
 import { Notices } from "./notices.ts";
 import { PlaybookLibrary } from "./playbooks.ts";
-import { installSkill } from "./skills.ts";
+import { installSkill, skillText } from "./skills.ts";
+import { RemoteAf } from "./remote-af.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -80,7 +81,10 @@ export async function main(argv: string[]) {
   // AF_SECOND_SERVER=1: a server next to the main one (tests, trying a branch): it does not rewrite the skills in the
   // user's skill folders, and does not hand over documents agents change (the main server does both)
   const second = process.env.AF_SECOND_SERVER === "1";
-  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access, watchDocs: !second });
+  const api = serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access, watchDocs: !second });
+  // af on connected SSH machines (remote-af.ts); not from a second server, which would take over their af.sock
+  const remoteAf = second ? undefined : new RemoteAf({ home, w, teams: o, handler: api.handler, cliMain: join(repoRoot, "packages/cli/src/main.ts"), skillText, log: (m) => console.log(m) });
+  remoteAf?.start();
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));
   console.log(`agent-flow server: ${n} team(s) loaded`);
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
@@ -89,6 +93,7 @@ export async function main(argv: string[]) {
   if (!second) for (const f of installSkill(join(binDir, "af"))) console.log(`  skill:  ${f}`);
   const shutdown = () => {
     o.stop();
+    remoteAf?.stop();
     w.stop();
     rmSync(sock, { force: true });
     process.exit(0);

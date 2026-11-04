@@ -25,8 +25,16 @@ export interface TaskRequest {
   name?: string;
   /** Give it to this existing member instead (same session, its context kept). */
   to?: string;
+  /**
+   * A new member in a git repository must say whether it gets its own worktree (true: it changes files while other
+   * sessions change the same repository) or works in the folder itself (false). Ignored for an existing member.
+   */
   worktree?: boolean;
+  /** The machine to start it on (default: the manager's), and its folder there (default: the manager's, or home). */
+  machine?: string;
   cwd?: string;
+  /** A shell command run once in its folder before it starts (installs, links); off unless given. */
+  prepare?: string;
 }
 
 /** af team new: a router team. */
@@ -36,6 +44,8 @@ export interface NewTeamRequest {
   router?: AgentKind;
   name?: string;
   cwd?: string;
+  /** The machine the router (and by default its members) runs on. */
+  machine?: string;
 }
 
 /** af ticket open (router). */
@@ -49,7 +59,11 @@ export interface OpenTicketRequest {
   max?: number;
   note?: string;
   inputs?: string[];
+  /** Required for a new member in a git repository: see TaskRequest.worktree. */
   worktree?: boolean;
+  machine?: string;
+  cwd?: string;
+  prepare?: string;
 }
 
 export interface SubmitRequest {
@@ -68,6 +82,8 @@ export interface TeamSummary {
   stopped: boolean;
   /** Herdr workspace the team's members open in. */
   workspace?: string;
+  /** The machine its manager is on. */
+  machine?: string;
   /** The manager's pane: the session that hands out work (direct) or the router's. */
   managerPane?: string;
   parent?: { team: string; ticket: string };

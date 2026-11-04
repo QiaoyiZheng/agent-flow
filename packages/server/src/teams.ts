@@ -48,6 +48,7 @@ import {
   takenUnhandled,
   threadMax,
   ticketList,
+  paneLook,
   ticketStage,
   waitingTickets,
 } from "@af/core";
@@ -56,7 +57,10 @@ import { AfError } from "./errors.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { type AgentConfig, type Role, launchArgs, plainArgs } from "./agents.ts";
+import { sq } from "./remote.ts";
 import type { PlaybookLibrary } from "./playbooks.ts";
+import { type Host, addWorktree, gitTop, hostOf, hostPathOf } from "./hosts.ts";
+import { codexProfileToml } from "./agents.ts";
 import { type Peek, TRANSIENT } from "./transcripts/peek.ts";
 
 export interface TeamsOptions {
@@ -110,6 +114,8 @@ interface Team {
   looked: Map<string, number>;
   /** Members a message was just typed into: no second one until it has started on it. */
   typing: Map<string, number>;
+  /** When each member's pane was made (ms): a remote pane takes a few seconds to show up in Herdr's model. */
+  placedAt: Map<string, number>;
 }
 
 const USER = "user";
@@ -163,7 +169,7 @@ export class Teams {
   }
 
   private blank(id: string, state: TeamState): Team {
-    return { id, dir: join(this.opts.home, "teams", id), state, starting: new Set(), sizes: new Map(), asked: new Map(), reminded: new Set(), gone: new Map(), looked: new Map(), typing: new Map() };
+    return { id, dir: join(this.opts.home, "teams", id), state, starting: new Set(), sizes: new Map(), asked: new Map(), reminded: new Set(), gone: new Map(), looked: new Map(), typing: new Map(), placedAt: new Map() };
   }
 
   private emit(t: Team, ev: TeamEvent) {
@@ -329,7 +335,7 @@ export class Teams {
       const src = join(this.opts.protocolDir, f);
       if (existsSync(src)) writeFileSync(join(t.dir, "protocol", f), readFileSync(src, "utf8"));
     }
-    const repo = git.repoRoot(meta.cwd);
+    const repo = !meta.machine || meta.machine === "local" ? git.repoRoot(meta.cwd) : undefined;
     this.teams.set(id, t);
     this.emit(t, { type: "team.created", at: this.now(), meta: { ...meta, id, dir: t.dir, createdAt: this.now(), repo: repo && git.hasCommits(repo) ? repo : undefined } });
     return t;
@@ -340,10 +346,9 @@ export class Teams {
     const have = this.directTeamOf(pane);
     if (have) return have;
     const p = this.pane(pane);
-    if (p.machine !== "local") throw new AfError("remote_team", "handing out work from sessions on remote machines is not supported yet");
     const ws = this.opts.w.model.workspaces.find((w) => w.id === p.workspaceId);
     const parent = this.parentOfPane(pane);
-    return this.create({ name: ws?.label || p.agent || "session", mode: "direct", cwd: p.cwd, manager: { pane }, workspace: p.workspaceId, parent });
+    return this.create({ name: ws?.label || p.agent || "session", mode: "direct", cwd: p.cwd, manager: { pane }, workspace: p.workspaceId, machine: p.machine, parent });
   }
 
   /** A session that is itself a member of another team: its own team hangs under that member's ticket. */
@@ -364,14 +369,66 @@ export class Teams {
     return p;
   }
 
-  private env(t: Team, member?: string) {
-    // members with a protocol know who they are; plain sessions are known by their pane, like any session
-    return {
-      ...(member ? { AF_TEAM: t.id, AF_AGENT: member } : {}),
-      AF_SOCK: this.opts.sock,
-      AF_OUT: join(t.dir, "out"),
-      PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}`,
-    };
+  /** The machine a member (or a team's manager) is on. Throws when a remote one is not connected. */
+  host(machine: string | undefined): Host {
+    return hostOf(this.opts.w, machine ?? "local", { backend: this.opts.backend, afHome: this.opts.home, binDir: this.opts.binDir });
+  }
+
+  private remotePath = new Map<string, string>();
+
+  /** Env for an agent agent-flow starts: members with a protocol know who they are; plain ones are known by their pane. */
+  private async env(t: Team, host: Host, member?: string): Promise<Record<string, string>> {
+    const who: Record<string, string> = member ? { AF_TEAM: t.id, AF_AGENT: member } : {};
+    if (host.local) return { ...who, AF_SOCK: this.opts.sock, AF_OUT: join(t.dir, "out"), PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}` };
+    // a remote machine: its af (a script that reaches this server through the SSH connection) goes first on its PATH
+    let path = this.remotePath.get(host.machine);
+    if (!path) {
+      path = (await host.sh("echo $PATH")).out.trim() || "/usr/local/bin:/usr/bin:/bin";
+      this.remotePath.set(host.machine, path);
+    }
+    return { ...who, AF_OUT: hostPathOf(host, this.opts.home, join(t.dir, "out")), PATH: `${host.afHome}/bin:${path}` };
+  }
+
+  /**
+   * A new tab for a member on `host`: in the manager's workspace when it is on the same machine, else in the team's
+   * workspace on that machine (made with the first member there, who then gets its first pane).
+   */
+  private async tabFor(t: Team, host: Host, name: string, cwd: string, env: Record<string, string>) {
+    const meta = t.state.meta!;
+    let ws = (meta.machine ?? "local") === host.machine ? meta.workspace : meta.workspaces?.[host.machine];
+    if (ws && (meta.machine ?? "local") !== host.machine && !this.opts.w.model.workspaces.some((w) => w.id === ws)) ws = undefined; // closed since
+    if (!ws) {
+      const r = await host.backend.createWorkspace(meta.name, cwd, env);
+      this.emit(t, { type: "team.workspace", at: this.now(), machine: host.machine, workspace: host.prefix(r.workspaceId) });
+      await host.backend.renameTab(r.tabId, name).catch(() => {});
+      return { paneId: host.prefix(r.paneId), tabId: host.prefix(r.tabId) };
+    }
+    const r = await host.backend.createTab(host.raw(ws), cwd, name, env);
+    return { paneId: host.prefix(r.paneId), tabId: host.prefix(r.tabId) };
+  }
+
+  /**
+   * Where a new member works: its machine (default the manager's), its folder there (default the manager's when on
+   * the same machine, else the home folder), and whether it is in a git repository. In a repository the caller must
+   * say whether the member gets its own worktree (`worktree`): agent-flow does not guess, since sessions that change
+   * the same files at the same time need one and the others do not.
+   */
+  private async placeFor(t: Team, name: string, req: { machine?: string; cwd?: string; worktree?: boolean }) {
+    const meta = t.state.meta!;
+    const machine = req.machine || meta.machine || "local";
+    const host = this.host(machine);
+    const same = machine === (meta.machine ?? "local");
+    const cwd = req.cwd ? host.expand(req.cwd) : same ? meta.cwd : host.home;
+    const ok = await host.sh(`test -d ${sq(cwd)} && echo ok`);
+    if (ok.out.trim() !== "ok") throw new AfError("bad_cwd", `${cwd} is not a folder${host.local ? "" : ` on ${host.label}`}`);
+    const top = await gitTop(host, cwd);
+    if (top && req.worktree === undefined)
+      throw new AfError(
+        "worktree_choice",
+        `${cwd} is in a git repository: say whether ${name} gets its own worktree. --worktree if it changes files while other sessions change the same repository (its own branch af/${t.id}/${name}, never merged for you); --no-worktree if it works in the folder itself (read-only work, or nobody else edits it). If you cannot tell, ask the user.`,
+      );
+    if (!top && req.worktree) throw new AfError("no_repo", `${cwd} is not in a git repository with commits; --worktree needs one`);
+    return { host, machine, cwd, worktree: !!req.worktree };
   }
 
   private uniqueName(t: Team, base: string) {
@@ -381,31 +438,25 @@ export class Teams {
   }
 
   /** Add a member and start its agent in a new tab of the team's workspace (or in a given pane). */
-  private async spawn(t: Team, a: { name: string; kind: AgentKind; protocol: Member["protocol"]; role?: string; worktree?: boolean; pane?: { paneId: string; tabId: string } }) {
+  private async spawn(
+    t: Team,
+    a: { name: string; kind: AgentKind; protocol: Member["protocol"]; role?: string; worktree?: boolean; machine?: string; cwd?: string; prepare?: string; ticket?: string; pane?: { paneId: string; tabId: string } },
+  ) {
     if (!NAME.test(a.name)) throw new AfError("bad_name", `a member name must match ${NAME}`);
     if (a.name === USER) throw new AfError("bad_name", `${a.name} is reserved`);
     if (t.state.members[a.name]) throw new AfError("duplicate_member", `${a.name} is already a member of team ${t.id}`);
     if (!AGENT_KINDS.includes(a.kind)) throw new AfError("bad_kind", `kind must be one of ${AGENT_KINDS.join(", ")}`);
     const meta = t.state.meta!;
-    let cwd = meta.cwd;
-    let branch: string | undefined;
-    let worktree: string | undefined;
-    if (a.worktree) {
-      if (!meta.repo) throw new AfError("no_repo", `${meta.cwd} is not in a git repository with commits; --worktree needs one`);
-      branch = memberBranch(t.id, a.name);
-      worktree = join(meta.repo, ".agent-flow", "worktrees", t.id, a.name);
-      git.ensureExcluded(meta.repo, ".agent-flow/");
-      git.addWorktree(meta.repo, worktree, branch, git.headCommit(meta.cwd));
-      cwd = worktree;
-    }
+    const machine = a.machine ?? meta.machine ?? "local";
+    let cwd = a.cwd ?? meta.cwd;
     const m: Member = {
       name: a.name,
       kind: a.kind,
       protocol: a.protocol,
       role: a.role,
       cwd,
-      branch,
-      worktree,
+      ...(machine !== "local" ? { machine } : {}),
+      branch: a.worktree ? memberBranch(t.id, a.name) : undefined,
       status: "starting",
       addedAt: this.now(),
       session: a.kind === "claude" ? crypto.randomUUID() : undefined,
@@ -422,26 +473,49 @@ export class Teams {
       });
     t.starting.add(a.name);
     try {
-      const env = this.env(t, a.protocol === "none" ? undefined : a.name);
-      const tab = a.pane ?? (await this.opts.backend.createTab(meta.workspace, cwd, a.name, env));
+      const host = this.host(machine);
+      // its own worktree, then the optional prepare command, both before the agent starts
+      if (a.worktree) {
+        cwd = await addWorktree(host, cwd, t.id, a.name, m.branch!);
+        this.emit(t, { type: "member.added", at: this.now(), member: { ...t.state.members[a.name]!, cwd, worktree: cwd } });
+      }
+      if (a.prepare?.trim()) await this.prepare(t, host, a.name, cwd, a.prepare, a.ticket);
+      const env = await this.env(t, host, a.protocol === "none" ? undefined : a.name);
+      const tab = a.pane ?? (await this.tabFor(t, host, a.name, cwd, env));
       this.emit(t, { type: "member.placed", at: this.now(), name: a.name, paneId: tab.paneId, tabId: tab.tabId });
+      t.placedAt.set(a.name, this.clock());
       if (m.session) this.opts.w.rememberSession(tab.paneId, m.session);
+      // the protocol where the agent runs (a remote machine gets its own copy, and its codex its own profile)
+      let protocolFile = join(t.dir, "protocol", `${a.protocol}.md`);
+      let codexProfile: string | undefined;
+      if (!host.local && a.protocol !== "none" && !typedProtocol) {
+        const text = readFileSync(protocolFile, "utf8");
+        protocolFile = hostPathOf(host, this.opts.home, protocolFile);
+        await host.writeFile(protocolFile, text);
+        if (a.kind === "codex") {
+          const prof = codexProfileToml(a.protocol as Role, text);
+          await host.writeFile(`${host.home}/.codex/${prof.file}`, prof.toml);
+          codexProfile = prof.name;
+        }
+      }
+      // claude's SessionStart hook (--settings) is a file on this Mac with this Mac's af: not for other machines
+      const config = host.local ? this.opts.config : { ...this.opts.config, claudeSettings: undefined };
       const args = () =>
-        a.protocol === "none" || typedProtocol ? plainArgs(a.kind, this.opts.config, m.session) : launchArgs(a.kind, a.protocol as Role, join(t.dir, "protocol", `${a.protocol}.md`), this.opts.config, m.session);
+        a.protocol === "none" || typedProtocol ? plainArgs(a.kind, config, m.session) : launchArgs(a.kind, a.protocol as Role, protocolFile, config, m.session, codexProfile);
       const herdr = herdrMemberName(t.id, a.name);
       // a new tab's shell takes a moment to be ready; until then Herdr says the pane is busy
-      let res = await this.opts.backend.startAgent(herdr, a.kind, tab.paneId, args());
+      let res = await host.backend.startAgent(herdr, a.kind, host.raw(tab.paneId), args());
       for (let i = 0; i < 12 && !res.ok && /busy/.test(res.code); i++) {
         await Bun.sleep(500);
-        res = await this.opts.backend.startAgent(herdr, a.kind, tab.paneId, args());
+        res = await host.backend.startAgent(herdr, a.kind, host.raw(tab.paneId), args());
       }
       if (res.ok) this.setStatus(t, a.name, "idle");
       else if (res.code === "agent_not_ready") {
         // a folder-trust or login prompt: the user answers it (Needs you shows the pane); delivery waits
         this.setStatus(t, a.name, "blocked");
       } else {
-        if (!a.pane) await this.opts.backend.closeTab(tab.tabId).catch(() => {});
-        throw new AfError("agent_start_failed", `${a.kind} did not start (${res.code}: ${res.message})`);
+        if (!a.pane) await host.backend.closeTab(host.raw(tab.tabId)).catch(() => {});
+        throw new AfError("agent_start_failed", `${a.kind} did not start${host.local ? "" : ` on ${host.label}`} (${res.code}: ${res.message})`);
       }
     } catch (e) {
       this.setStatus(t, a.name, "exited");
@@ -451,6 +525,17 @@ export class Teams {
     }
     await this.opts.w.refresh().catch(() => {});
     return t.state.members[a.name]!;
+  }
+
+  /** Run a member's prepare command once in its folder; its output goes to the ticket's prepare.log. */
+  private async prepare(t: Team, host: Host, name: string, cwd: string, cmd: string, ticket?: string) {
+    const r = await host.sh(`${cmd} 2>&1`, { cwd, timeoutMs: 10 * 60_000 });
+    const log = `$ ${cmd}\n(in ${cwd}${host.local ? "" : ` on ${host.label}`}; exit ${r.code})\n\n${r.out}${r.err ? `\n${r.err}` : ""}`;
+    if (ticket) writeFileSync(join(this.ticketDir(t, ticket), "prepare.log"), log);
+    if (r.code !== 0) {
+      const tail = `${r.out}${r.err}`.trim().split("\n").slice(-12).join("\n");
+      throw new AfError("prepare_failed", `the prepare command for ${name} failed (exit ${r.code}${r.code === -1 || r.code === 143 ? ", stopped after 10 minutes" : ""}):\n${tail}`);
+    }
   }
 
   private setStatus(t: Team, name: string, status: AgentStatus) {
@@ -568,17 +653,20 @@ export class Teams {
       member = t.state.members[req.to]!;
       if (!member || member.team) throw new AfError("unknown_member", `no member ${req.to} in this session's team (members: ${Object.keys(t.state.members).join(", ") || "none"})`, 404);
       if (member.status === "exited") throw new AfError("member_exited", `${req.to} has exited; give the work to a new member`);
+      if (req.machine || req.cwd || req.prepare) throw new AfError("existing_member", `${req.to} already works in ${member.cwd}${member.machine ? ` on ${member.machine}` : ""}; --on, --cwd and --prepare are for a new member`);
     } else {
       const kind = (req.kind ?? "claude") as AgentKind;
       if (!AGENT_KINDS.includes(kind)) throw new AfError("bad_kind", `kind must be one of ${AGENT_KINDS.join(", ")}`);
       const name = req.name ? req.name : this.uniqueName(t, kind);
       if (req.name && t.state.members[req.name]) throw new AfError("duplicate_member", `${req.name} already exists; give it more work with --to ${req.name}`);
-      spawn = { name, kind, protocol: "none", worktree: !!req.worktree };
-      member = { name, kind, protocol: "none", cwd: t.state.meta!.cwd, status: "starting", addedAt: this.now() };
+      if (!NAME.test(name) || name === USER) throw new AfError("bad_name", name === USER ? `"${USER}" is reserved; pick another name` : `a member name must match ${NAME}`);
+      const place = await this.placeFor(t, name, req);
+      spawn = { name, kind, protocol: "none", worktree: place.worktree, machine: place.machine, cwd: place.cwd, prepare: req.prepare };
+      member = { name, kind, protocol: "none", cwd: place.cwd, status: "starting", addedAt: this.now(), ...(place.machine !== "local" ? { machine: place.machine } : {}) };
     }
-    const k = this.openTicket(t, { title: req.title ?? firstLine(text), assignee: member.name, task: text, branch: member.branch ?? (req.worktree ? memberBranch(t.id, member.name) : undefined) });
-    if (spawn) this.spawnLater(t, spawn, k.id);
-    return { team: t.id, ticket: k.id, member: member.name, dir: this.ticketDir(t, k.id), branch: k.branch, started: !!spawn };
+    const k = this.openTicket(t, { title: req.title ?? firstLine(text), assignee: member.name, task: text, branch: member.branch ?? (spawn?.worktree ? memberBranch(t.id, member.name) : undefined) });
+    if (spawn) this.spawnLater(t, { ...spawn, ticket: k.id }, k.id);
+    return { team: t.id, ticket: k.id, member: member.name, dir: this.ticketDir(t, k.id), branch: k.branch, started: !!spawn, machine: member.machine ?? spawn?.machine, cwd: member.cwd };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -591,28 +679,23 @@ export class Teams {
     if (!AGENT_KINDS.includes(router)) throw new AfError("bad_kind", `the router kind must be one of ${AGENT_KINDS.join(", ")}`);
     // the caller: a session (its direct team gets a ticket for the whole team), a router (nested), or the UI
     let parent: Team | undefined;
-    let cwd = req.cwd ? resolve(req.cwd) : undefined;
-    if (who.kind === "pane" || who.kind === "member") {
-      parent = this.directTeam(who.pane!);
-      cwd ??= parent.state.meta!.cwd;
-    } else if (who.kind === "router") {
-      parent = this.active(who.team);
-      cwd ??= parent.state.meta!.cwd;
-    } else if (!ui) throw new AfError("no_pane", "run af team new inside a session, or start a team from the agent-flow UI");
-    if (!cwd || !existsSync(cwd)) throw new AfError("bad_cwd", `${cwd ?? "(no folder)"} does not exist`);
-    const pb = req.playbook ? this.opts.playbooks?.find(req.playbook, git.repoRoot(cwd) ?? cwd) : undefined;
+    if (who.kind === "pane" || who.kind === "member") parent = this.directTeam(who.pane!);
+    else if (who.kind === "router") parent = this.active(who.team);
+    else if (!ui) throw new AfError("no_pane", "run af team new inside a session, or start a team from the agent-flow UI");
+    // the router's machine: as asked, else the caller's; its folder: as asked, else the caller's (same machine) or home
+    const pm = parent?.state.meta;
+    const machine = req.machine || pm?.machine || "local";
+    const host = this.host(machine);
+    const cwd = req.cwd ? host.expand(host.local ? resolve(req.cwd) : req.cwd) : pm && (pm.machine ?? "local") === machine ? pm.cwd : host.local ? undefined : host.home;
+    if (!cwd || (await host.sh(`test -d ${sq(cwd)} && echo ok`)).out.trim() !== "ok") throw new AfError("bad_cwd", `${cwd ?? "(no folder)"} is not a folder${host.local ? "" : ` on ${host.label}`}`);
+    const pb = req.playbook ? this.opts.playbooks?.find(req.playbook, host.local ? (git.repoRoot(cwd) ?? cwd) : undefined) : undefined;
     if (req.playbook && !pb) throw new AfError("no_playbooks", "playbooks are not available on this server");
     const name = (req.name || pb?.id || "team").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[^a-z]+/, "").slice(0, 24) || "team";
 
     const id = this.newId();
-    const dir = join(this.opts.home, "teams", id);
-    const ws = await this.opts.backend.createWorkspace(name, cwd, {
-      AF_TEAM: id,
-      AF_AGENT: "router",
-      AF_SOCK: this.opts.sock,
-      AF_OUT: join(dir, "out"),
-      PATH: `${this.opts.binDir}:${process.env.PATH ?? ""}`,
-    });
+    const draft = this.blank(id, emptyTeam()); // for env(): only its id and folder are read
+    const raw = await host.backend.createWorkspace(name, cwd, await this.env(draft, host, "router"));
+    const ws = { workspaceId: host.prefix(raw.workspaceId), tabId: host.prefix(raw.tabId), paneId: host.prefix(raw.paneId) };
     // the team's ticket on the caller's timeline: its assignee stands for the whole team
     let parentRef: TeamMeta["parent"];
     if (parent) {
@@ -622,37 +705,35 @@ export class Teams {
       this.emit(parent, { type: "ticket.delivered", at: this.now(), id: k.id });
       parentRef = { team: parent.id, ticket: k.id };
     }
-    const t = this.create({ name, mode: "router", cwd, manager: { member: "router" }, workspace: ws.workspaceId, parent: parentRef, playbook: pb?.id, playbookPath: pb?.path, goal }, id);
-    await this.opts.backend.renameTab(ws.tabId, "router").catch(() => {});
+    const t = this.create({ name, mode: "router", cwd, manager: { member: "router" }, workspace: ws.workspaceId, machine, parent: parentRef, playbook: pb?.id, playbookPath: pb?.path, goal }, id);
+    await host.backend.renameTab(raw.tabId, "router").catch(() => {});
+    // a router on another machine reads its playbook there
+    let playbookThere = pb?.path;
+    if (pb && !host.local) {
+      playbookThere = `${host.afHome}/teams/${id}/playbook.md`;
+      await host.writeFile(playbookThere, readFileSync(pb.path, "utf8"));
+    }
     // the router starts in the workspace's first pane; it gets the brief once it is free (a gemini router gets its
     // protocol first: spawn queues it before its first await)
-    const p = this.spawn(t, { name: "router", kind: router, protocol: "router", pane: { paneId: ws.paneId, tabId: ws.tabId } })
+    // the caller's ticket for the team opens the router's pane: it is known at once (the router starts in it)
+    if (parent) {
+      const m = Object.values(parent.state.members).find((x) => x.team === t.id);
+      if (m) this.emit(parent, { type: "member.placed", at: this.now(), name: m.name, paneId: ws.paneId, tabId: ws.tabId });
+    }
+    const p = this.spawn(t, { name: "router", kind: router, protocol: "router", machine, cwd, pane: { paneId: ws.paneId, tabId: ws.tabId } })
       .catch((e) => this.raise(t, { id: "startup:router", kind: "startup", member: "router", text: `The router did not start: ${(e as Error).message}` }))
       .finally(() => this.pending.delete(p));
     this.pending.add(p);
-    this.queueMessage(t, { member: "router", kind: "brief", text: this.brief(t) });
-    if (parent) this.emitParentPane(parent, t);
-    return { team: t.id, name, workspace: ws.workspaceId, parent: t.state.meta!.parent, playbook: pb?.id };
+    this.queueMessage(t, { member: "router", kind: "brief", text: this.brief(t, playbookThere) });
+    return { team: t.id, name, workspace: ws.workspaceId, parent: t.state.meta!.parent, playbook: pb?.id, machine };
   }
 
-  /** Point the parent's team member at the router's pane once it has one (its box then opens the team). */
-  private emitParentPane(parent: Team, child: Team) {
-    const wait = async () => {
-      for (let i = 0; i < 60 && !child.state.members.router?.paneId; i++) await Bun.sleep(100);
-      const pane = child.state.members.router?.paneId;
-      const tab = child.state.members.router?.tabId;
-      const m = Object.values(parent.state.members).find((x) => x.team === child.id);
-      if (pane && tab && m) this.emit(parent, { type: "member.placed", at: this.now(), name: m.name, paneId: pane, tabId: tab });
-    };
-    void wait();
-  }
-
-  private brief(t: Team) {
+  private brief(t: Team, playbook = t.state.meta!.playbookPath) {
     const m = t.state.meta!;
     return [
-      `[agent-flow] You are the router of team ${t.id} ("${m.name}"). Folder: ${m.cwd}.`,
+      `[agent-flow] You are the router of team ${t.id} ("${m.name}"). Folder: ${m.cwd}${m.machine && m.machine !== "local" ? ` on ${m.machine}` : ""}.`,
       `Goal: ${m.goal}`,
-      ...(m.playbookPath ? [`Playbook: read ${m.playbookPath} and follow it.`] : ["No playbook: decide the members and the steps yourself, following your router instructions."]),
+      ...(playbook ? [`Playbook: read ${playbook} and follow it.`] : ["No playbook: decide the members and the steps yourself, following your router instructions."]),
       `Start now: open the first tickets (af ticket open <member> --kind <kind> --title "..." --task-file <file>). Then end your turn; your queue wakes you.`,
     ].join(" ");
   }
@@ -663,11 +744,14 @@ export class Teams {
     const name = (req.member ?? "").trim();
     if (!NAME.test(name)) throw new AfError("bad_name", `a member name must match ${NAME}`);
     if (name === "router") throw new AfError("bad_name", "the router does not take tickets");
+    if (name === USER) throw new AfError("bad_name", `"${USER}" is reserved; pick another name`);
     if (!(req.task ?? "").trim()) throw new AfError("empty", "the task is empty (--task or --task-file)");
     const existing = t.state.members[name];
     if (existing?.status === "exited") throw new AfError("member_exited", `${name} has exited; open the ticket for a new member`);
     if (existing?.team) throw new AfError("is_team", `${name} is a team; use af tell ${name} "..."`);
     const kind = (req.kind ?? existing?.kind ?? "claude") as AgentKind;
+    if (existing && (req.machine || req.cwd || req.prepare)) throw new AfError("existing_member", `${name} already works in ${existing.cwd}${existing.machine ? ` on ${existing.machine}` : ""}; --on, --cwd and --prepare are for a new member`);
+    const place = existing ? undefined : await this.placeFor(t, name, req);
     const k = this.openTicket(t, {
       title: req.title || firstLine(req.task),
       assignee: name,
@@ -676,9 +760,9 @@ export class Teams {
       max: req.max,
       note: req.note,
       inputs: req.inputs,
-      branch: existing?.branch ?? (req.worktree ? memberBranch(t.id, name) : undefined),
+      branch: existing?.branch ?? (place?.worktree ? memberBranch(t.id, name) : undefined),
     });
-    if (!existing) this.spawnLater(t, { name, kind, protocol: "member", role: req.role, worktree: !!req.worktree }, k.id);
+    if (place) this.spawnLater(t, { name, kind, protocol: "member", role: req.role, worktree: place.worktree, machine: place.machine, cwd: place.cwd, prepare: req.prepare, ticket: k.id }, k.id);
     // a new ticket acts on the requests the router took (the user's, a report from a nested team)
     const asked = takenUnhandled(t.state).filter((q) => (q.kind === "user" || q.kind === "report") && !q.ticket).map((q) => q.seq);
     if (asked.length) this.emit(t, { type: "queue.handled", at: this.now(), seqs: asked });
@@ -815,13 +899,20 @@ export class Teams {
     return { t, k, member: who.member };
   }
 
-  submit(who: Who, req: SubmitRequest) {
+  async submit(who: Who, req: SubmitRequest) {
     const { t, k, member } = this.memberTicket(who, req.ticket);
     if (k.status === "closed") throw new AfError("closed", `${k.id} is closed (${k.outcome})`);
     if (k.status === "submitted") throw new AfError("submitted", `${k.id} is already submitted; wait for the router`);
     const status = req.status ?? "ready";
     if (!["ready", "blocked", "failed", "dropped"].includes(status)) throw new AfError("bad_status", "status must be ready, blocked, failed or dropped");
     const result = join(this.ticketDir(t, k.id), "result.md");
+    // a member on another machine wrote result.md there: bring it here (the UI and the next members read this copy)
+    const m = t.state.members[member]!;
+    if (m.machine && m.machine !== "local") {
+      const host = this.host(m.machine);
+      const text = await host.readFile(hostPathOf(host, this.opts.home, result));
+      if (text !== undefined) writeFileSync(result, text);
+    }
     const body = existsSync(result) ? readFileSync(result, "utf8") : "";
     this.emit(t, { type: "ticket.submitted", at: this.now(), id: k.id, report: { status, note: req.note?.trim() || undefined, to: req.to, at: this.now() } });
     this.enqueue(t, {
@@ -1000,8 +1091,12 @@ export class Teams {
 
   private async watchMember(t: Team, m: Member) {
     const w = this.opts.w;
+    // a member on a machine that is not connected right now: nothing can be known or done until it is back
+    if (m.machine && m.machine !== "local" && w.model.machines.find((x) => x.id === m.machine)?.state !== "online") return;
     const p = w.model.panes.find((x) => x.id === m.paneId);
     const now = this.clock();
+    // a pane just made on another machine shows up in Herdr's model a few seconds later
+    if (!p && now - (t.placedAt.get(m.name) ?? 0) < 20_000) return;
     // gone: no pane, or a pane whose agent has exited (twice in a row: Herdr's detection can blink)
     if (!p || !p.agent) {
       if (m.status === "exited") return;
@@ -1081,8 +1176,9 @@ export class Teams {
     const changed = p.statusAt ? Date.parse(p.statusAt) : 0;
     const settled = !changed || now - changed >= (this.opts.settleMs ?? 6000);
 
-    // a turn that ended since the ticket was last dealt with
-    if (k && k.status === "working" && changed > this.turnMark(t, k) && settled && t.looked.get(m.name) !== changed) {
+    // a turn that ended since the ticket was last dealt with: done or idle and no longer waiting on background work
+    // (a Monitor, a background command): Workspaces.settled. Waiting on background work is not the end of the job.
+    if (k && k.status === "working" && changed > this.turnMark(t, k) && settled && w.settled(m.paneId!) && t.looked.get(m.name) !== changed) {
       if (await this.turnEnded(t, m, k, changed)) return;
     }
     if (!settled) return;
@@ -1102,8 +1198,9 @@ export class Teams {
     if (!k) {
       const next = waitingTickets(t.state, m.name)[0];
       if (next) {
-        const text = this.taskMessage(t, m, next);
         try {
+          await this.mirror(t, m, next);
+          const text = this.taskMessage(t, m, next);
           if (await this.type(t, m, text, true)) this.emit(t, { type: "ticket.delivered", at: this.now(), id: next.id });
         } catch (e) {
           if (next.deliveryError !== (e as Error).message) this.emit(t, { type: "ticket.delivery_failed", at: this.now(), id: next.id, error: (e as Error).message });
@@ -1169,9 +1266,30 @@ export class Teams {
   }
 
   /** What a member is sent for a ticket. */
-  private taskMessage(t: Team, m: Member, k: Ticket) {
+  /**
+   * A member on another machine reads its ticket there: task.md, and the inputs from the team's folder, are copied
+   * to the same place under that machine's ~/.agent-flow before the ticket is typed in.
+   */
+  private async mirror(t: Team, m: Member, k: Ticket) {
+    if (!m.machine || m.machine === "local") return;
+    const host = this.host(m.machine);
     const dir = this.ticketDir(t, k.id);
-    const task = readFileSync(join(dir, "task.md"), "utf8").trim();
+    await host.writeFile(hostPathOf(host, this.opts.home, join(dir, "task.md")), readFileSync(join(dir, "task.md"), "utf8"));
+    for (const f of k.inputs)
+      if (f.startsWith(`${t.dir}/`) && existsSync(f)) await host.writeFile(hostPathOf(host, this.opts.home, f), readFileSync(f, "utf8"));
+  }
+
+  /** The ticket folder as the member sees it: on its machine. */
+  private ticketDirFor(t: Team, m: Member, id: string) {
+    const dir = this.ticketDir(t, id);
+    return m.machine && m.machine !== "local" ? hostPathOf(this.host(m.machine), this.opts.home, dir) : dir;
+  }
+
+  private taskMessage(t: Team, m: Member, k: Ticket) {
+    const local = this.ticketDir(t, k.id);
+    const task = readFileSync(join(local, "task.md"), "utf8").trim();
+    const dir = this.ticketDirFor(t, m, k.id);
+    const there = (f: string) => (m.machine && m.machine !== "local" ? hostPathOf(this.host(m.machine), this.opts.home, f) : f);
     if (m.protocol === "none") {
       const body = task.length > 1500 ? `Your task is in ${join(dir, "task.md")}. Read it and do it.` : task;
       return `${body}\n\n(agent-flow ticket ${k.id}${k.branch ? `, on branch ${k.branch}` : ""}: when you finish, end your reply with a short summary of the result.)`;
@@ -1179,7 +1297,7 @@ export class Teams {
     const parts = [
       `[agent-flow] Ticket ${k.id} for you${k.round > 1 ? ` (thread ${k.thread}, round ${k.round})` : ""}: ${k.title}.`,
       `Read ${join(dir, "task.md")} and do it.`,
-      ...(k.inputs.length ? [`Read first: ${k.inputs.join(", ")}.`] : []),
+      ...(k.inputs.length ? [`Read first: ${k.inputs.map(there).join(", ")}.`] : []),
       ...(k.note ? [`Router's note: ${k.note}`] : []),
       `Work in ${m.cwd}.`,
       `When finished, write ${join(dir, "result.md")}, then run: af submit --status ready --note "<one line>" (or blocked / failed / dropped).`,
@@ -1203,7 +1321,8 @@ export class Teams {
       const typed = t.typing.get(mgr.name);
       if (typed && now - typed < 15_000) return;
     }
-    const af = t.state.meta!.mode === "direct" ? join(this.opts.binDir, "af") : "af";
+    // a session agent-flow did not start may not have af on its PATH: the full path, on the manager's machine
+    const af = t.state.meta!.mode === "direct" ? this.afPathOn(t.state.meta!.machine) : "af";
     const waiting = byPriority(queued(t.state));
     const fresh = waiting.filter((q) => !q.notified);
     if (waiting.length) {
@@ -1237,6 +1356,12 @@ export class Teams {
     }
   }
 
+  private afPathOn(machine: string | undefined) {
+    if (!machine || machine === "local") return join(this.opts.binDir, "af");
+    const home = this.opts.w.remoteOf(`${machine}~x`)?.home;
+    return home ? `${home}/.agent-flow/bin/af` : "af";
+  }
+
   private shortItem(t: Team, q: QueueItem) {
     const who = q.from ?? "";
     const what: Record<QueueKind, string> = { user: "new request", ask: "asks a question", asking: "is asking", approval: "waits for the user's approval", stuck: "may be stuck", exited: "exited", error: "error", submit: "submitted", turn: t.state.meta!.mode === "direct" ? "finished" : "stopped without submitting", report: "reported" };
@@ -1251,4 +1376,4 @@ const firstLine = (s: string, n = 100) => {
 
 const toStatus = (s: string): AgentStatus => (s === "idle" || s === "working" || s === "blocked" || s === "done" ? s : "unknown");
 
-const lookOf = (p: HPane | undefined) => (p ? { status: p.agentStatus, asking: p.asking } : undefined);
+const lookOf = (p: HPane | undefined) => (p ? paneLook(p) : undefined);
