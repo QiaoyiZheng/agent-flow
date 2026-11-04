@@ -174,7 +174,7 @@ export interface ShowRequest extends Caller {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Rendered agent output: read from each agent's own transcript file (claude, codex, omp), normalized.
+// Rendered agent output: read from each agent's own transcript file (claude, codex, omp, gemini), normalized.
 
 export type ChatBlock =
   | {
@@ -187,7 +187,7 @@ export type ChatBlock =
     }
   /** Assistant prose: markdown with LaTeX math. */
   | { kind: "text"; text: string }
-  /** The model's readable reasoning (claude thinking, codex reasoning summaries, omp thinking): folded by default. */
+  /** The model's readable reasoning (claude thinking, codex reasoning summaries, omp thinking, gemini thoughts): folded by default. */
   | { kind: "thinking"; text: string }
   | ToolBlock
   /**
