@@ -137,7 +137,8 @@ export class Herdr implements TerminalBackend {
    */
   private rpc(method: string, params: object = {}): Promise<any> {
     return new Promise((resolve, reject) => {
-      let buf = "";
+      // bytes, decoded once at the end: a character split across two chunks must not be decoded in halves
+      const chunks: Buffer[] = [];
       let settled = false;
       const done = (f: () => void) => {
         if (settled) return;
@@ -153,13 +154,14 @@ export class Herdr implements TerminalBackend {
             sock.write(JSON.stringify({ id: "af", method, params }) + "\n");
           },
           data: (sock, d) => {
-            buf += d.toString();
-            const i = buf.indexOf("\n");
-            if (i < 0) return;
+            chunks.push(Buffer.from(d));
+            if (d.indexOf(10) < 0) return;
+            const all = Buffer.concat(chunks);
+            const i = all.indexOf(10);
             // settle before closing: end() runs the close handler at once
             done(() => {
               try {
-                const r = JSON.parse(buf.slice(0, i));
+                const r = JSON.parse(all.subarray(0, i).toString("utf8"));
                 if (r.error) reject(new HerdrError(r.error.code, r.error.message));
                 else resolve(r.result);
               } catch (e) {
