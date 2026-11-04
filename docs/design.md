@@ -1,6 +1,6 @@
 # agent-flow 设计文档
 
-状态：v0 设计已定（2026-11-02，通过 grill-me 逐条讨论确定）。实现中发现与本文冲突的地方，先改本文，再改代码。
+状态：v0 设计 2026-11-02 定；2026-11-04 把 run + 图重构成两种模式（第 4–9 节）。实现中发现与本文冲突的地方，先改本文，再改代码。
 
 ## 1. 要解决什么
 
@@ -21,9 +21,8 @@
         ▼
 af server（Bun）─────────────── af CLI（agent 和人都用它）
   · Herdr 适配层                    │ HTTP over Unix socket
-  · 图调度器                        │
-  · 信箱                            │
-  · git worktree 管理               │
+  · team / 工单 / 队列              │
+  · 监视成员、送达通知              │
   · events.jsonl                   │
         │ JSON socket API + terminal session observe/control
         ▼
@@ -34,7 +33,7 @@ Herdr server（原版，不 fork）
 ```
 
 **原则：**
-- Herdr 负责终端和 agent 生命周期；agent-flow 负责组合、通信、调度、UI。
+- Herdr 负责终端和 agent 生命周期；agent-flow 负责派活、监视、通知、UI。
 - 所有对 Herdr 的调用都经过适配层（`server/src/herdr/`），以后可以换成 tmux 或自研的 PTY server。
 - 浏览器关掉或 af server 崩掉，agent 照常运行。af server 重启后从磁盘恢复状态，并和 Herdr 的实际状态对一遍。
 
@@ -58,171 +57,192 @@ Herdr server（原版，不 fork）
 - terminal session 不在 JSON socket API 里。server 给每个打开的终端起一个 `herdr terminal session control|observe` 子进程，只给正在看的终端起。
 - 单键回显延迟：p50 19 ms，p90 21 ms。
 
-## 4. 核心概念
+## 4. 两种模式（2026-11-04 重构，替换原来的"run + 图"）
+
+原来的 run 是"lead 建一张图，server 按依赖自动派发，lead 逐个 accept/reject，每个节点一条 git 分支，accept 时自动合并"。对快速派活太重；循环靠图引擎的回边，也不灵活。重构后分两种模式，共用一套基础：**一个 session 开出新 session，agent-flow 盯着它们，有事就叫醒管它们的那个 agent。** 两种模式只差"谁来管"：
+
+| | 模式一：直接派活 | 模式二：agent team |
+|---|---|---|
+| 谁管 | 用户正在说话的 session（主 agent） | 一个专门的 router agent |
+| 怎么开始 | 主 agent 调 `af task` | 用户的 session 调 `af team new`，或网页 "New team" |
+| 成员 | 普通 session，不注入协议 | 注入成员协议，用 `af submit` 交结果 |
+| 结果怎么回来 | 成员做完一轮，agent-flow 从对话记录取最后的回复 | 成员 `af submit`；没交就算"做完一轮没提交" |
+| 成员之间 | 不通信，由主 agent 安排先后 | 不直接通信，一切经过 router 的队列 |
+| 界面 | 主 agent 的竖时间轴，每张工单一个框 | 泳道图：router 一条线，每个成员一条线 |
+
+### 4.1 概念
 
 | 概念 | 含义 |
 |---|---|
-| **run** | 一次完整的协作任务。有自己的图、信箱、集成分支 `af/<run>/main` |
-| **团队模板** | YAML 文件，声明一个 run 启动时要起哪些 agent、各自的角色。**不写控制流** |
-| **agent** | 跑在某个 Herdr pane 里的一个 coding agent 实例，在 run 内有唯一名字 |
-| **lead（总控）** | run 的入口 agent。用户主要和它对话；它负责建图、改图、校验 |
-| **图（graph）** | lead 维护的一张**有向图，允许有环**。是一份"活的计划"，可以随时修改 |
-| **节点（node）** | 图里的一块活：任务说明 + 执行者 + 隔离方式 |
-| **实例（instance）** | 节点的一次执行，记作 `code#1`、`code#2`。图有环，执行记录没有环 |
-| **边（edge）** | 依赖关系，可以带条件 `on <outcome>` |
-| **outcome** | 节点交结果时附带的标签（如 `pass` / `fail`），用来决定走哪条边 |
+| **team** | 一个管理者和它开出的所有工单。模式一的 team 在主 agent 第一次 `af task` 时自动建，挂在它的 pane 上；模式二的 team 有自己的 Herdr workspace |
+| **管理者（manager）** | 收队列的那个 agent：模式一是主 agent，模式二是 router |
+| **成员（member）** | team 里被派活的 session。一个成员可以先后做多张工单，上下文连续 |
+| **工单（ticket）** | 让一个成员做一件事。T1、T2…… 每张工单一个文件夹 |
+| **线程（thread）** | 用 `--from` 串起来的一串工单（一个循环）。管理者开线程时定最多几轮 |
+| **队列（queue）** | 每个管理者一个，只有 server 往里写：成员交结果、提问、卡住、退出，用户的新要求 |
+| **剧本（playbook）** | 模式二里 router 照着做的一份 markdown：角色、规则、什么时候向用户汇报 |
 
-### 团队模板示例
-
-```yaml
-# <repo>/.agent-flow/teams/review-loop.yaml（也可放在 ~/.agent-flow/teams/）
-name: review-loop
-entry: lead
-agents:
-  lead:     { kind: claude, role: "拆任务、建图、校验结果" }
-  reviewer: { kind: claude, role: "审 diff，回 pass/fail 和理由" }
-# 其他执行者由 lead 按节点用 --kind 现开
-```
-
-`af up review-loop` 会新建一个 run，起模板里的 agent，注入 skill 和角色，把焦点交给 lead。lead 觉得某种组合好用时，可以自己写一份新的团队模板存起来。
-
-## 5. 图与调度
-
-### 5.1 节点实例的状态
+### 4.2 存储
 
 ```
-pending ──触发条件满足──▶ ready ──派发──▶ running ──af done──▶ submitted
-                                            ▲                     │
-                                            └── reject + 理由 ◀────┤
-                                                                  ├── accept ──▶ accepted
-                                                                  └── (auto-accept 直接通过)
-另有：cancelled（lead 取消）、skipped（run 结束时仍未触发）
+~/.agent-flow/teams/<team>/
+  events.jsonl        所有变化，只追加；唯一的事实来源
+  team.json           当前状态的快照（server 每次变化后写，给人看）
+  out/                $AF_OUT：成员之间交接的其他文件
+  tickets/T3/
+    task.md           管理者写：要做什么（名字固定）
+    result.md         成员写：做完的结果（名字固定）
+    files/            其他交付文件
 ```
 
-- **accepted 的实例不可修改。** 要改就让节点再执行一次（产生新实例），或者新建节点。
-- `af graph edit` 只影响还没派发的节点。在跑的节点要先 `af graph cancel`。
+- 状态由 `events.jsonl` 回放得到（`packages/core/src/team.ts` 的 reducer，server 和网页共用），server 重启不丢东西。实现在 `packages/server/src/teams.ts`，测试在 `packages/server/test/teams.test.ts`。
+- 工单状态：`open`（已派出，还没送到）→ `working`（已送到成员）→ `submitted`（结果在队列里等管理者）→ `closed`（`done` / `failed` / `dropped` / `cancelled`）。
+- **关掉的工单不再改。** 要返工就开新工单，`--from` 指向原来那张，交给同一个成员 session。`--from X` 开新工单时，X 如果还是 submitted 就自动关成 done。
+- **线程和轮数**：工单的 thread = `--from` 那张的 thread，没有 `--from` 就是它自己。轮数 = 线程里分给同一个成员的工单数。线程的上限在第一张工单上用 `--max` 定（默认 3），`af thread max <T> <N>` 改。到上限后 server 拒绝再开，并在"需要你"里放一条。
+- 旧的 `~/.agent-flow/runs/` 留在磁盘上，网页不再显示（显示要保留整套图引擎）。
 
-### 5.2 边与环
+### 4.3 模式一：直接派活
 
 ```bash
-af graph add  code   --kind codex  --task "实现 X"
-af graph add  review --kind claude --after code --auto-accept \
-              --task "审 diff，结束时 af done --outcome pass 或 fail"
-af graph link review code --on fail --max 3     # 回边
-af graph add  docs   --after review --on pass
+af task claude "把登录页拆成 3 步，写成 plan.md" --name plan
+af task codex  "按 plan.md 第 1 步实现" --name exec --worktree
+af task gemini "根据 plan.md 写一份发布说明" --name write
 ```
 
-规则：
-1. 边上的 `--on <outcome>` 不写时，匹配任何 outcome。
-2. 一个实例被 accept 后，它所有条件匹配的出边**触发**。
-3. **正向边**：一个节点的所有正向入边都触发过后，它进入 ready。
-4. **回边**：`link` 时如果这条边会形成环，就自动标记为回边。
-   - 回边**必须带 `--on`**。一个环里如果没有任何带条件的边，`link` 直接报错。
-   - 回边触发时，目标节点直接开始下一个实例，不等其他入边。
-   - `--max` 是这条回边最多触发的次数，默认 3。到达上限时不再触发：在"需要你"里出现一条待办，同时通知 lead，由 lead 或用户决定加轮数、改图还是放弃。
-5. 一个实例的 outcome 没有匹配到任何出边时，这条路径就在这里结束。
-6. 没有节点在 ready / running / submitted 状态、也没有回边可以触发时，图进入 **quiescent（静止）**，通知 lead。run 不会自动结束，因为 lead 看完结果可能还要加节点。结束 run 要显式执行 `af run stop`，这时剩下没触发的节点标为 skipped。
-7. 一个节点同一时间最多只有一个活动实例（ready / running / submitted）。它忙的时候到达的触发会排队，等它空出来再生成新实例；回边触发优先于正向触发。
-8. 新建的正向边如果来自一个已经 accepted 的节点，并且条件匹配，会立刻触发一次（"迟到绑定"）。所以 lead 在上游做完以后再接一个下游节点，下游会马上开始。
-9. 删除节点时连带删除它的边。如果下游因此没有任何正向入边了，下游就变成根节点，立刻开始。
+- 第一次调用时自动建 team，不用先 `af here`。新成员开在主 agent 所在 workspace 的新 tab 里，任务就是它收到的第一条消息（末尾加一句"最后用几句话总结结果"）。
+- 成员默认在主 agent 的目录里工作；`--worktree` 在 `<repo>/.agent-flow/worktrees/<team>/<成员>` 开一个 git worktree，分支 `af/<team>/<成员>`，从当前 HEAD 切出。**不自动合并**，分支名写在工单里，由主 agent 或用户决定怎么合。
+- `af task --to plan "…"` 把新工单交给已有的成员（同一个 session）；`af tell T1 "…"` 在同一张工单上追加要求。
+- 成员做完一轮（working → idle，6 秒后仍空闲，防止状态抖动），agent-flow 从它的对话记录里取这一轮最后的回复，写进 `result.md`，工单变 submitted，队列里进一条 `turn`。取不到对话记录就用屏幕最后 60 行。
+- 模式一里 `af queue take` 取走即算处理完；工单不需要显式关闭。
 
-实现：`packages/core/src/graph.ts`（纯逻辑，事件溯源：`decide` 校验命令并产出全部事件，包括派生事件；`apply` 只机械地应用事件，所以回放 `events.jsonl` 能精确重建状态）。测试：`packages/core/test/graph.test.ts`。
+### 4.4 模式二：agent team 和 router
 
-### 5.3 派发
+```bash
+af team new --playbook humanize-loop --goal "给登录页加验证码" [--router claude] [--name captcha]
+```
 
-- **自动派发**：节点一进入 ready，server 就把"任务说明 + 上游实例的结果路径 + 回边带来的意见"打包，发给它的执行者。
-- `--hold`：这个节点进入 ready 后不自动派发，等 lead 执行 `af graph start <node>`。
-- **执行者**由 lead 按节点选：
-  - `--kind codex|claude|omp`（默认方式）：新开一个 agent。
-  - `--agent <name>`：排队给一个常驻的具名 agent，适合需要连续上下文的场景。
-- **同一节点再次执行**（被 reject，或回边触发）时，交给**上一次的同一个 agent session**，在同一条分支上继续做。
-- 新开的 agent 一直存活到 run 结束，因为它的节点随时可能被回边再次触发。run 结束后统一回收，pane 的终端记录保留，可以回看。
+- agent-flow 新开一个 workspace，起 router（默认 claude，注入 `packages/skill/router.md`），第一条消息是目标和剧本的路径。在调用者自己的 team 里同时开一张工单，执行者就是这个 team：调用者的时间轴上整个 team 占一个框，点进去是泳道图。
+- router 自己不写代码也不写文档，只做这些事：开成员和工单、决定下一步交给谁、管轮数、回答成员的问题、向用户汇报。
+- 成员（注入 `packages/skill/member.md`）收到工单后读 `task.md`，做完写 `result.md`，然后 `af submit --status ready|blocked|failed|dropped --note "…" [--to <成员>]`。`--to` 只是建议，下一步给谁由 router 决定。中途可以 `af progress "…"`（只更新工单，不进队列），有问题 `af ask "…"`（进队列，等 router `af reply`）。
+- router 向用户汇报用 `af report "…" [--done]`：进调用者的队列；`--done` 把调用者那张工单交成 ready。网页里开的 team 没有调用者，汇报进"需要你"。
+- 调用者对 team 工单 `af tell T5 "再加一个暗色模式"`，router 的队列里进一条 `user`（排在最前）。这样 router 可以一直开着接新活（super agent 剧本）。
+- 剧本：内置 `packages/skill/playbooks/*.md`（humanize-loop、super-agent、bugfix、compare-plans、research-write-review），用户的 `~/.agent-flow/playbooks/`，项目的 `<repo>/.agent-flow/playbooks/`，同名的后者覆盖前者。原来的 4 个 workflow 模板改写成了剧本。
 
-### 5.4 校验
+humanize loop 用工单走一遍：
 
-- 实例进入 submitted 后，server 给 lead 发一条消息，内容包括结果路径和 diff 命令。
-- lead 执行 `af graph accept <node>` 或 `af graph reject <node> --reason "..."`。
-- 标了 `--auto-accept` 的节点（默认关闭）交了就算通过，不叫醒 lead。适合审查这类本身就是在做判断的节点，这样"写 → 审 → 改"的小循环可以自己转。
+```
+T1 coder     写第 1 版         submit → #1 → router 开 T2（--from T1，线程 T1，--max 5）
+T2 reviewer  审 T1             submit fail → #2 → router 开 T3（--from T2）
+T3 coder     按 T2 的意见改     submit → #3 → router 开 T4
+T4 reviewer  审 T3             submit pass → #4 → router 关 T4，af report --done
+```
 
-## 6. 仓库隔离（git）
+### 4.5 队列
 
-- 每个节点二选一：`--isolated`（默认）或 `--shared`（只读节点，如审查、调研）。不是 git 仓库的目录，所有节点都直接在 run 的目录里跑。
-- **分支命名**：集成分支 `af/<run>/main`，节点分支 `af/<run>/node/<node>`。（不能用 `af/<run>` 加 `af/<run>/<node>`：git 里一个 ref 不能同时是文件和目录。）
-- run 开始时，从当前 HEAD 建 `af/<run>/main`，并在 `<repo>/.agent-flow/worktrees/<run>/_main` 开一个集成 worktree。**用户的分支在整个 run 期间不会被碰。** 所有 git 操作都是 `git -C <目录>`，不切换用户的分支。
-- isolated 节点第一次执行时，从 `af/<run>/main` 切出节点分支，在 `<repo>/.agent-flow/worktrees/<run>/<node>` 开 worktree。直接用 git 创建，不用 `herdr worktree create`，因为我们有自己的 UI，不需要 Herdr 的分组。
-- **worktree 放在仓库里面**，并写进 `.git/info/exclude`。原因是 claude 的"信任此文件夹"会从父目录继承（已实测）：用户信任过仓库，新 worktree 就不会在启动时弹框卡住。已知副作用：仓库里的其他工具（测试运行器、搜索）可能扫到 `.agent-flow/`，需要时让用户在工具配置里排除它。
-- shared 节点在集成 worktree 里跑，能看到到目前为止所有已接受的工作。
-- **提交**：worker 执行 `af done` 时，server 把它目录里的改动自动提交（提交作者 `agent-flow`）。worker 自己不需要 commit。
-- **合并**：accept 时，server 把节点分支 `--no-ff` 合并进 `af/<run>/main`。下游节点在合并之后才切分支或刷新，所以**图的依赖关系 = git 的先后关系**。
-- **再次执行**（回边触发）：节点的 worktree 保留，派发前先把 `af/<run>/main` 合并进节点分支，拿到别的节点已接受的改动。
-- **合并冲突**：不自动处理。合并被中止，实例留在 submitted 状态，"需要你"里出现一条待办，并通知 lead。lead reject 时，给 worker 的消息里会附上"先执行 `git merge af/<run>/main` 并解决冲突"。
-- run 结束后，`af/<run>/main` 交给用户，由用户决定怎么合进自己的分支。
-- 已知成本：每个 worktree 都要重新装依赖。v0 不处理，以后在团队模板里加 `setup:` 命令。
+一条队列项：
 
-## 7. 通信：终端唤醒 + 文件信箱
+```json
+{ "seq": 17, "kind": "submit", "ticket": "T2", "from": "coder", "to": "reviewer",
+  "text": "第 1 版写完，测试过了", "state": "queued" }
+```
 
-- 消息正文存成 JSON 文件：`~/.agent-flow/runs/<run>/mail/<agent>/<ts>-<id>.json`。
-  ```json
-  { "id": "m_…", "run": "…", "from": "lead", "to": "coder-1", "node": "code#2",
-    "kind": "task|notice|reply|submit|system", "body": "…",
-    "attachments": ["/abs/path/…"], "reply_to": null, "ts": "…" }
+- 种类：`user`（用户或上级的新要求）、`ask`（成员提问）、`asking`（成员屏幕上有任务相关的提问）、`stuck`（可能卡住）、`exited`（进程退出）、`error`（API 错误重试 3 次仍失败）、`submit`（成员交结果）、`turn`（做完一轮：模式一是结果，模式二是"没提交"）、`report`（下级 team 的汇报）。
+- 状态：`queued` → `taken` → `handled`。
+- **一次取走全部**（借鉴 Super-Agent 的批处理）：`af queue take` 取走所有 queued 项，按 user > ask/asking/stuck/exited/error > submit/turn/report、同类按先后打印。每项带工单号、成员、前 400 字和文件路径（全文按路径读）。
+- 模式二里每一项都要用一个动作结束：对它的工单 `af ticket open --from` / `af ticket close` / `af reply` / `af answer` / `af tell`，或 `af report`、`af queue done <seq>`。对某张工单做了动作，这张工单已取走的项都算处理完。router 空闲了手上还压着取走没处理的项，server 提醒一次，再不处理就进"需要你"。
+- **通知**：管理者空闲、屏幕上没有菜单或面板、队列里有没通知过的项时，往它的终端打一行：`[agent-flow] 3 new in your queue: T2 reviewer submitted; T3 coder asking. Run: af queue take`。它忙时只排队，不重复通知。通知打出去 30 秒内它没开始工作，再打一次；两次都没反应就进"需要你"。server 重启后，没通知过的项照样会通知。
+
+### 4.6 监视成员
+
+server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
+
+| 看到什么 | 怎么做 |
+|---|---|
+| 做完一轮 | 见 4.3（模式一）；模式二里没 `af submit` 就等 20 秒，进一条 `turn`（"做完一轮没提交"，带最后的回复） |
+| 屏幕上有提问 | 任务本身的问题（"用 A 还是 B"）进队列，管理者 `af answer <工单> <选项号> [--text …]` 回答（和用户在卡片上点选一样：先确认菜单没变，再按键）。**权限审批和"信任这个文件夹"不进队列**，只在"需要你"里交给用户 |
+| 还在工作中，但对话记录 10 分钟没有变长 | 进一条 `stuck`，带屏幕最后几行；同一段只报一次 |
+| 进程退出 | 进一条 `exited` |
+| 一轮以临时错误结束（429、5xx、overloaded、连接被重置、超时） | 自动打一句"继续"，最多 3 次；还不行进一条 `error` |
+| 成员 session 是 server 重启前在工作的 | 重新送达时附一句恢复说明："先看看你的目录和 git 历史，再决定要不要重做对外的操作" |
+
+- 一个成员同时只做一张工单：后开的工单排着，等它交了前一张、空闲了再送。
+- 送达和通知都**先记进 events.jsonl 再做**：`ticket.delivered`、`queue.notified` 只在打字成功后记；agent 开着菜单或面板时等着，下一秒再试。
+
+### 4.7 工单阶段（界面用的唯一判断）
+
+按顺序检查，取第一条符合的（`packages/core/src/team.ts` 的 `ticketStage`）：
+
+1. 送达失败 → `undelivered`
+2. 成员屏幕上有提问 → `asking`（权限审批是 `approval`）
+3. 已交、status ready → `review`（等管理者看）
+4. 已交、blocked / failed → `blocked` / `failed`
+5. open（还没送到）→ `queued`
+6. working、成员在工作 → `working`
+7. working、成员空闲 → `idle`
+8. closed → `done` / `failed` / `dropped` / `cancelled`
+
+时间轴的框、泳道图、"需要你"都用这一个函数。
+
+## 5. 借鉴 DeepSeek Super-Agent 的地方
+
+来源：`deepseek-ai/dsh-superagent-prototype`（2026-10-31 开源）的源码和设计文章。
+
+- **相同**：router 不干活（文章的对照实验：一个 session 带 subagent 工具，提示词中性时 5 次里一次也没交出去，p95 29.5 分钟；Super-Agent 15.7 分钟）；工单 + 派工；成员不直接说话；界面只显示要人处理的事。
+- **不同**：它常驻 GitHub 仓库、接团队群聊，有一大块准入和授权；我们是一个用户在本地说话。它的成员之间几乎不接力（一张工单一个 PR）；我们的成员要接力和循环，这正是文章列为"还没解决"的部分。它控制 agent 内部（能在一轮中间插消息、长命令转后台）；我们驱动的是原版 CLI，只能打字、读屏幕和对话记录。它让后续消息绕过 router 直接给 worker；我们一切经过 router（它的数据：去掉直通后完成时间几乎不变，router 多做约 30% 的决定，cache read token 多约 37%）。
+- **借来的**：一次处理整个队列（4.5）；router 不改写，只转原文（task.md 放原话或上游 result.md 的路径，备注一句）；固定的几种报告（ready / blocked / failed / dropped，progress 不进队列）；先存再做、确认送到（4.6）；一个函数算阶段（4.7）；空闲不等于做完（`turn` 项、`af status`）；临时错误自动"继续"；重启后的恢复说明；通知里带 id、前 400 字和路径，`af ticket show` 带相关工单的 id，可以一步步往回找。
+- **以后再说**：Watchdog（一个独立 agent 定时检查成员有没有实际进展）、每张工单的准备命令、同时工作的成员数上限、成员把不属于自己的活交回 router。
+- **不借**：异步工具（要改 agent 自己的工具循环）、事件来源和准入规则、计算/状态/环境分离（Herdr 已经让终端独立于 af server）。
+
+## 6. 仓库
+
+- 成员默认在管理者的目录里工作（模式二是 team 的目录），和用户平时开一个新 session 一样。
+- `--worktree`（`af task` 和 `af ticket open` 都有）：在 `<repo>/.agent-flow/worktrees/<team>/<成员>` 开 worktree，分支 `af/<team>/<成员>`，从管理者目录当前的 HEAD 切出；写进 `.git/info/exclude`（claude 的文件夹信任按仓库算，worktree 不会再弹框）。
+- agent-flow 不替成员提交、不合并。成员自己提交（剧本会说明），分支名写在工单里。
+- 原来的集成分支、自动提交、accept 时合并、合并冲突处理都去掉了。
+
+## 7. 送达方式
+
+- 往 agent 终端里打字：`herdr agent prompt`。打之前读一次屏幕，有菜单或面板就不打（`Workspaces.prompt` 已经这样做）；gemini 的"文字留在输入框里没发出去"也由它处理。
+- 送给成员的工单消息：
+
   ```
-- 发送方执行 `af send <agent> "..."`。server 写好消息文件，再往对方终端打一行短通知：
-  `[agent-flow] 来自 lead 的新消息 m_xxx，运行 af inbox 查看`
-- **对方的状态决定怎么送**（通过订阅 Herdr 的 `pane.agent_status_changed` 事件判断）：
-  - idle / done：立刻送通知。
-  - working：先排队，等它变成 idle 再送。
-  - blocked：不往终端里打字（避免误答审批提示），在"需要你"里出现一条待办。
-- 结果由 agent 主动交：`af reply` 或 `af done`，**不靠读屏**。大的结果（diff、报告）只传文件路径。
-- server 监听信箱目录，UI 据此画出消息流。
-- 要靠 agent 守规矩用 `af done`（第 0 步实测 15/15）。兜底规则：worker **读过任务后**连续空闲 20 秒仍没提交，server 提醒它一次；再空闲 20 秒就进"需要你"。必须等它读过任务、并且要有宽限期，是因为 agent 的状态会抖动（端到端测试里 codex 收到通知后 1 秒内 working → done → working），立刻提醒会误报。
+  [agent-flow] Ticket T3 for you (thread T1, round 2): 按审查意见改
+  Read /…/teams/<team>/tickets/T3/task.md and do it. Inputs: /…/tickets/T2/result.md
+  When finished: write /…/tickets/T3/result.md, then af submit --status ready --note "<one line>"
+  ```
+
+  模式一的成员收到的就是任务原文，末尾一句"(agent-flow ticket T3; end with a short summary of the result)"。
+- 送给管理者的只有一行通知（4.5），内容由它自己 `af queue take` 取。
 
 ## 8. CLI：`af`
 
-agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SOCK`，CLI 靠这些知道"我是谁、在哪个 run"。
+成员和 router 启动时注入 `AF_TEAM`、`AF_AGENT`、`AF_SOCK`、`AF_OUT`；模式一的主 agent 没有这些变量，CLI 带上 `HERDR_PANE_ID`，server 按 pane 认出它。
 
 | 命令 | 谁用 | 作用 |
 |---|---|---|
-| `af server` | 人 | 启动 af server |
-| `af up <team>` | 人 | 按团队模板新建一个 run |
-| `af run list / show / stop` | 人、lead | 管理 run |
-| `af spawn <name> --kind K [--role ...]` | lead | 起一个具名 agent |
-| `af graph add / edit / link / unlink / rm` | lead | 建图、改图 |
-| `af graph start / cancel / accept / reject` | lead | 手动派发、取消、校验 |
-| `af graph show [--json]` | 所有 agent | 查看图和实例状态 |
-| `af diff <node>` | lead | 查看节点分支相对起点的 diff |
-| `af send <agent> <text> [--attach PATH]` | 所有 agent | 发消息 |
-| `af inbox [--all]` | 所有 agent | 读消息 |
-| `af reply <msg-id> <text> [--attach PATH]` | 所有 agent | 回复消息 |
-| `af done [--outcome X] [--result PATH] [--note ...]` | 下属 | 提交当前节点 |
-| `af ls [--json]` | 所有 agent、人 | 列出机器、workspace、tab、pane（agent、查看器、shell） |
-| `af read <agent\|pane> [--lines N]` | 所有 agent | 读另一个 agent 或 pane 最近的输出 |
-| `af open <path\|url> [--down] [--of PANE] [--in VIEWER] [--tab [WS]]` | 所有 agent、人 | 在自己旁边（或指定 pane 旁边、已有查看器里、新 tab 里）显示文件、文件夹或网页 |
-| `af split [PANE] [--down] [--agent K]` | 所有 agent、人 | 分屏出一个 shell，或一个 agent（在 run 的 workspace 里会作为 run 的成员加入） |
-| `af close <pane>` | 所有 agent、人 | 关闭 pane |
+| `af task <kind> "<任务>" [--name N] [--to 成员] [--worktree] [--task-file F]` | 主 agent | 开一张工单，交给新成员或已有成员 |
+| `af team new --goal "…" [--playbook P] [--router K] [--name N] [--cwd D]` | 主 agent、用户 | 开一个 agent team |
+| `af team list` · `af team stop [T]` · `af playbook list` | 所有人 | |
+| `af queue` · `af queue take` · `af queue done <seq>` | 管理者 | 看队列、一次取走全部、手动标为处理完 |
+| `af ticket open <成员> --title "…" (--task "…" \| --task-file F) [--from T] [--max N] [--kind K] [--worktree] [--note "…"]` | router | 开工单（成员不存在就按 `--kind` 新开） |
+| `af ticket close <T> [--failed\|--dropped\|--cancelled] [--note "…"]` · `af ticket show <T>` · `af tickets` | 管理者 | |
+| `af thread max <T> <N>` | 管理者 | 改线程的轮数上限 |
+| `af tell <T\|成员> "…"` | 管理者 | 追加要求（对 team 工单就是给 router 的新要求） |
+| `af answer <T\|成员> <选项号> [--text "…"]` | 管理者 | 回答成员屏幕上的提问 |
+| `af reply <seq> "…"` | router | 回答成员的 `af ask` |
+| `af status <成员>` | 管理者 | 成员的状态、最后的回复、屏幕最后几行 |
+| `af report "…" [--done]` | router | 向调用者（或"需要你"）汇报 |
+| `af submit --status ready\|blocked\|failed\|dropped --note "…" [--to 成员] [--ticket T]` | 成员 | 交结果（result.md 写在工单文件夹里） |
+| `af progress "…"` · `af ask "…"` | 成员 | 进展（不进队列）· 提问（进队列） |
+| `af ls` / `af read` / `af open` / `af deliver` / `af split` / `af close` …… | 所有人 | 不变 |
 
-- 用 `bun build --compile` 打包成单个二进制，启动要快，因为 agent 会频繁调用它。
-- 所有命令都支持 `--json`，方便 agent 解析输出。
+## 9. 协议和 skill
 
-## 9. Skill
-
-- 有两份：`skill/lead/SKILL.md`（建图、改图、校验、何时用 auto-accept / isolated / 具名 agent）和 `skill/worker/SKILL.md`（读任务、`af done` 的用法、outcome 约定、大结果传路径）。
-- **不依赖各家的 skill 目录**（skill 是按需加载的，不保证一定会读）。协议在启动 agent 时直接注入系统提示；任务通过信箱送达。
-- 启动参数（第 0 步实测有效，见 `spikes/s2s3-agents/`）：
-
-| agent | 注入协议 | 必须加的其他参数 |
-|---|---|---|
-| claude | `--append-system-prompt-file <worker.md>` | 权限模式由用户配置（spike 用 `--permission-mode auto`） |
-| codex | `-p agent-flow-<role>`：server 把协议写进 `$CODEX_HOME/agent-flow-<role>.config.toml` 的 `developer_instructions` | profile 里写 `check_for_update_on_startup = false`（否则更新提示会卡住启动）；命令行加 `-c sandbox_workspace_write.network_access=true`（沙盒模式下否则连不上 af 的 Unix socket） |
-| omp | `--append-system-prompt=<worker.md>` | 无 |
-
-- 环境变量（`AF_RUN`、`AF_AGENT`、`AF_SOCK`、`PATH` 里加上 af）通过 `herdr tab create --env` 注入，在 login shell 里也能保住（已实测）。
-- **协议文本绝不能放在命令行上。** Herdr 是把启动命令"打"进 shell 的，macOS 终端单行输入上限 1024 字节（MAX_CANON），超出部分被截断，codex 会卡在半截命令里（端到端测试实测）。所以只传文件路径或 profile 名，命令行保持在 200 字节以内（有测试守着）。
-- 启动流程：建 pane → `herdr agent start --kind <k> -- <参数>` → 等到 idle → 送第一条通知。
-  - 卡在 blocked（信任框、登录过期等）：进"需要你"，不自动按键，用户在 UI 里打开它的终端回答。
-  - 根本没起来（如超时）：关掉它的 tab，取消该实例，通知 lead"修好原因后 `af graph retry <node>`"，不自动重试。
-- **claude 的文件夹信任以 git 仓库为单位**（端到端测试实测）：worktree 算主仓库的一部分；不在 git 里的目录才沿父目录往上找。所以每个新仓库，lead 第一次启动时用户确认一次信任即可，之后所有 worktree 都不再弹框。
-- `af graph retry <node>`：给一个空闲节点手动开新实例（输入沿用上一个实例），并且**一律换新 agent**：该节点原来的 agent 被退役（关 tab、标记退出）。用于 agent 挂掉后的恢复。下属 agent 意外退出时，server 会把这条恢复命令发给 lead。
+- `packages/skill/router.md`：router 的规则（不干活、不改写、每项用一个动作结束、只在里程碑和需要用户时汇报、做完就结束这一轮、不轮询）。
+- `packages/skill/member.md`：成员的规则（读 task.md、写 result.md、`af submit` 正好一次、提问用 `af ask`、不和别的成员说话）。
+- 注入方式和原来一样（claude `--append-system-prompt-file`，codex profile，omp `--append-system-prompt=`，gemini 第一条消息 `@<文件>`）。**协议文本绝不能放在命令行上**（macOS 单行 1024 字节）。
+- 模式一的成员不注入协议，用平常的启动参数（claude 带 `--session-id` 和 SessionStart hook，codex `--no-alt-screen`，gemini YOLO）。
+- `agent-flow` skill（server 启动时写进 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`）教会用户的 session 两件事：直接派活用 `af task`；要循环或长期运转的活用 `af team new`。
 
 ## 10. UI
 
@@ -245,9 +265,11 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
 ```
 
 - **布局归 Herdr 管。** 网页显示 Herdr 真实的 机器 → workspace → tab → 分屏 pane；在网页里分屏、关闭、拖分隔线都直接改 Herdr，所以 Herdr TUI 和网页永远一致，在 TUI 里建的分屏网页里也看得到。
-- **左栏**：顶部是当前 run 的"需要你"；下面是一棵树：机器 → workspace（run 的 workspace 带 ◆ 标记和待办数）→ 其中的 agent 及状态。点 agent 跳到它所在的 tab 和 pane。已关闭 workspace 的旧 run 列在"Past runs"。SSH 机器折叠成一组。
+- **左栏**：顶部是"需要你"；下面是一棵树：机器 → workspace（有 team 的 workspace 带 ◆ 标记）。已关闭 workspace 的 team 列在"Past teams"。SSH 机器折叠成一组。
 - **中间**：所选 workspace 的 Herdr tab；每个 tab 是 Herdr 的二叉分屏树。pane 有三种：终端（shell）、agent、查看器（文件 / 文件夹 / 网页）。pane 头上有分屏（右 / 下）、"＋"（在旁边开 claude / codex / omp agent，或文件 / URL）、关闭。run 的 workspace 默认打开 lead 的 tab。
-- **右栏**：只在 run 的 workspace 里出现：图（或消息列表）+ 节点详情。节点详情里的终端是只读观察模式，不抢分屏里那个 pane 的控制权，旁边有"Go to pane"跳过去。
+- **右栏**（2026-11-04 改）：workspace 里有 team 时出现。
+  - 模式一：主 agent 的竖时间轴。每张工单是挂在时间轴上的一个框（成员名、agent 种类、阶段、用时、结果的第一句），结果回来时画一条回到时间轴的线。点框跳到成员的 tab；框下方展开工单详情（task.md、result.md、轮次、"Go to pane"）。成员自己又开了 team 的，框上有 ⊕，点开是那个 team。team 工单的框点进去切到那个 team 的 workspace。
+  - 模式二：泳道图。router 一条竖线，每个成员一条；每张工单是 router → 成员的箭头，每次提交是成员 → router 的箭头，标出线程和轮次。点箭头打开对应的 task.md 或 result.md。上方显示队列里还没处理的项。
 - **底部**：常驻终端抽屉，它自己的 Herdr workspace 不在树里显示。
 
 ### 10.2 查看器 pane 和 `af open`
@@ -325,11 +347,11 @@ agent 被派发时，server 会注入环境变量 `AF_RUN`、`AF_AGENT`、`AF_SO
   - 实现：claude 和 omp 复制对话文件到新的 session id（到这条消息所在行的起始字节为止），再 `--resume` 新文件；原对话不动。两个 CLI 都实测过：恢复后只记得分叉点之前的内容。fork 点只放在用户消息前，因为在一轮中间切断会留下没有结果的工具调用（omp 实测会提示）。codex 用 `codex fork <id>`，只能整段 fork。远程 pane 的复制在那台机器上做（`head -c | sed`）。
   - 新 agent 启动时的提示（如 codex 的"信任此文件夹"）在渲染视图里也显示成选项卡片，即使还没有对话记录。
 
-### 10.2.5 workflow 模板、`af here` 和 agent-flow skill（2026-11-03）
+### 10.2.5 剧本、`$AF_OUT` 和 agent-flow skill（2026-11-03，2026-11-04 改）
 
-- **workflow 模板**（用户选的形式）：一张事先画好的图（YAML：节点、agent 类型、依赖、环），任务里的 `{{goal}}` 在开 run 时换成目标。来源依次覆盖：内置 `packages/skill/workflows/`、用户的 `~/.agent-flow/workflows/`、项目的 `<repo>/.agent-flow/workflows/`。内置 4 个：实现 + 审查循环、修 bug、两个方案择优再实现、调研 → 写作 → 审稿。开 run 时选模板 → 图立刻建好并派发，lead 收到一条说明（图的结构、它的职责）；模板在创建任何东西之前整体校验（YAML、依赖、图引擎规则）。`af graph apply <模板> --goal` 把模板加进已在跑的图；"save as workflow" / `af workflow save` 把一个 run 的图存成模板（目标还原成 `{{goal}}`）。实现 `server/src/workflows.ts`，用法见 `docs/usage.md`。
-- **`$AF_OUT`**：每个 run 的输出目录（`~/.agent-flow/runs/<run>/out`，不在仓库里），agent 之间交接报告用。
-- **`af here`**（用户要求："直接说让别的 session 同时做…"）：任何已有的 claude / codex / omp session 都能成为 run 的 lead，run 挂在它所在的 workspace 上（每个 workspace 同时只有一个活动 run），右侧显示图，worker 作为这个 workspace 的新 tab 启动。这类 session 没有 AF_* 环境变量：CLI 带上 `HERDR_PANE_ID`，server 按 pane 认出它是哪个 run 的 lead；发给它的通知里写 af 的完整路径。
+- **剧本**（原来的 workflow 模板改写而来）：见 4.4。网页 "+ new" → New team：选目录、剧本、目标、router 的 agent 种类。
+- **`$AF_OUT`**：每个 team 的输出目录（`~/.agent-flow/teams/<team>/out`，不在仓库里），成员之间交接报告用。
+- `af here` 去掉了：模式一第一次 `af task` 时自动建 team，按调用者的 `HERDR_PANE_ID` 认人。
 - **agent-flow skill**：server 启动时写进 `~/.claude/skills/agent-flow/SKILL.md` 和 `~/.codex/skills/agent-flow/SKILL.md`（omp 读 claude 的目录），内容含本 server 的 af 路径（af shim 里带默认 AF_SOCK）。实测：新开的 claude 收到"让一个 codex 和一个 omp 同时做…"后自己加载 skill、执行 `af here`、建两个并行节点、校验 omp 的结果；codex 卡在"信任此文件夹"时它停下来问用户，没有替用户选。
 - **面板和通知**：除了选项菜单，agent 的屏幕底部如果不是它平常的输入框（claude 的 ──/❯/── 框、codex 的 `›` 行、omp 的 `╰─` 行），就是开着一个面板或通知（如 claude 的 auto mode 计费通知，它要回车确认）。渲染视图把它显示成一张卡片（文字、链接、Continue / Esc 按钮）；pane 往上滚动时不判断。**agent-flow 绝不往开着菜单或面板的 agent 里打字**（输入框、通知投递都检查屏幕）：Herdr 有时认不出这些对话框，此前一次通知就这样误答了 claude 的提问。
 - 问题预览：claude 在选项右边画预览框，屏幕上只有当前高亮那项的预览；卡片从 claude 自己的对话记录里取每个选项的预览和说明，显示在旁边（窄 pane 时在下方）。
@@ -366,22 +388,9 @@ agent-flow/
   docs/
 ```
 
-**状态全部用文件保存，不用数据库：**
+**状态全部用文件保存，不用数据库：** 见 4.2。`~/.agent-flow/` 下另有 `server.sock`、`views.json`、`queue.json`（用户发给忙碌 agent 的消息）、`deliveries.json`、`machines.json` 等。
 
-```
-~/.agent-flow/
-  server.sock                 CLI ↔ server
-  teams/                      全局团队模板
-  runs/<run>/
-    run.json                  run 元数据（仓库、集成分支、lead）
-    graph.json                图 + 所有实例的当前状态（只由 server 写）
-    events.jsonl              只追加的事件流：所有状态变化、消息、派发
-    mail/<agent>/*.json       信箱
-    out/                      结果文件
-```
-
-- `graph.json` 只能由 server 写。CLI 一律通过 server 修改，避免几个 agent 同时提交时把文件写坏。
-- `events.jsonl` 是唯一的事实来源。`graph.json` 可以从它重建，UI 的回放也靠它。
+- `events.jsonl` 是唯一的事实来源。`team.json` 可以从它重建，只由 server 写。
 
 ## 12. v0 范围
 
@@ -407,18 +416,18 @@ agent-flow/
 
 ## 14. 验收场景
 
-用一个专门的沙盒仓库（不用 agent-flow 自己，避免 agent 一边被这个工具调度、一边改这个工具的代码）：
+用沙盒仓库（不用 agent-flow 自己）：
 
-1. 用户在 UI 里对 lead 说一个任务。
-2. lead 建图：2 个并行的写代码节点（一个 codex、一个 omp，都是 isolated），加 1 个 claude 审查节点（`--auto-accept`），审查到 fail 就回到写代码节点（`--max 3`）。
-3. 全程自动派发。至少发生一次 fail → 重写 → pass 的循环；lead 至少 reject 一次。
-4. 所有节点通过，合并进 `af/<run>/main`，用户的 main 不变。
-5. 用户只看网页 UI 就能看懂发生了什么。中途关掉浏览器、甚至重启 af server，再打开时状态完整。
+1. **模式一**：在一个 claude session 里说"开几个 session：claude 规划，codex 执行，gemini 写说明"。它调 3 次 `af task`；时间轴上出现 3 个框；每个成员做完后主 agent 收到通知、`af queue take` 拿到结果，接着派下一步或汇报。
+2. 一个成员屏幕上出现任务问题时，主 agent 用 `af answer` 回答；出现权限审批时进"需要你"，主 agent 不碰。
+3. **模式二**：`af team new --playbook humanize-loop --goal …`。router 开 coder 和 reviewer，至少发生一次 fail → 改 → pass；泳道图上看得到每一轮；router 最后 `af report --done`，主 agent 收到。
+4. 中途重启 af server，再打开时队列、工单、时间轴都完整，没送达的通知照样送达。
 
 ## 15. 以后再做
 
-- 常驻总控：一个常驻的具名 agent，盯着 GitHub 或群聊，自己执行 `af run new`。现有设计已经能承载它。
+- 常驻总控：super-agent 剧本的 router 已经能一直开着接活；盯 GitHub 或群聊的事件来源以后再做。
+- Watchdog、工单准备命令、成员数上限、把活交回 router：见第 5 节。
 - 脚本式 workflow：TS 脚本调用同一套 `af` 命令，用于需要严格可重复的流水线。
 - 文件编辑：基于 CodeMirror，保存前检查 agent 有没有改过这个文件。
 - Tauri 打包：解决快捷键被浏览器抢走、iframe 不能嵌入部分网站、系统通知受限这几个问题。
-- worktree 依赖安装：团队模板里的 `setup:`。
+- worktree 依赖安装：工单的准备命令。

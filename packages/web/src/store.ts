@@ -1,7 +1,7 @@
-// Client state: one WebSocket to the af server. Run state is rebuilt with the same reducer the server uses.
+// Client state: one WebSocket to the af server. Team state is rebuilt with the same reducer the server uses.
 
 import { useSyncExternalStore } from "react";
-import { type ClientPush, type Delivery, type HerdrModel, type Notice, type OpenAppName, type OpenSettings, type QueuedMessage, type RunState, type RunSummary, type ServerPush, type ViewRec, applyRun } from "@af/core";
+import { type ClientPush, type Delivery, type HerdrModel, type Notice, type OpenAppName, type OpenSettings, type QueuedMessage, type ServerPush, type TeamState, type TeamSummary, type ViewRec, applyTeam } from "@af/core";
 
 const params = new URLSearchParams(location.search);
 export const TOKEN = params.get("token") ?? localStorage.getItem("af-token") ?? "";
@@ -17,9 +17,9 @@ export function onChat(id: string, fn: ChatListener) {
 
 interface State {
   connected: boolean;
-  runs: RunSummary[];
-  runId?: string;
-  run?: RunState;
+  teams: TeamSummary[];
+  teamId?: string;
+  team?: TeamState;
   /** bumps on every applied event so components re-render */
   version: number;
   herdr?: HerdrModel;
@@ -36,7 +36,7 @@ interface State {
   seenNotices: number;
 }
 
-let state: State = { connected: false, runs: [], version: 0, views: {}, queue: {}, deliveries: [], apps: {}, notices: [], seenNotices: 0 };
+let state: State = { connected: false, teams: [], version: 0, views: {}, queue: {}, deliveries: [], apps: {}, notices: [], seenNotices: 0 };
 const subs = new Set<() => void>();
 const termSubs = new Map<string, TermListener>();
 let ws: WebSocket | undefined;
@@ -69,7 +69,7 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${TOKEN}`);
   ws.onopen = () => {
     set({ connected: true });
-    if (state.runId) send({ type: "watch", run: state.runId });
+    if (state.teamId) send({ type: "watch", team: state.teamId });
     // re-open chats and terminal streams first: keys typed during the outage need their terminal open again
     if (everOpened) for (const f of [...reconnectSubs]) f();
     everOpened = true;
@@ -85,8 +85,8 @@ function connect() {
     const m = JSON.parse(e.data) as ServerPush;
     switch (m.type) {
       case "hello": {
-        set({ runs: m.runs });
-        if (state.runId && !m.runs.some((r) => r.id === state.runId)) watch(undefined);
+        set({ teams: m.teams });
+        if (state.teamId && !m.teams.some((r) => r.id === state.teamId)) watch(undefined);
         break;
       }
       case "notices":
@@ -102,11 +102,11 @@ function connect() {
         set({ herdr: m.model, views: m.views, queue: m.queue ?? {} });
         break;
       case "snapshot":
-        if (m.run === state.runId) set({ run: m.state });
+        if (m.team === state.teamId) set({ team: m.state });
         break;
       case "event":
-        if (m.run === state.runId && state.run) {
-          applyRun(state.run, m.event);
+        if (m.team === state.teamId && state.team) {
+          applyTeam(state.team, m.event);
           set({});
         }
         break;
@@ -123,11 +123,11 @@ function connect() {
   };
 }
 
-/** Follow one run's events (its graph, mail, attention). undefined stops following. */
-export function watch(runId: string | undefined) {
-  if (runId === state.runId) return;
-  set({ runId, run: undefined });
-  if (runId) send({ type: "watch", run: runId });
+/** Follow one team's events (its tickets, queue, attention). undefined stops following. */
+export function watch(teamId: string | undefined) {
+  if (teamId === state.teamId) return;
+  set({ teamId, team: undefined });
+  if (teamId) send({ type: "watch", team: teamId });
 }
 
 export function onTerm(id: string, fn: TermListener) {
@@ -167,7 +167,7 @@ export function clearNotices() {
 
 /** Call the HTTP API as the user. */
 export async function api<T = any>(method: "GET" | "POST", path: string, body: Record<string, unknown> = {}): Promise<T> {
-  const payload = { run: state.runId, ...body };
+  const payload = { ...body };
   const url = method === "GET" ? `/api${path}?${new URLSearchParams(Object.entries(payload).filter(([, v]) => v !== undefined) as [string, string][])}` : `/api${path}`;
   const r = await fetch(url, { method, headers: { "content-type": "application/json", "x-af-token": TOKEN }, body: method === "POST" ? JSON.stringify(payload) : undefined });
   const data = await r.json().catch(() => ({}));

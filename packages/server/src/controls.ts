@@ -21,7 +21,7 @@
 // too); during a turn the first one stops it.
 
 import { geminiInputRows } from "./menu.ts";
-import { AfError } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
 
 export type ControlAction = "interrupt" | "rewind" | "clear" | "exit";
 export const CONTROL_ACTIONS: readonly ControlAction[] = ["interrupt", "rewind", "clear", "exit"];

@@ -11,7 +11,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
-import { AfError } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
 
 export type OpenApp = "vscode" | "obsidian" | "default" | "finder";
 export const OPEN_APPS: readonly OpenApp[] = ["vscode", "obsidian", "default", "finder"];

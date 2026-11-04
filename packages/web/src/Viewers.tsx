@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { type DocHeading, drawMermaid, onHighlighterReady, renderDoc } from "./markdown";
 import { FileBrowser } from "./Files";
-import type { Mail, RunState } from "@af/core";
 import { APP_LABEL, TOKEN, api, appsFor, fileUrl, failed, openIn, useStore } from "./store";
 import { ago } from "./view";
 
@@ -229,64 +228,6 @@ export function WebView({ url }: { url: string }) {
         </button>
       </Bar>
       <iframe className="web" src={url} title={url} sandbox="allow-scripts allow-same-origin allow-forms allow-popups" />
-    </div>
-  );
-}
-
-export function DiffView({ node }: { node: string }) {
-  const [diff, setDiff] = useState<string>();
-  const [err, setErr] = useState<string>();
-  useEffect(() => {
-    setDiff(undefined);
-    setErr(undefined);
-    api<{ diff: string }>("GET", "/diff", { node })
-      .then((r) => setDiff(r.diff))
-      .catch((e) => setErr(e.message));
-  }, [node]);
-  if (err) return <div className="empty" style={{ padding: 12 }}>{err}</div>;
-  if (diff === undefined) return <div className="empty" style={{ padding: 12 }}>loading…</div>;
-  if (!diff) return <div className="empty" style={{ padding: 12 }}>No changes on this node's branch since the integration branch (already merged, or nothing written yet).</div>;
-  return (
-    <div className="diff">
-      {diff.split("\n").map((l, i) => (
-        <div key={i} className={l.startsWith("diff --git") ? "file" : l.startsWith("@@") ? "hunk" : l.startsWith("+") && !l.startsWith("+++") ? "add" : l.startsWith("-") && !l.startsWith("---") ? "del" : ""}>
-          {l || " "}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export function Messages({ run, agent, node }: { run: RunState; agent?: string; node?: string }) {
-  const [text, setText] = useState("");
-  const mail: Mail[] = run.mail.filter((m) => (agent ? m.to === agent || m.from === agent : true) && (node ? m.node?.startsWith(`${node}#`) : true));
-  return (
-    <div className="msgs">
-      {!mail.length && <div className="empty" style={{ padding: 12 }}>No messages yet.</div>}
-      {mail.map((m) => (
-        <div key={m.id} className={`msg ${m.from === "agent-flow" ? "system" : ""}`}>
-          <div className="h">
-            <b>{m.from}</b>→<span>{m.to}</span>
-            <span>· {m.kind}</span>
-            {m.node && <span>· {m.node}</span>}
-            <span style={{ marginLeft: "auto" }}>{ago(m.at)}</span>
-          </div>
-          <div className="b">{m.body}</div>
-        </div>
-      ))}
-      {agent && (
-        <form
-          style={{ display: "flex", gap: 6, padding: "8px 12px" }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!text.trim()) return;
-            api("POST", "/send", { to: agent, body: text }).then(() => setText(""), failed("That did not work"));
-          }}
-        >
-          <input className="text" placeholder={`Message ${agent} (delivered when it is idle)`} value={text} onChange={(e) => setText(e.target.value)} />
-          <button className="btn">Send</button>
-        </form>
-      )}
     </div>
   );
 }

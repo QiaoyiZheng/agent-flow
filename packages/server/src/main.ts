@@ -6,12 +6,13 @@ import { join, resolve } from "node:path";
 import { connect } from "node:net";
 import { loadConfig, writeClaudeSettings } from "./agents.ts";
 import { Herdr } from "./herdr.ts";
-import { Orchestrator } from "./orchestrator.ts";
+import { Teams } from "./teams.ts";
+import { makeTranscriptAccess } from "./access.ts";
 import { serve } from "./api.ts";
 import { Workspaces } from "./workspaces.ts";
 import { RemoteMachine } from "./remote.ts";
 import { Notices } from "./notices.ts";
-import { WorkflowLibrary } from "./workflows.ts";
+import { PlaybookLibrary } from "./playbooks.ts";
 import { installSkill } from "./skills.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
@@ -58,10 +59,7 @@ export async function main(argv: string[]) {
   });
   const binDir = installShim(home);
   const config = { ...loadConfig(home), claudeSettings: writeClaudeSettings(home, sock, join(binDir, "af")) };
-  const workflows = new WorkflowLibrary(join(repoRoot, "packages/skill/workflows"), join(home, "workflows"));
-  const o = new Orchestrator({ home, backend, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config, workflows });
-  const n = o.load();
-  o.start(1000);
+  const playbooks = new PlaybookLibrary(join(repoRoot, "packages/skill/playbooks"), join(home, "playbooks"));
   const notices = new Notices();
   const w = new Workspaces({
     home,
@@ -74,9 +72,14 @@ export async function main(argv: string[]) {
     },
   });
   await w.start();
-  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices });
+  let access: ReturnType<typeof makeTranscriptAccess> | undefined;
+  const o = new Teams({ home, backend, w, sock, binDir, protocolDir: join(repoRoot, "packages/skill"), config, playbooks, peek: (pane) => access!.peek(pane) });
+  access = makeTranscriptAccess(o, w);
+  const n = o.load();
+  o.start(1000);
+  serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access });
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));
-  console.log(`agent-flow server: ${n} run(s) loaded`);
+  console.log(`agent-flow server: ${n} team(s) loaded`);
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
   console.log(`  socket: ${sock}`);
   console.log(`  af CLI: ${join(binDir, "af")}  (add ${binDir} to PATH)`);

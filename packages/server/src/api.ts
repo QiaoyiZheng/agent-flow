@@ -1,11 +1,12 @@
 // HTTP API. The same routes are served on the Unix socket (for the af CLI and agents) and on
 // 127.0.0.1 (for the web UI, behind a token). WebSocket pushes run events and terminal frames.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
-import type { AgentKind, Caller, ClientPush, ServerPush, ShowRequest } from "@af/core";
+import type { AgentKind, ClientPush, ServerPush, ShowRequest } from "@af/core";
 import { AGENT_KINDS } from "@af/core";
-import { AfError, type Orchestrator } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
+import type { Teams, Who } from "./teams.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
 import { claudeExtraArgs } from "./agents.ts";
@@ -30,71 +31,88 @@ const repoRootOf = (cwd: string) => {
 };
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
-export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w)) {
+export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w)) {
   const commandCache = new Map<string, { at: number; items: unknown[] }>();
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/api/, "");
     const body: any = req.method === "POST" ? await req.json().catch(() => ({})) : Object.fromEntries(url.searchParams);
-    const caller: Caller = { run: body.run || undefined, agent: body.agent || undefined };
-    // a session attached with `af here` has no AF_* env: its Herdr pane says who it is
-    if (!caller.agent && body.callerPane) {
-      const hit = o.agentByPane(String(body.callerPane));
-      if (hit && (!caller.run || caller.run === hit.run)) Object.assign(caller, hit);
-    }
+    // members and routers carry AF_TEAM/AF_AGENT; any other session is known by its Herdr pane (callerPane)
+    const who: Who = o.who({ team: body.team || undefined, agent: body.agent || undefined, pane: body.callerPane || undefined });
+    const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
     try {
       switch (`${req.method} ${path}`) {
         case "GET /health":
           return json({ ok: true });
-        case "GET /runs":
-          return json(o.listRuns());
-        case "POST /runs":
-          return json(await o.createRun(body));
-        case "GET /run":
-          return json(o.getRun(caller.run));
         case "GET /whoami":
-          return json(caller.agent ? { run: caller.run, agent: caller.agent } : null);
-        case "POST /runs/attach": {
-          const p = w.model.panes.find((x) => x.id === String(body.pane ?? ""));
-          if (!p) throw new AfError("unknown_pane", "af here must run inside a Herdr pane (HERDR_PANE_ID)", 400);
-          if (p.machine !== "local") throw new AfError("remote_run", "runs on remote machines are not supported yet");
-          if (!p.agent) throw new AfError("no_agent", `pane ${p.id} has no agent Herdr recognizes`);
-          return json(await o.attachRun({ paneId: p.id, tabId: p.tabId, workspaceId: p.workspaceId, cwd: p.cwd, kind: p.agent as AgentKind }));
-        }
-        case "POST /graph/apply":
-          return json(o.applyWorkflow(caller, String(body.workflow ?? ""), body.goal ? String(body.goal) : undefined));
-        case "GET /workflows": {
-          if (!o.opts.workflows) return json([]);
+          return json(who);
+        // teams (docs/design.md section 4)
+        case "GET /teams":
+          return json(o.list());
+        case "GET /team":
+          return json(o.get(str(body.team) ?? (who.kind === "router" || who.kind === "member" ? who.team : who.kind === "pane" ? o.directTeamOf(who.pane)?.id : undefined)));
+        case "POST /task":
+          return json(await o.task(who, { kind: body.kind, task: String(body.task ?? ""), title: str(body.title), name: str(body.name), to: str(body.to), worktree: !!body.worktree }));
+        case "POST /team/new":
+          return json(await o.newTeam(who, { goal: String(body.goal ?? ""), playbook: str(body.playbook), router: body.router, name: str(body.name), cwd: str(body.cwd) }, !!body.ui));
+        case "POST /team/stop":
+          return json(o.stopTeam(who, str(body.id)));
+        case "GET /playbooks": {
           const cwd = body.cwd ? String(body.cwd) : undefined;
-          return json(o.opts.workflows.list(cwd ? (repoRootOf(cwd) ?? cwd) : undefined));
+          return json(o.opts.playbooks?.list(cwd ? (repoRootOf(cwd) ?? cwd) : undefined) ?? []);
         }
-        case "POST /workflows/save": {
-          if (!o.opts.workflows) throw new AfError("no_workflows", "workflows are not available on this server");
-          const name = String(body.name ?? "").trim();
-          if (!name) throw new AfError("no_name", "give the workflow a name");
-          return json(o.opts.workflows.saveFromRun(o.getRun(caller.run), name, body.description ? String(body.description) : undefined));
-        }
-        case "POST /run/stop":
-          o.stopRun(caller);
+        case "GET /team/queue":
+          return json(o.queue(who, body.all === "1"));
+        case "POST /team/take":
+          return json(o.take(who));
+        case "POST /team/handled":
+          return json(o.handled(who, body.all ? "all" : (Array.isArray(body.seqs) ? body.seqs : [body.seqs]).map(Number).filter(Number.isFinite)));
+        case "POST /team/ticket":
+          return json(
+            await o.openForRouter(who, {
+              member: String(body.member ?? ""),
+              title: String(body.title ?? ""),
+              task: String(body.task ?? ""),
+              kind: body.kind,
+              role: str(body.role),
+              from: str(body.from),
+              max: body.max === undefined ? undefined : Number(body.max),
+              note: str(body.note),
+              inputs: Array.isArray(body.inputs) ? body.inputs.map(String) : undefined,
+              worktree: !!body.worktree,
+            }),
+          );
+        case "POST /team/close":
+          return json(o.closeTicket(who, String(body.ticket ?? ""), body.outcome ?? "done", str(body.note)));
+        case "GET /team/ticket":
+          return json(o.ticketShow(who, String(body.ticket ?? "")));
+        case "GET /team/tickets":
+          return json(o.tickets(who));
+        case "POST /team/max":
+          return json(o.setMax(who, String(body.thread ?? ""), Number(body.max)));
+        case "POST /team/tell":
+          return json(o.tell(who, String(body.ref ?? ""), String(body.text ?? "")));
+        case "POST /team/answer":
+          return json(await o.answer(who, String(body.ref ?? ""), Number(body.option), str(body.text)));
+        case "POST /team/reply":
+          return json(o.reply(who, Number(body.seq), String(body.text ?? "")));
+        case "GET /team/status":
+          return json(await o.status(who, String(body.ref ?? "")));
+        case "POST /team/report":
+          return json(o.report(who, String(body.text ?? ""), !!body.done));
+        case "POST /team/submit":
+          return json(o.submit(who, { status: body.status ?? "ready", note: str(body.note), to: str(body.to), ticket: str(body.ticket) }));
+        case "POST /team/progress":
+          return json(o.progress(who, String(body.text ?? "")));
+        case "POST /team/ask":
+          return json(o.ask(who, String(body.text ?? "")));
+        case "POST /attention/dismiss":
+          o.dismiss(String(body.team ?? ""), String(body.id ?? ""));
           return json({ ok: true });
-        case "POST /graph":
-          return json({ events: o.graph(caller, body.command) });
-        case "GET /diff":
-          return json({ diff: o.diff(caller, body.node, body.stat === "1") });
-        case "POST /done":
-          return json(o.done(caller, body));
-        case "POST /send":
-          return json(o.send(caller, body));
-        case "POST /reply":
-          return json(o.reply(caller, body.id, body.body, body.attachments));
-        case "POST /inbox":
-          return json(o.inbox(caller, !!body.all));
         case "POST /open":
         case "POST /show": {
           const req = body as ShowRequest;
-          const rec = await w.show(req, caller.agent ?? "user");
-          o.recordOpen(caller, req.target);
-          return json(rec);
+          return json(await w.show(req, who.kind === "member" || who.kind === "router" ? who.member : "user"));
         }
         case "GET /view":
           return json(w.view(body.pane) ?? null);
@@ -106,14 +124,14 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
         case "GET /fs/stat":
           return json(statPath(String(body.path ?? ""), fileRoots(o, o.opts.home)));
         case "GET /ls":
-          return json({ model: w.model, views: w.views, runs: o.workspaceRuns(), shellWorkspace: o.shellWorkspace() });
+          return json({ model: w.model, views: w.views, teams: o.workspaceTeams(), shellWorkspace: shellWorkspace(o.opts.home) });
         case "POST /pane/read": {
-          const pane = w.resolvePane(body.ref, o.agentPanes(caller.run));
+          const pane = w.resolvePane(body.ref, o.memberPanes(who.kind === "member" || who.kind === "router" ? who.team : who.kind === "pane" ? o.directTeamOf(who.pane)?.id : undefined));
           return json({ pane, text: await w.read(pane, Number(body.lines) || 120) });
         }
         case "POST /pane/split": {
           const direction = body.direction === "down" ? "down" : "right";
-          if (body.kind === "agent") return json(await splitAgent(o, w, backend, body.pane, direction, body.agentKind));
+          if (body.kind === "agent") return json(await splitAgent(o, w, body.pane, direction, body.agentKind));
           return json(await w.split(body.pane, direction, { cwd: body.cwd }));
         }
         case "POST /pane/close":
@@ -141,7 +159,7 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           if (!target || /\s/.test(target) || target.startsWith("-")) throw new AfError("bad_target", "give an SSH target such as myhost or user@host");
           const q = (x: string) => `'${x.replace(/'/g, `'\\''`)}'`;
           const cmd = ["herdr", "machine", "add", q(target), ...(body.label ? ["--label", q(String(body.label))] : []), ...(body.session ? ["--remote-session", q(String(body.session))] : [])].join(" ");
-          const shell = await o.shell();
+          const shell = await persistentShell(o.opts.home, backend);
           await backend.runInPane(shell.paneId, cmd);
           return json({ ok: true, command: cmd, pane: shell.paneId });
         }
@@ -149,16 +167,14 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           return json(await w.renameWorkspace(String(body.workspace ?? ""), String(body.label ?? "")));
         case "POST /workspace/close": {
           const id = String(body.workspace ?? "");
-          const run = o.runByWorkspace(id);
-          if (run && !o.getRun(run).stopped) o.stopRun({ run });
+          const stopped = o.teamsInWorkspace(id);
+          for (const team of stopped) o.stopById(team);
           await w.closeWorkspace(id);
-          return json({ ok: true, stoppedRun: run });
+          return json({ ok: true, stoppedTeams: stopped });
         }
         case "POST /layout/ratio":
           await w.setRatio(body.tab, body.path, Number(body.ratio));
           return json({ ok: true });
-        case "POST /spawn":
-          return json(await o.spawn(caller, body));
         case "POST /prompt": {
           // mode auto (default): send now if the agent is free, else queue for the end of its turn; steer: now
           const mode = body.mode === "steer" || body.mode === "queue" ? body.mode : "auto";
@@ -223,7 +239,7 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           const file = String(body.path ?? "");
           if (!file.startsWith("/")) throw new AfError("bad_path", "give the file's absolute path");
           if (!existsSync(file) || statSync(file).isDirectory()) throw new AfError("not_found", `${file} is not a file`, 404);
-          const rec = await handOver(w, access, { path: file, pane, agent: caller.agent, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined, show: body.show !== false });
+          const rec = await handOver(w, access, { path: file, pane, agent: who.kind === "member" || who.kind === "router" ? who.member : undefined, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined, show: body.show !== false });
           return json({ delivery: rec, kind: fileKind(file), app: access.deliveries.appFor(file) });
         }
         case "POST /deliver/done":
@@ -267,11 +283,8 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
           if (body.pane && body.id) w.rememberSession(String(body.pane), String(body.id), body.path ? String(body.path) : undefined);
           return json({ ok: true });
         }
-        case "POST /attention/dismiss":
-          o.dismiss(caller, body.id);
-          return json({ ok: true });
         case "GET /shell":
-          return json(await o.shell());
+          return json(await persistentShell(o.opts.home, backend));
         case "POST /edit":
           return json(await openInEditor(body.path));
         case "POST /flush":
@@ -288,17 +301,10 @@ export function makeHandler(o: Orchestrator, w: Workspaces, backend: TerminalBac
   };
 }
 
-/** Split a pane and start an agent in the new half. Inside a run it joins the run (protocol, env, mail); elsewhere it is a plain agent. */
-async function splitAgent(o: Orchestrator, w: Workspaces, backend: TerminalBackend, pane: string, direction: "right" | "down", kind: AgentKind) {
+/** Split a pane and start a plain agent in the new half. */
+async function splitAgent(o: Teams, w: Workspaces, pane: string, direction: "right" | "down", kind: AgentKind) {
   if (!AGENT_KINDS.includes(kind)) throw new AfError("bad_kind", `kind must be one of ${AGENT_KINDS.join(", ")}`);
-  const base = w.model.panes.find((p) => p.id === pane);
-  if (!base) throw new AfError("unknown_pane", `no Herdr pane ${pane}`, 404);
-  const run = base.machine === "local" ? o.runByWorkspace(base.workspaceId) : undefined;
-  if (run && !o.getRun(run).stopped) {
-    const a = await o.spawn({ run }, { name: "", kind, place: { split: pane, direction } });
-    await w.refresh();
-    return { paneId: a.paneId, agent: a.name, run };
-  }
+  if (!w.model.panes.some((p) => p.id === pane)) throw new AfError("unknown_pane", `no Herdr pane ${pane}`, 404);
   const { paneId } = await w.split(pane, direction);
   const name = `${kind}-${paneId.replace(/[^a-z0-9]/gi, "").toLowerCase()}`.slice(0, 32);
   // claude takes a session id: agent-flow then knows which conversation file is this pane's. (gemini does too, but
@@ -363,8 +369,41 @@ function openInEditor(path: string) {
   return openWith("vscode", path).then(() => ({ ok: true }));
 }
 
-/** Run events that change the run list the UI shows (and its "Needs you" items). */
-const RUN_LIST_EVENTS = new Set(["run.created", "run.stopped", "run.quiescent", "attention.raised", "attention.resolved", "agent.placed"]);
+/** Team events that change the team list the UI shows (Needs you items, stages, queue counts). */
+const TEAM_LIST_EVENTS = new Set([
+  "team.created",
+  "team.stopped",
+  "member.placed",
+  "member.status",
+  "ticket.opened",
+  "ticket.delivered",
+  "ticket.submitted",
+  "ticket.reopened",
+  "ticket.closed",
+  "queue.added",
+  "queue.taken",
+  "queue.handled",
+  "attention.raised",
+  "attention.resolved",
+]);
+
+/** The persistent shell shown in the UI's bottom drawer: one Herdr workspace that outlives teams. */
+export function shellWorkspace(home: string): string | undefined {
+  const file = join(home, "shell.json");
+  return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")).workspaceId as string | undefined) : undefined;
+}
+
+async function persistentShell(home: string, backend: TerminalBackend): Promise<{ paneId: string; workspaceId?: string }> {
+  const file = join(home, "shell.json");
+  if (existsSync(file)) {
+    const saved = JSON.parse(readFileSync(file, "utf8")) as { paneId: string; workspaceId?: string };
+    if (await backend.paneExists(saved.paneId)) return saved;
+  }
+  const ws = await backend.createWorkspace("af shell", process.env.HOME ?? "/");
+  const saved = { paneId: ws.paneId, workspaceId: ws.workspaceId };
+  writeFileSync(file, JSON.stringify(saved));
+  return saved;
+}
 
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".json": "application/json" };
 
@@ -420,18 +459,12 @@ export async function handOver(w: Workspaces, access: TranscriptAccess, d: { pat
   });
 }
 
-/** Folders the UI may read files from: home, temp, agent-flow's home, and every run's folders. */
-function fileRoots(o: Orchestrator, home: string) {
-  return readableRoots([
-    home,
-    ...o.listRuns().flatMap((r) => {
-      const m = o.getRun(r.id).meta!;
-      return [m.cwd, m.repo, m.integration].filter((x): x is string => !!x);
-    }),
-  ]);
+/** Folders the UI may read files from: home, temp, agent-flow's home, and every team's folders. */
+function fileRoots(o: Teams, home: string) {
+  return readableRoots([home, ...o.folders()]);
 }
 
-function serveFile(o: Orchestrator, home: string, url: URL): Response {
+function serveFile(o: Teams, home: string, url: URL): Response {
   let path: string;
   try {
     path = checkReadable(url.searchParams.get("path") ?? "", fileRoots(o, home));
@@ -450,8 +483,8 @@ interface WsData {
   cutsUnsub?: () => void;
 }
 
-export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices }) {
-  const access = makeTranscriptAccess(o, w);
+export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices; access?: TranscriptAccess }) {
+  const access = opts.access ?? makeTranscriptAccess(o, w);
   const handler = makeHandler(o, w, opts.backend, access);
   watchDocuments(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
@@ -536,10 +569,15 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
         });
         // a rewind: chat views of that pane read the conversation again
         ws.data.cutsUnsub = access.cuts.onChange((pane) => ws.data.chat?.reload(pane));
-        send({ type: "hello", runs: o.listRuns() });
-        // the run list (with every run's open attention items) for "Needs you", whichever run this client watches
-        ws.data.runsUnsub = o.subscribe((_run, event) => {
-          if (RUN_LIST_EVENTS.has(event.type)) send({ type: "hello", runs: o.listRuns() });
+        send({ type: "hello", teams: o.list() });
+        // the team list (with every team's open attention items) for "Needs you", whichever team this client watches
+        let helloTimer: ReturnType<typeof setTimeout> | undefined;
+        ws.data.runsUnsub = o.subscribe((_team, event) => {
+          if (!TEAM_LIST_EVENTS.has(event.type) || helloTimer) return;
+          helloTimer = setTimeout(() => {
+            helloTimer = undefined;
+            send({ type: "hello", teams: o.list() });
+          }, 100);
         });
         send({ type: "notices", list: opts.notices.list });
         send(deliveriesPush());
@@ -556,12 +594,12 @@ export function serve(o: Orchestrator, w: Workspaces, opts: { sock: string; port
         if (msg.type === "watch") {
           ws.data.unsub?.();
           try {
-            ws.send(JSON.stringify({ type: "snapshot", run: msg.run, state: o.getRun(msg.run) } satisfies ServerPush));
+            ws.send(JSON.stringify({ type: "snapshot", team: msg.team, state: o.get(msg.team) } satisfies ServerPush));
           } catch {
             return;
           }
-          ws.data.unsub = o.subscribe((run, event) => {
-            if (run === msg.run) ws.send(JSON.stringify({ type: "event", run, event } satisfies ServerPush));
+          ws.data.unsub = o.subscribe((team, event) => {
+            if (team === msg.team) ws.send(JSON.stringify({ type: "event", team, event } satisfies ServerPush));
           });
           return;
         }

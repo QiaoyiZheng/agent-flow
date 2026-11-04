@@ -10,7 +10,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { type HLayout, type HMachine, type HPane, type HTab, type HWorkspace, type HerdrModel, type LayoutNode, type QueuedMessage, type ShowRequest, type SplitDirection, type ViewRec, MACHINE_SEP, splitId } from "@af/core";
 import type { TerminalBackend } from "./herdr.ts";
-import { AfError } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
 import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
@@ -628,6 +628,20 @@ export class Workspaces {
       }
     }
     return { sentNow: false }; // taken in already (codex between tool calls), or the agent was not working
+  }
+
+  /**
+   * Free to be typed to: an agent pane that is not working, not asking anything, and was not just given a prompt it
+   * has not started on yet. (Typing also checks the screen for a menu or notice: see prompt.)
+   */
+  isFree(pane: string) {
+    const p = this.model.panes.find((x) => x.id === pane);
+    return !!p && !!p.agent && !p.asking && !p.scrolled && !this.busy(p);
+  }
+
+  /** When agent-flow last typed a prompt into the pane (ms), if it did. */
+  promptedAtMs(pane: string) {
+    return this.promptedAt.get(pane);
   }
 
   /** Working, asking, or just given a prompt that Herdr has not seen it start on yet. */

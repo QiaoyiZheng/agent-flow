@@ -7,7 +7,7 @@ import { DEFAULT_CONFIG } from "../src/agents.ts";
 import { handOver, makeHandler, watchDocuments } from "../src/api.ts";
 import { makeTranscriptAccess } from "../src/access.ts";
 import { commitAll, git } from "../src/git.ts";
-import { Orchestrator } from "../src/orchestrator.ts";
+import { Teams } from "../src/teams.ts";
 import { Workspaces, workspaceStatus } from "../src/workspaces.ts";
 import { FakeBackend } from "./fake.ts";
 
@@ -464,7 +464,7 @@ describe("composer: prompt with attachments, keys", () => {
     const { home, backend, w, ws } = await setup();
     await backend.startAgent("a1", "claude", ws.paneId, []);
     await w.refresh();
-    const h = makeHandler(new Orchestrator({ home, backend, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG }), w, backend);
+    const h = makeHandler(new Teams({ home, backend, w, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG }), w, backend);
     const post = async (path: string, body: object) => {
       const r = await h(new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
       return { status: r.status, body: (await r.json()) as any };
@@ -536,7 +536,7 @@ describe("af deliver: a finished document handed to the user", () => {
     const { home, backend, w, ws } = await setup();
     await backend.startAgent("a1", "claude", ws.paneId, []);
     await w.refresh();
-    const h = makeHandler(new Orchestrator({ home, backend, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG }), w, backend);
+    const h = makeHandler(new Teams({ home, backend, w, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG }), w, backend);
     const post = async (path: string, body: object) => {
       const r = await h(new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
       return { status: r.status, body: (await r.json()) as any };
@@ -572,7 +572,7 @@ describe("documents found at the end of a turn", () => {
     backend.panes.get(ws.paneId)!.cwd = proj;
     await backend.startAgent("a1", "claude", ws.paneId, []);
     await w.refresh();
-    const o = new Orchestrator({ home, backend, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG });
+    const o = new Teams({ home, backend, w, sock: "/s", binDir: "/b", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG });
     const access = makeTranscriptAccess(o, w);
     watchDocuments(w, access);
     backend.set("a1", "working");
@@ -782,46 +782,45 @@ describe("the message queue and steering", () => {
 });
 
 describe("workspaces: API used by agents", () => {
-  test("af read resolves run agents by name; split → agent joins the run when the workspace is a run", async () => {
+  test("af read resolves team members by name; a split gets a plain agent; af ls lists workspaces with teams", async () => {
     const home = tmp("af-api-home-");
     const repo = tmp("af-api-repo-");
     git(repo, ["init", "-q", "-b", "main"]);
     writeFileSync(join(repo, "f.txt"), "f\n");
     commitAll(repo, "init");
-    process.env.CODEX_HOME = tmp("af-codex-");
     const backend = new FakeBackend();
-    const o = new Orchestrator({ home, backend, sock: "/s", binDir: "/af/bin", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG });
     const w = new Workspaces({ home, backend, paneEnv: () => ({}) });
     await w.start(60_000);
+    const o = new Teams({ home, backend, w, sock: "/s", binDir: "/af/bin", protocolDir: join(import.meta.dir, "../../skill"), config: DEFAULT_CONFIG, settleMs: 0 });
     const h = makeHandler(o, w, backend);
     const call = async (path: string, body: object) => {
       const r = await h(new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
       return { status: r.status, body: (await r.json()) as any };
     };
-
-    const meta = await o.createRun({ cwd: repo });
+    const ws = await backend.createWorkspace("proj", repo);
+    await backend.startAgent("lead", "claude", ws.paneId, []);
     await w.refresh();
-    const leadPane = o.getRun(meta.id).agents.lead!.paneId!;
+    const task = await call("/task", { callerPane: ws.paneId, kind: "codex", task: "count the files", name: "counter" });
+    expect(task.status).toBe(200);
+    await o.flush();
+    await w.refresh();
+    const counter = o.get(task.body.team).members.counter!;
 
-    const read = await call("/pane/read", { run: meta.id, agent: "lead", ref: "lead", lines: 50 });
-    expect(read.body).toEqual({ pane: leadPane, text: `screen of ${leadPane}\n` });
-    expect((await call("/pane/read", { run: meta.id, ref: "ghost" })).status).toBe(404);
+    const read = await call("/pane/read", { callerPane: ws.paneId, ref: "counter", lines: 50 });
+    expect(read.body).toEqual({ pane: counter.paneId, text: `screen of ${counter.paneId}\n` });
+    expect((await call("/pane/read", { callerPane: ws.paneId, ref: "ghost" })).status).toBe(404);
 
-    const split = await call("/pane/split", { pane: leadPane, direction: "down", kind: "agent", agentKind: "omp" });
-    expect(split.body).toMatchObject({ agent: "omp", run: meta.id });
-    const helper = o.getRun(meta.id).agents.omp!;
-    expect(helper.paneId).toBe(split.body.paneId);
-    expect(w.model.panes.find((p) => p.id === helper.paneId)!.tabId).toBe(w.model.panes.find((p) => p.id === leadPane)!.tabId); // same tab: a split, not a new tab
+    const split = await call("/pane/split", { pane: ws.paneId, direction: "down", kind: "agent", agentKind: "omp" });
+    expect(split.body).toMatchObject({ started: true });
+    expect(w.model.panes.find((p) => p.id === split.body.paneId)!.tabId).toBe(ws.tabId); // same tab: a split, not a new tab
 
-    const ls = await call("/ls", {}).catch(() => undefined);
     const lsGet = await h(new Request("http://af/ls"));
     const body = (await lsGet.json()) as any;
-    expect(body.runs[meta.herdrWorkspace!]).toBe(meta.id);
-    expect(ls?.status).toBe(404); // ls is GET only
+    expect(body.teams[ws.workspaceId]).toBe(task.body.team);
+    expect((await call("/ls", {})).status).toBe(404); // ls is GET only
 
     writeFileSync(join(repo, "notes.md"), "# notes\n");
-    const shown = await call("/show", { run: meta.id, agent: "lead", target: join(repo, "notes.md"), pane: leadPane });
+    const shown = await call("/show", { target: join(repo, "notes.md"), pane: ws.paneId });
     expect(shown.status).toBe(200);
-    expect(o.getRun(meta.id).opens.at(-1)).toMatchObject({ by: "lead", target: join(repo, "notes.md") });
   });
 });

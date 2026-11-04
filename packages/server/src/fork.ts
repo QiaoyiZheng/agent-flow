@@ -15,7 +15,7 @@
 import { basename, dirname, join } from "node:path";
 import type { ChatSource } from "@af/core";
 import type { TranscriptFS } from "./transcripts/index.ts";
-import { AfError } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
 import { sq } from "./remote.ts";
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;

@@ -5,7 +5,7 @@
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { AfError } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
 
 export interface FsEntry {
   name: string;

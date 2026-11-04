@@ -1,43 +1,37 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentKind, GraphState, HPane, RunState } from "@af/core";
+import { useEffect, useMemo, useState } from "react";
+import type { AgentKind, HPane } from "@af/core";
 
-interface WorkflowInfo {
+interface PlaybookInfo {
   id: string;
   name: string;
   description: string;
   source: "built-in" | "yours" | "project";
   path: string;
-  lead?: AgentKind;
-  needsGoal: boolean;
-  preview?: GraphState;
   error?: string;
 }
-import { api, useStore, watch, failed, notify } from "./store";
+import { api, useStore, watch, failed } from "./store";
 import { Terminal } from "./Terminal";
-import { Graph } from "./Graph";
-import { NodeDetail } from "./NodeDetail";
+import { TeamPanel } from "./TeamPanel";
 import { type Need, Sidebar } from "./Sidebar";
 import { LayoutView, type PaneCtx } from "./Layout";
-import { Messages } from "./Viewers";
 import { kindColor } from "./view";
 import { NoticesButton, Toasts } from "./Notices";
 
 const params = new URLSearchParams(location.search);
 
 export function App() {
-  const { connected, runs, run, herdr, views } = useStore();
+  const { connected, teams, team, herdr, views } = useStore();
   const [selectedWs, setSelectedWs] = useState<string | undefined>(params.get("ws") ?? undefined);
-  const [pastRun, setPastRun] = useState<string>();
+  const [pastTeam, setPastTeam] = useState<string>();
+  /** A team picked in the panel (a nested team, a parent, another team in the workspace). */
+  const [teamPick, setTeamPick] = useState<string>();
   const [activeTab, setActiveTab] = useState<Record<string, string>>({});
   const [focused, setFocused] = useState<Record<string, string>>({});
-  const [selectedNode, setSelectedNode] = useState<string>();
-  const [rightView, setRightView] = useState<"graph" | "messages">("graph");
   const [drawer, setDrawer] = useState(false);
   const [shell, setShell] = useState<{ paneId: string; workspaceId?: string }>();
   const [shellWs, setShellWs] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [createOn, setCreateOn] = useState<string>();
-  const pendingNode = useRef<{ run: string; node: string } | undefined>(undefined);
   // when the user last saw each agent's pane: a "finished" newer than that shows in Needs you
   const [seen, setSeen] = useState<Record<string, string>>(() => {
     try {
@@ -69,13 +63,13 @@ export function App() {
   }, [drawer]);
   const hidden = useMemo(() => new Set(shellWs ? [shellWs] : []), [shellWs]);
 
-  // pick a workspace on first load: the latest active run, else the first one
+  // pick a workspace on first load: the latest active team's, else the first one
   useEffect(() => {
     if (selectedWs || !herdr?.workspaces.length) return;
     const live = new Set(herdr.workspaces.map((w) => w.id));
-    const r = runs.find((x) => !x.stopped && x.workspace && live.has(x.workspace));
+    const r = teams.find((x) => !x.stopped && x.workspace && live.has(x.workspace));
     setSelectedWs(r?.workspace ?? herdr.workspaces.find((w) => !hidden.has(w.id))?.id);
-  }, [herdr, runs]);
+  }, [herdr, teams]);
   useEffect(() => {
     if (!selectedWs) return;
     const u = new URL(location.href);
@@ -84,13 +78,12 @@ export function App() {
     history.replaceState(null, "", u);
   }, [selectedWs]);
 
-  // follow the run that owns the selected workspace (or a past run picked in the tree)
-  const runIdForWs = selectedWs ? (runs.filter((r) => r.workspace === selectedWs).find((r) => !r.stopped) ?? runs.find((r) => r.workspace === selectedWs))?.id : undefined;
-  const followRun = pastRun ?? runIdForWs;
-  useEffect(() => {
-    watch(followRun);
-    setSelectedNode(undefined);
-  }, [followRun]);
+  // the teams of the selected workspace: a router team, and the teams of sessions in it that hand out work
+  const wsTeams = useMemo(() => {
+    const here = teams.filter((t) => t.workspace === selectedWs && t.tickets + t.queued > 0);
+    const live = here.filter((t) => !t.stopped);
+    return live.length ? live : here.slice(0, 1);
+  }, [teams, selectedWs]);
 
   // ctrl+` toggles the persistent shell
   useEffect(() => {
@@ -105,18 +98,25 @@ export function App() {
   }, []);
 
   const ws = herdr?.workspaces.find((w) => w.id === selectedWs);
+  const followTeam = (() => {
+    if (pastTeam) return pastTeam;
+    if (teamPick && (wsTeams.some((x) => x.id === teamPick) || teams.some((x) => x.id === teamPick && x.workspace === selectedWs))) return teamPick;
+    return (wsTeams.find((x) => x.managerPane && x.managerPane === focused[selectedWs ?? ""]) ?? wsTeams[0])?.id;
+  })();
+  useEffect(() => {
+    watch(followTeam);
+  }, [followTeam]);
   const tabs = herdr?.tabs.filter((t) => t.workspaceId === selectedWs) ?? [];
   // default tab: the one picked here, else the lead's tab in a run workspace, else Herdr's active tab
-  const leadTab = run?.meta && run.meta.herdrWorkspace === selectedWs ? run.agents[run.meta.lead]?.tabId : undefined;
-  const pick = [selectedWs ? activeTab[selectedWs] : undefined, leadTab, ws?.activeTabId, tabs[0]?.id].find((id) => id && tabs.some((t) => t.id === id));
+  const routerTab = wsTeams.find((t) => t.mode === "router") ? herdr?.panes.find((p) => p.id === wsTeams.find((t) => t.mode === "router")!.managerPane)?.tabId : undefined;
+  const pick = [selectedWs ? activeTab[selectedWs] : undefined, routerTab, ws?.activeTabId, tabs[0]?.id].find((id) => id && tabs.some((t) => t.id === id));
   const tabId = pick as string | undefined;
   const layout = tabId ? herdr?.layouts[tabId] : undefined;
   const panesById = useMemo(() => new Map<string, HPane>((herdr?.panes ?? []).map((p) => [p.id, p])), [herdr]);
   const runAgents = useMemo(
-    () => new Map(Object.values(run?.agents ?? {}).filter((a) => a.paneId && a.status !== "exited").map((a) => [a.paneId!, { name: a.name, kind: a.kind, role: a.role }])),
-    [run, run?.seq],
+    () => new Map(Object.values(team?.members ?? {}).filter((a) => a.paneId && a.status !== "exited" && !a.team).map((a) => [a.paneId!, { name: a.name, kind: a.kind, role: a.role }])),
+    [team, team?.seq],
   );
-  const leadPane = run?.meta ? run.agents[run.meta.lead]?.paneId : undefined;
   const tabPanes = herdr && tabId ? herdr.panes.filter((p) => p.tabId === tabId) : [];
   const focusedPane = (selectedWs && focused[selectedWs] && tabPanes.some((p) => p.id === focused[selectedWs]) ? focused[selectedWs] : (layout?.focusedPaneId ?? tabPanes[0]?.id)) as string | undefined;
   // a finished agent counts as seen when you are actually here: this window has focus, and the pane is the one
@@ -130,7 +130,7 @@ export function App() {
     return () => (document.removeEventListener("visibilitychange", on), window.removeEventListener("focus", on), window.removeEventListener("blur", on));
   }, []);
   const tabAgents = tabPanes.filter((p) => p.agent);
-  const looking = present && !creating && !pastRun ? tabAgents.filter((p) => p.id === focusedPane || tabAgents.length === 1) : [];
+  const looking = present && !creating && !pastTeam ? tabAgents.filter((p) => p.id === focusedPane || tabAgents.length === 1) : [];
   const unseen = looking.filter((p) => p.agentStatus === "done" && p.statusAt && (seen[p.id] ?? "") < p.statusAt);
   const unseenKey = unseen.map((p) => `${p.id}@${p.statusAt}`).join(",");
   useEffect(() => {
@@ -138,7 +138,8 @@ export function App() {
   }, [unseenKey]);
 
   const selectWs = (id: string) => {
-    setPastRun(undefined);
+    setPastTeam(undefined);
+    setTeamPick(undefined);
     setCreating(false);
     setSelectedWs(id);
   };
@@ -151,21 +152,14 @@ export function App() {
     const p = paneId ? panesById.get(paneId) : undefined;
     if (p) selectPane(p.workspaceId, p.tabId, p.id);
   };
-  // Needs you: go to the pane (or workspace) and, for a run item, show its node once that run is loaded
+  // Needs you: go to the pane (or workspace), and show the team the item is about
   const onNeed = (n: Need) => {
     if (n.paneId && panesById.has(n.paneId)) goToPane(n.paneId);
     else if (n.workspace && herdr?.workspaces.some((w) => w.id === n.workspace)) selectWs(n.workspace);
-    else if (n.runId) setPastRun(n.runId);
-    pendingNode.current = n.node && n.runId ? { run: n.runId, node: n.node } : undefined;
-    if (n.node && run && n.runId === run.meta?.id && run.graph.nodes[n.node]) setSelectedNode(n.node);
+    else if (n.teamId) setPastTeam(n.teamId);
+    if (n.teamId) setTeamPick(n.teamId);
   };
-  useEffect(() => {
-    const p = pendingNode.current;
-    if (p && run?.meta?.id === p.run && run.graph.nodes[p.node]) {
-      setSelectedNode(p.node);
-      pendingNode.current = undefined;
-    }
-  }, [run?.meta?.id, run?.seq]);
+  const managerPane = team?.meta ? (team.meta.manager.pane ?? (team.meta.manager.member ? team.members[team.meta.manager.member]?.paneId : undefined)) : undefined;
   const down = useMemo(() => new Map((herdr?.machines ?? []).filter((m) => !m.local && m.state !== "online").map((m) => [m.id, { label: m.label, error: m.error }])), [herdr]);
   const ctx: PaneCtx = {
     down,
@@ -174,10 +168,10 @@ export function App() {
     focused: focusedPane,
     onFocus: (p) => selectedWs && setFocused((f) => ({ ...f, [selectedWs]: p })),
     runAgents,
-    leadPane,
+    leadPane: managerPane,
   };
   const showFile = (target: string) => {
-    const of = focusedPane ?? leadPane;
+    const of = focusedPane ?? managerPane;
     if (of) api("POST", "/show", { target, of }).then((r) => goToPane(r.paneId), failed("That did not work"));
   };
 
@@ -189,19 +183,19 @@ export function App() {
     return a ? (runAgents.get(a.id)?.name ?? a.agentName ?? a.agent!) : (ps[0]?.cwd.split("/").at(-1) ?? t.label);
   };
   const tabKind = (t: { id: string }) => herdr?.panes.find((p) => p.tabId === t.id && p.agent)?.agent;
-  const showRight = !!run && !creating;
+  const showRight = !!team?.meta && !creating;
 
   return (
-    <div className="app" style={{ "--right-w": showRight ? (selectedNode ? "460px" : "380px") : "0px" } as React.CSSProperties}>
+    <div className="app" style={{ "--right-w": showRight ? "420px" : "0px" } as React.CSSProperties}>
       <Sidebar
         herdr={herdr}
-        runs={runs}
-        run={run}
+        teams={teams}
+        team={team}
         hidden={hidden}
-        selectedWs={pastRun ? undefined : selectedWs}
+        selectedWs={pastTeam ? undefined : selectedWs}
         onSelectWs={selectWs}
         onSelectPane={selectPane}
-        onSelectRun={(id) => (setPastRun(id), setCreating(false))}
+        onSelectTeam={(id) => (setPastTeam(id), setTeamPick(id), setCreating(false))}
         onNew={(machine) => (setCreateOn(machine), setCreating(true))}
         onNeed={onNeed}
         seen={seen}
@@ -209,7 +203,7 @@ export function App() {
       />
 
       <main className="main">
-        {!creating && !pastRun && ws && (
+        {!creating && !pastTeam && ws && (
           <div className="tabs">
             {tabs.map((t) => (
               <div key={t.id} className={`tab ${t.id === tabId ? "active" : ""}`} onClick={() => setActiveTab((a) => ({ ...a, [ws.id]: t.id }))}>
@@ -242,8 +236,8 @@ export function App() {
               machines={(herdr?.machines ?? []).filter((m) => m.local || m.state === "online").map((m) => ({ id: m.id, label: m.label }))}
               onDone={(wsId) => (setCreating(false), wsId && selectWs(wsId))}
             />
-          ) : pastRun ? (
-            <div className="welcome">This run's workspace is closed. Its graph and messages are on the right.</div>
+          ) : pastTeam ? (
+            <div className="welcome">This team's workspace is closed. Its tickets are on the right.</div>
           ) : !herdr ? (
             <div className="welcome">{connected ? "Loading…" : "Connecting to the agent-flow server…"}</div>
           ) : layout && tabId ? (
@@ -255,61 +249,23 @@ export function App() {
       </main>
 
       <section className="right">
-        {showRight && run && (
-          <>
-            <div className="panel-head">
-              <div className="seg" style={{ border: 0, padding: 0 }}>
-                <button className={rightView === "graph" ? "on" : ""} onClick={() => setRightView("graph")}>
-                  Graph
-                </button>
-                <button className={rightView === "messages" ? "on" : ""} onClick={() => setRightView("messages")}>
-                  Messages
-                </button>
-              </div>
-              <span className="sub">
-                {Object.values(run.graph.nodes).filter((n) => !n.removed).length} nodes · {run.stopped ? "stopped" : run.graph.quiescent ? "quiescent" : "running"}
-                {run.meta?.workflow && <> · {run.meta.workflow}</>}
-              </span>
-              <span className="spacer" />
-              {Object.values(run.graph.nodes).some((n) => !n.removed) && (
-                <button
-                  className="c-more"
-                  title="Save this graph as a workflow template you can start runs from"
-                  onClick={() => {
-                    const name = prompt("Name for the new workflow template", run.meta?.goal ? `${run.meta.goal.slice(0, 30)}` : "");
-                    if (name?.trim())
-                      api<{ id: string; path: string }>("POST", "/workflows/save", { name: name.trim() }).then(
-                        (w) => notify("info", `Saved as workflow "${name.trim()}"`, w.path),
-                        failed("Could not save the workflow"),
-                      );
-                  }}
-                >
-                  save as workflow
-                </button>
-              )}
-            </div>
-            {rightView === "graph" ? (
-              <>
-                <div className="graph">
-                  <Graph run={run} selected={selectedNode} onSelect={setSelectedNode} />
-                </div>
-                {selectedNode && (
-                  <NodeDetail
-                    key={selectedNode}
-                    run={run}
-                    nodeId={selectedNode}
-                    onClose={() => setSelectedNode(undefined)}
-                    onOpen={showFile}
-                    onGoTo={(paneId) => goToPane(paneId)}
-                  />
-                )}
-              </>
-            ) : (
-              <div className="detail-body">
-                <Messages run={run} />
-              </div>
-            )}
-          </>
+        {showRight && team?.meta && (
+          <TeamPanel
+            team={team}
+            teams={teams}
+            siblings={wsTeams.some((x) => x.id === team.meta!.id) ? wsTeams : [teams.find((x) => x.id === team.meta!.id)!].filter(Boolean)}
+            panes={panesById}
+            onPickTeam={(id) => {
+              const t = teams.find((x) => x.id === id);
+              if (t?.workspace && herdr?.workspaces.some((w) => w.id === t.workspace) && t.workspace !== selectedWs) {
+                setSelectedWs(t.workspace);
+                setPastTeam(undefined);
+              } else if (!t?.workspace || !herdr?.workspaces.some((w) => w.id === t.workspace)) setPastTeam(id);
+              setTeamPick(id);
+            }}
+            onGoTo={(paneId) => goToPane(paneId)}
+            onOpen={showFile}
+          />
         )}
       </section>
 
@@ -323,12 +279,7 @@ export function App() {
           {ws && (
             <span className="crumb">
               <span className={ws.machine === "local" ? "" : "machine-tag"}>{herdr?.machines.find((m) => m.id === ws.machine)?.label ?? ws.machine}</span> / <b>{ws.label}</b>
-              {run?.meta && (
-                <>
-                  {" "}· run {run.meta.id}
-                  {run.meta.branch && <> · {run.meta.branch}</>}
-                </>
-              )}
+              {team?.meta && <> · team {team.meta.id}</>}
             </span>
           )}
           <span className="spacer" />
@@ -353,33 +304,29 @@ export function App() {
 }
 
 function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string) => void; machines: { id: string; label: string }[]; start?: string }) {
-  // "+" on a remote machine opens straight into "new workspace" there; runs are local for now
-  const [mode, setMode] = useState<"run" | "workspace">(start ? "workspace" : "run");
+  // "+" on a remote machine opens straight into "new workspace" there; teams are local for now
+  const [mode, setMode] = useState<"team" | "workspace">(start ? "workspace" : "team");
   const [machine, setMachine] = useState(start ?? "local");
   const [cwd, setCwd] = useState("");
   const [label, setLabel] = useState("");
   const [kind, setKind] = useState<AgentKind>("claude");
-  const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
-  const [workflow, setWorkflow] = useState("");
+  const [playbooks, setPlaybooks] = useState<PlaybookInfo[]>([]);
+  const [playbook, setPlaybook] = useState("humanize-loop");
   const [goal, setGoal] = useState("");
-  // templates: built-in, yours, and the project's (.agent-flow/workflows in the repo)
+  // playbooks: built-in, yours, and the project's (.agent-flow/playbooks in the repo)
   useEffect(() => {
-    if (mode !== "run") return;
-    const t = setTimeout(() => api<WorkflowInfo[]>("GET", "/workflows", { cwd: cwd || undefined }).then(setWorkflows, () => {}), 300);
+    if (mode !== "team") return;
+    const t = setTimeout(() => api<PlaybookInfo[]>("GET", "/playbooks", { cwd: cwd || undefined }).then(setPlaybooks, () => {}), 300);
     return () => clearTimeout(t);
   }, [mode, cwd]);
-  const wf = workflows.find((w) => w.id === workflow);
-  useEffect(() => {
-    if (wf?.lead) setKind(wf.lead);
-  }, [wf?.id]);
+  const pb = playbooks.find((w) => w.id === playbook);
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     const p =
-      mode === "run"
-        ? api("POST", "/runs", { cwd, leadKind: kind, prompt: prompt || undefined, workflow: workflow || undefined, goal: goal || undefined }).then((meta) => meta.herdrWorkspace as string)
+      mode === "team"
+        ? api("POST", "/team/new", { ui: true, cwd, router: kind, playbook: playbook || undefined, goal, name: label || undefined }).then((r) => r.workspace as string)
         : api("POST", "/workspace/new", { cwd: cwd || undefined, machine, label }).then((r) => r.workspaceId as string);
     p.then(onDone, failed("That did not work")).finally(() => setBusy(false));
   };
@@ -387,18 +334,22 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
     <div className="welcome">
       <form className="card" onSubmit={submit}>
         <div className="seg" style={{ border: 0, padding: "0 0 12px" }}>
-          <button type="button" className={mode === "run" ? "on" : ""} onClick={() => setMode("run")}>
-            New run
+          <button type="button" className={mode === "team" ? "on" : ""} onClick={() => setMode("team")}>
+            New team
           </button>
           <button type="button" className={mode === "workspace" ? "on" : ""} onClick={() => setMode("workspace")}>
             New workspace
           </button>
         </div>
-        <h2>{mode === "run" ? "Start a run" : "New workspace"}</h2>
-        <p>{mode === "run" ? "A lead agent starts in the directory. Tell it what you want; it builds a graph of workers." : "A plain Herdr workspace with a shell. Split it into terminals, agents and files."}</p>
+        <h2>{mode === "team" ? "Start an agent team" : "New workspace"}</h2>
+        <p>
+          {mode === "team"
+            ? "A router agent starts in its own workspace and runs the team by the playbook: it opens tickets for members and passes their results on. To hand out quick tasks yourself, just ask any session to (it uses af task)."
+            : "A plain Herdr workspace with a shell. Split it into terminals, agents and files."}
+        </p>
         <div className="field">
-          <label>Directory{mode === "run" ? " (a git repository gives each node its own worktree)" : ""}</label>
-          <input className="text" required={mode === "run"} placeholder={mode === "run" ? "/path/to/project" : "~ (home) if empty; ~/x works on remote machines"} value={cwd} onChange={(e) => setCwd(e.target.value)} />
+          <label>Directory</label>
+          <input className="text" required={mode === "team"} placeholder={mode === "team" ? "/path/to/project" : "~ (home) if empty; ~/x works on remote machines"} value={cwd} onChange={(e) => setCwd(e.target.value)} />
         </div>
         {mode === "workspace" && machines.length > 1 && (
           <div className="field">
@@ -412,19 +363,17 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
             </select>
           </div>
         )}
-        {mode === "workspace" && (
-          <div className="field">
-            <label>Name</label>
-            <input className="text" placeholder="defaults to the folder name" value={label} onChange={(e) => setLabel(e.target.value)} />
-          </div>
-        )}
-        {mode === "run" && (
+        <div className="field">
+          <label>Name</label>
+          <input className="text" placeholder={mode === "team" ? "defaults to the playbook's id" : "defaults to the folder name"} value={label} onChange={(e) => setLabel(e.target.value)} />
+        </div>
+        {mode === "team" && (
           <>
             <div className="field">
-              <label>Workflow</label>
-              <select value={workflow} onChange={(e) => setWorkflow(e.target.value)}>
-                <option value="">None — tell the lead what you want; it builds the graph</option>
-                {workflows.map((w) => (
+              <label>Playbook</label>
+              <select value={playbook} onChange={(e) => setPlaybook(e.target.value)}>
+                <option value="">None — the router decides the members and steps</option>
+                {playbooks.map((w) => (
                   <option key={w.id} value={w.id} disabled={!!w.error}>
                     {w.name}
                     {w.source !== "built-in" ? ` (${w.source})` : ""}
@@ -432,26 +381,19 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
                   </option>
                 ))}
               </select>
-              {wf && (
+              {pb && (
                 <div className="wf-card">
-                  <div className="wf-desc">{wf.description}</div>
-                  {wf.preview && (
-                    <div className="wf-graph">
-                      <Graph run={{ graph: wf.preview, agents: {}, opens: [], seq: 0 } as unknown as RunState} onSelect={() => {}} />
-                    </div>
-                  )}
-                  <div className="wf-path">{wf.path}</div>
+                  <div className="wf-desc">{pb.description}</div>
+                  <div className="wf-path">{pb.path}</div>
                 </div>
               )}
             </div>
-            {wf && (
-              <div className="field">
-                <label>Goal{wf.needsGoal ? "" : " (optional)"} — goes into every node's task</label>
-                <textarea className="text" rows={3} required={wf.needsGoal} placeholder="e.g. 给登录页加验证码" value={goal} onChange={(e) => setGoal(e.target.value)} />
-              </div>
-            )}
             <div className="field">
-              <label>Lead agent</label>
+              <label>Goal — the router passes it on in your words</label>
+              <textarea className="text" rows={3} required placeholder="e.g. 给登录页加验证码" value={goal} onChange={(e) => setGoal(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Router agent</label>
               <select value={kind} onChange={(e) => setKind(e.target.value as AgentKind)}>
                 <option value="claude">claude</option>
                 <option value="codex">codex</option>
@@ -459,17 +401,11 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
                 <option value="gemini">gemini</option>
               </select>
             </div>
-            {!wf && (
-              <div className="field">
-                <label>First message to the lead (optional)</label>
-                <textarea className="text" rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-              </div>
-            )}
           </>
         )}
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn primary" disabled={busy}>
-            {busy ? "Starting…" : mode === "run" ? "Start" : "Create"}
+            {busy ? "Starting…" : mode === "team" ? "Start" : "Create"}
           </button>
           <button type="button" className="btn" onClick={() => onDone()}>
             Cancel

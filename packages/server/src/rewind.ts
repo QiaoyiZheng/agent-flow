@@ -20,7 +20,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { TranscriptAccess } from "./access.ts";
-import { AfError } from "./orchestrator.ts";
+import { AfError } from "./errors.ts";
 import type { Workspaces } from "./workspaces.ts";
 
 export interface Cut {

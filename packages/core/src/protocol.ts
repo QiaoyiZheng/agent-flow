@@ -1,71 +1,87 @@
 // Wire types shared by the server, the af CLI, and the web UI.
 
-import type { AgentKind, Command } from "./graph.ts";
-import type { Attention, RunEvent, RunState } from "./run.ts";
+import type { AgentKind, Attention, StageKey, TeamEvent, TeamMode, TeamState } from "./team.ts";
 
-/** Who is calling. CLI calls made by an agent carry AF_RUN/AF_AGENT; calls with no agent come from the human user. */
+/**
+ * Who is calling. Members and routers carry AF_TEAM/AF_AGENT; a session agent-flow did not start is known by its
+ * Herdr pane (callerPane); calls with neither come from the human user.
+ */
 export interface Caller {
-  run?: string;
+  team?: string;
   agent?: string;
+  pane?: string;
 }
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
 }
 
-export interface CreateRunRequest {
-  cwd: string;
-  team?: string;
-  /** Lead agent kind when no team file is given. */
-  leadKind?: AgentKind;
-  /** First message for the lead, typed into its terminal once it is ready. */
-  prompt?: string;
-  /** Start from a workflow template (its id) with this goal: the graph is built at once. */
-  workflow?: string;
-  goal?: string;
+/** af task: a ticket for a new or existing member of the caller's own (direct) team. */
+export interface TaskRequest {
+  kind?: AgentKind;
+  task: string;
+  title?: string;
+  /** Name for the new member. */
+  name?: string;
+  /** Give it to this existing member instead (same session, its context kept). */
+  to?: string;
+  worktree?: boolean;
+  cwd?: string;
 }
 
-export interface GraphRequest extends Caller {
-  command: Command;
+/** af team new: a router team. */
+export interface NewTeamRequest {
+  goal: string;
+  playbook?: string;
+  router?: AgentKind;
+  name?: string;
+  cwd?: string;
 }
 
-export interface SendRequest extends Caller {
-  to: string;
-  body: string;
-  attachments?: string[];
-  replyTo?: string;
-}
-
-export interface DoneRequest extends Caller {
-  outcome?: string;
-  result?: string;
-  note?: string;
-}
-
-export interface SpawnRequest extends Caller {
-  name: string;
-  kind: AgentKind;
+/** af ticket open (router). */
+export interface OpenTicketRequest {
+  member: string;
+  title: string;
+  task: string;
+  kind?: AgentKind;
   role?: string;
+  from?: string;
+  max?: number;
+  note?: string;
+  inputs?: string[];
+  worktree?: boolean;
 }
 
-export interface OpenRequestBody extends Caller {
-  target: string;
+export interface SubmitRequest {
+  status: "ready" | "blocked" | "failed" | "dropped";
+  note?: string;
+  to?: string;
+  ticket?: string;
 }
 
-export interface RunSummary {
+export interface TeamSummary {
   id: string;
+  name: string;
+  mode: TeamMode;
   cwd: string;
   createdAt: string;
   stopped: boolean;
-  lead: string;
-  /** The lead's pane: its "finished" shows in Needs you, the workers' do not (the lead handles those). */
-  leadPane?: string;
-  attention: number;
-  /** The open attention items themselves, with the pane of the agent each is about. */
-  needs: (Attention & { paneId?: string })[];
-  quiescent: boolean;
-  /** Herdr workspace the run's agents live in. */
+  /** Herdr workspace the team's members open in. */
   workspace?: string;
+  /** The manager's pane: the session that hands out work (direct) or the router's. */
+  managerPane?: string;
+  parent?: { team: string; ticket: string };
+  goal?: string;
+  playbook?: string;
+  /** The open attention items, with the pane of the member each is about. */
+  needs: (Attention & { paneId?: string })[];
+  /** Queue items not taken yet. */
+  queued: number;
+  tickets: number;
+  /** Panes of the members: their "finished" is the manager's business, not the user's. */
+  memberPanes: string[];
+  /** How many tickets are at each stage (for a team's box on its parent's timeline). */
+  stages: Partial<Record<StageKey, number>>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -346,7 +362,7 @@ export interface QueuedMessage {
 }
 
 export type ServerPush =
-  | { type: "hello"; runs: RunSummary[] }
+  | { type: "hello"; teams: TeamSummary[] }
   | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec>; queue: Record<string, QueuedMessage[]> }
   /** more: earlier conversation exists; it comes as chat.prepend when asked for with chat.more. */
   | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[]; more?: boolean }
@@ -355,14 +371,14 @@ export type ServerPush =
   | { type: "notices"; list: Notice[] }
   | { type: "deliveries"; list: Delivery[]; settings: OpenSettings; apps: Record<OpenAppName, boolean> }
   | { type: "notice"; notice: Notice }
-  | { type: "snapshot"; run: string; state: RunState }
-  | { type: "event"; run: string; event: RunEvent }
+  | { type: "snapshot"; team: string; state: TeamState }
+  | { type: "event"; team: string; event: TeamEvent }
   | { type: "term.frame"; id: string; bytes: string; width: number; height: number; full: boolean }
   | { type: "term.closed"; id: string; reason?: string };
 
 /** Messages the web UI sends to the server over WebSocket. */
 export type ClientPush =
-  | { type: "watch"; run: string }
+  | { type: "watch"; team: string }
   | { type: "term.open"; id: string; paneId: string; cols: number; rows: number; mode: "control" | "observe" }
   | { type: "term.input"; id: string; text: string }
   | { type: "term.resize"; id: string; cols: number; rows: number }

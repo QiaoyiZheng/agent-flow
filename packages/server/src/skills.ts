@@ -9,53 +9,50 @@ import { join } from "node:path";
 export function skillText(af: string) {
   return `---
 name: agent-flow
-description: Hand work to other agents (claude, codex, omp, gemini) that run at the same time in their own terminals, tracked as a graph the user watches in the agent-flow UI. Use when the user asks to have other sessions or agents do things in parallel or in a pipeline (e.g. "让别的 session 同时做…", "开两个 codex 并行改…", "让 omp 去查…，codex 去写…", "让 gemini 也看一下", "fan out", "dispatch to codex", "have another agent review it"), or to start an agent-flow workflow template. Not for work you can simply do yourself.
+description: Hand work to other agents (claude, codex, omp, gemini) that run at the same time in their own terminals, which the user watches in the agent-flow UI. Use when the user asks to have other sessions or agents do things in parallel or in a pipeline (e.g. "让别的 session 同时做…", "开几个 session，claude 规划、codex 执行、gemini 写", "开两个 codex 并行改…", "让 gemini 也看一下", "fan out", "dispatch to codex", "have another agent review it"), or to start an agent team ("开个 agent team", "写和审循环", "super agent", a playbook). Not for work you can simply do yourself.
 ---
 
-# agent-flow: run other agents from this session
+# agent-flow: hand work to other sessions
 
 The af command is \`${af}\` (use this full path; it may not be on PATH). Each call is one shell command.
 
-## 1. Make this session the lead (once)
+## Mode 1: hand out tasks yourself (quick work, you decide the order)
 
-    ${af} here
+    ${af} task claude|codex|omp|gemini "<task>" [--name <name>] [--worktree]
+    ${af} task --to <name> "<more work for the same session>"
 
-This creates a run in this Herdr workspace with you as its lead. The agent-flow UI shows its graph next to
-this workspace. Running it again is harmless.
-
-## 2. Hand out work as graph nodes
-
-    ${af} graph add <id> --kind codex|claude|omp|gemini --task "<task>" [--after a,b] [--on <outcome>] [--shared] [--auto-accept]
-
-- Nodes without --after start at once, in parallel; each gets a fresh agent in its own tab.
-- Write each task so a fresh agent can do it without this conversation: goal, files, constraints, how to
-  verify, and which outcomes to submit (e.g. "submit outcome pass or fail"). Ask for long results as a file
-  in $AF_OUT, passed with --result.
-- --shared for read-only work (research, review); otherwise each node works on its own git branch, merged
-  into the run's integration branch when you accept it (never into the user's checkout).
-- Loops: \`${af} graph link review code --on fail --max 3\` sends work back while review says fail.
-- Templates: \`${af} workflow list\`, then \`${af} graph apply <workflow> --goal "<goal>"\` adds a whole flow.
+- Each call opens a ticket and starts a new session in a new tab of this workspace (or, with --to, gives it to a
+  session you started before, which keeps its context). The task text is its first message.
+- Write the task so a fresh agent can do it without this conversation: the goal in the user's words, the files,
+  how to check the result. Independent tasks run at the same time; for a step that needs an earlier result, wait
+  for that result and then hand out the next task.
+- --worktree: its own git worktree and branch (af/<team>/<name>), for code changes running in parallel. Nothing
+  is merged for you; tell the user which branch has the work.
 
 Then tell the user what is running and end your turn. Do not wait or poll.
 
-## 3. When a worker submits
+When a session finishes its turn, a line like this is typed here:
 
-A line like \`[agent-flow] New message m3 from agent-flow (node code#1). Run: ${af} inbox\` is typed into this
-session. Then:
+    [agent-flow] 1 new in your queue: T1 plan finished. Run: ${af} queue take
 
-    ${af} inbox                                 # what was submitted
-    ${af} diff <node>                           # what an isolated node changed
-    ${af} graph accept <node>                   # take it; dependent nodes start
-    ${af} graph reject <node> --reason "..."    # the same agent fixes it
+Run \`${af} queue take\`: you get each session's final reply (the full text is in the file it names). Then hand out
+the next task, tell a session more (\`${af} tell T1 "<text>"\`), or report to the user. The queue also tells you when
+a session asks a question on its screen (answer it with \`${af} answer T2 <option number>\` if it is about the task;
+permission prompts are the user's), may be stuck, or exited (\`${af} status <name>\` shows what it is doing).
 
-When nothing more can run you get a "quiescent" message: report the result to the user. Work from isolated
-nodes is on the branch \`${af} graph show\` prints; merge it into the user's branch only if they ask.
+## Mode 2: an agent team with a router (loops, longer work)
+
+    ${af} playbook list
+    ${af} team new --goal "<the goal in the user's words>" [--playbook humanize-loop|super-agent|bugfix|...] [--router claude]
+
+A router agent starts in its own workspace and runs the team: it opens tickets for members, passes results between
+them, and counts the rounds of a loop. You only hear its reports (in your queue, as above). More for the team:
+\`${af} tell <its ticket> "<text>"\`. Use this when the user wants members to work with each other (write and review
+until it passes) or a team that keeps taking requests.
 
 ## Other commands
 
-    ${af} graph show        ${af} read <agent>        ${af} send <agent> "<text>"
-    ${af} graph edit|rm|cancel|retry <node>           ${af} run stop
-    ${af} guide lead        # the full guide
+    ${af} tickets           ${af} ticket show <T>         ${af} read <name>        ${af} team stop <team>
 `;
 }
 

@@ -1,18 +1,17 @@
 #!/usr/bin/env bun
-// af: the agent-flow CLI. Used by the human and by agents. Agents get AF_RUN, AF_AGENT and AF_SOCK from
-// the environment agent-flow starts them in; the human passes --run or relies on the only/latest run.
+// af: the agent-flow CLI. Used by the human and by agents. Team members and routers get AF_TEAM, AF_AGENT and AF_SOCK
+// from the environment agent-flow starts them in; any other session is known by its Herdr pane (HERDR_PANE_ID).
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import type { AgentKind, Command, GraphState, HerdrModel, Mail, NodeSpec, RunState, RunSummary } from "@af/core";
-import { activeInstance, instanceLabel, latestInstance, liveEdges, liveNodes } from "@af/core";
+import type { HerdrModel, QueueItem, TeamSummary, Ticket } from "@af/core";
 
 const HOME = process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const SOCK = process.env.AF_SOCK ?? join(HOME, "server.sock");
 const AGENT = process.env.AF_AGENT || undefined;
 
-const BOOL = new Set(["shared", "isolated", "hold", "no-hold", "auto-accept", "no-auto-accept", "json", "all", "stat", "help", "down", "right", "tab"]);
+const BOOL = new Set(["json", "all", "help", "down", "right", "tab", "worktree", "done", "failed", "dropped", "cancelled"]);
 const PANE = process.env.HERDR_PANE_ID || undefined;
 
 function parse(argv: string[]) {
@@ -46,7 +45,7 @@ function die(msg: string, code = 1): never {
 
 async function call<T = any>(method: "GET" | "POST", path: string, body: Record<string, unknown> = {}): Promise<T> {
   if (!existsSync(SOCK)) die(`agent-flow server is not running (no ${SOCK}). Start it with: af server`);
-  const payload: Record<string, unknown> = { run: RUN, agent: AGENT, ...(AGENT ? {} : { callerPane: PANE }), ...body };
+  const payload: Record<string, unknown> = { team: TEAM, agent: AGENT, ...(AGENT ? {} : { callerPane: PANE }), ...body };
   const url = method === "GET" ? `http://af${path}?${new URLSearchParams(Object.entries(payload).filter(([, v]) => v !== undefined) as [string, string][])}` : `http://af${path}`;
   let r: Response;
   try {
@@ -59,75 +58,28 @@ async function call<T = any>(method: "GET" | "POST", path: string, body: Record<
   return data as T;
 }
 
-let RUN: string | undefined = process.env.AF_RUN || undefined;
-
-async function resolveRun(flag: string | true | undefined) {
-  if (typeof flag === "string") return (RUN = flag);
-  if (RUN) return RUN;
-  // a session that ran `af here`: its pane leads a run
-  if (PANE && !AGENT) {
-    const me = await call<{ run: string; agent: string } | null>("GET", "/whoami");
-    if (me?.run) return (RUN = me.run);
-  }
-  const runs = (await call<RunSummary[]>("GET", "/runs")).filter((r) => !r.stopped);
-  if (!runs.length) die("no active run. Start one with: af up");
-  if (runs.length > 1) console.error(`af: several runs are active; using the latest (${runs[0]!.id}). Pass --run to choose.`);
-  return (RUN = runs[0]!.id);
-}
+const TEAM: string | undefined = process.env.AF_TEAM || undefined;
 
 const out = (flags: Record<string, unknown>, data: unknown, text: () => string) => console.log(flags.json ? JSON.stringify(data, null, 2) : text());
+const str = (v: string | true | undefined) => (typeof v === "string" ? v : undefined);
+const readTask = (flags: Record<string, string | true>, pos: string[]) =>
+  typeof flags["task-file"] === "string" ? readFileSync(absolute(flags["task-file"]), "utf8") : typeof flags.task === "string" ? flags.task : pos.join(" ");
 
-// ---------------------------------------------------------------------------------------------
-
-function specFromFlags(flags: Record<string, string | true>, partial: boolean): Partial<NodeSpec> {
-  const spec: Partial<NodeSpec> = {};
-  if (typeof flags.task === "string") spec.task = flags.task;
-  if (typeof flags["task-file"] === "string") spec.task = require("node:fs").readFileSync(flags["task-file"], "utf8");
-  if (typeof flags.kind === "string") spec.executor = { kind: flags.kind as AgentKind };
-  if (typeof flags.agent === "string") spec.executor = { agent: flags.agent };
-  if (flags.shared) spec.isolation = "shared";
-  if (flags.isolated) spec.isolation = "isolated";
-  if (flags.hold) spec.hold = true;
-  if (flags["no-hold"]) spec.hold = false;
-  if (flags["auto-accept"]) spec.autoAccept = true;
-  if (flags["no-auto-accept"]) spec.autoAccept = false;
-  if (!partial && !spec.task) die('graph add needs --task "<task>" (or --task-file <path>)');
-  return spec;
+function showTickets(list: (Ticket & { stage: string })[]) {
+  if (!list.length) return "(no tickets yet)";
+  return list
+    .map((k) => `${k.id.padEnd(4)} ${k.assignee.padEnd(12)} ${k.stage.padEnd(12)} ${k.round > 1 ? `r${k.round} of ${k.thread} ` : ""}${k.title}${k.branch ? `  [${k.branch}]` : ""}`)
+    .join("\n");
 }
 
-function showGraph(s: RunState) {
-  const g: GraphState = s.graph;
-  const m = s.meta!;
-  const lines = [`run ${m.id}  lead=${m.lead}  ${s.stopped ? "stopped" : g.quiescent ? "quiescent" : "active"}${m.branch ? `  branch=${m.branch}` : ""}`];
-  const nodes = liveNodes(g);
-  if (!nodes.length) lines.push("(no nodes yet: af graph add <id> --kind codex --task \"...\")");
-  for (const n of nodes) {
-    const ex = "kind" in n.spec.executor ? n.spec.executor.kind : `@${n.spec.executor.agent}`;
-    const flags = [n.spec.isolation === "shared" ? "shared" : "", n.spec.autoAccept ? "auto-accept" : "", n.spec.hold ? "hold" : ""].filter(Boolean).join(",");
-    const i = latestInstance(n);
-    const sub = i?.submissions.at(-1);
-    const state = i ? `${instanceLabel(i)} ${i.state}${i.held ? " (held)" : ""}${i.agent ? ` by ${i.agent}` : ""}${sub?.outcome ? ` outcome=${sub.outcome}` : ""}` : "waiting";
-    lines.push(`  ${n.id.padEnd(14)} ${ex.padEnd(8)} ${flags.padEnd(18)} ${state}`);
-  }
-  const edges = liveEdges(g);
-  if (edges.length)
-    lines.push(
-      "edges: " +
-        edges.map((e) => `${e.from}->${e.to}${e.on ? ` [on ${e.on}]` : ""}${e.back ? ` (loop ${e.fired}/${e.max}${e.blocked ? ", LIMIT" : ""})` : ""}${e.queue.length ? ` queued=${e.queue.length}` : ""}`).join("  "),
-    );
-  const att = Object.values(s.attention);
-  if (att.length) lines.push("needs attention:", ...att.map((a) => `  ! ${a.text}`));
-  return lines.join("\n");
-}
-
-function formatLs(r: { model: HerdrModel; views: Record<string, { target: string }>; runs: Record<string, string>; shellWorkspace?: string }) {
+function formatLs(r: { model: HerdrModel; views: Record<string, { target: string }>; teams: Record<string, string>; shellWorkspace?: string }) {
   const lines: string[] = [];
-  const { model, views, runs } = r;
+  const { model, views, teams } = r;
   for (const m of model.machines) {
     lines.push(m.local ? m.label : `${m.label} [${m.id}] ${m.state}${m.error ? `: ${m.error}` : ""}${m.state === "offline" ? `  (af connect ${m.id})` : ""}`);
     for (const w of model.workspaces.filter((x) => x.machine === m.id)) {
       if (w.id === r.shellWorkspace) continue;
-      lines.push(`  ${w.id}  ${w.label}${runs[w.id] ? `  [run ${runs[w.id]}]` : ""}`);
+      lines.push(`  ${w.id}  ${w.label}${teams[w.id] ? `  [team ${teams[w.id]}]` : ""}`);
       for (const t of model.tabs.filter((t) => t.workspaceId === w.id)) {
         lines.push(`    tab ${t.id}  ${t.label}`);
         for (const p of model.panes.filter((p) => p.tabId === t.id)) {
@@ -140,32 +92,33 @@ function formatLs(r: { model: HerdrModel; views: Record<string, { target: string
   return lines.join("\n");
 }
 
-const fmtMail = (m: Mail) => `--- ${m.id} from ${m.from}${m.node ? ` | ${m.node}` : ""}${m.replyTo ? ` | reply to ${m.replyTo}` : ""} | ${m.kind} ---\n${m.body}${m.attachments?.length ? `\nattachments: ${m.attachments.join(", ")}` : ""}`;
-
 const HELP = `af — agent-flow CLI
 
-Run and server:
+Server:
   af server [--port N]                      start the agent-flow server
-  af up [team] [--kind claude|codex|omp|gemini] [--prompt "..."] [--cwd DIR]
-  af up --workflow <id> --goal "..."         start from a workflow template (af workflow list)
-  af here                                   make this session (any claude/codex/omp pane) the lead of a run here
-  af graph apply <workflow> --goal "..."    add a template's nodes to the current run
-  af guide lead|worker                      how to lead a run / how workers submit
-  af workflow list | save "<name>"          templates; save the current run's graph as one
-  af run list | show | stop                 (--run ID to pick a run)
-  af spawn <name> --kind K [--role "..."]
+  af guide router|member                    the instructions routers and members are started with
 
-Graph (lead):
-  af graph add <id> (--kind K | --agent NAME) --task "..." [--after a,b] [--on OUTCOME] [--shared] [--hold] [--auto-accept]
-  af graph edit <id> [--task ...] [--kind K | --agent N] [--shared|--isolated] [--hold|--no-hold] [--auto-accept|--no-auto-accept]
-  af graph link <from> <to> [--on OUTCOME] [--max N]     af graph unlink <from> <to>     af graph max <from> <to> <N>
-  af graph rm <id>   af graph start <id>   af graph cancel <id>   af graph retry <id>
-  af graph accept <id>   af graph reject <id> --reason "..."
-  af graph show [--json]          af diff <node> [--stat]
+Mode 1 — hand out tasks from this session (it gets each session's final reply in its queue):
+  af task <claude|codex|omp|gemini> "<task>" [--name N] [--worktree] [--title T]   a new session in a new tab
+  af task --to <name> "<task>"              more work for a session you started (same context)
+  af queue [--all]                          what waits in your queue    af queue take   take all of it
+  af tell <ticket|name> "<text>"            add to a ticket (typed in when the session is free)
+  af answer <ticket|name> <n> [--text T]    answer the question on its screen (not permission prompts)
+  af status <name>                          its status, last reply and screen
+  af tickets [--json]    af ticket show <T>
 
-Messages (everyone):
-  af inbox [--all] [--json]   af send <agent|user> <text...> [--attach PATH]   af reply <msg-id> <text...>
-  af done [--outcome X] [--note "..."] [--result PATH]     af whoami
+Mode 2 — agent teams with a router:
+  af playbook list
+  af team new --goal "..." [--playbook P] [--router claude|codex|omp|gemini] [--name N] [--cwd DIR]
+  af team list | stop [<team>]
+  router:  af ticket open <member> --title T (--task "..." | --task-file F) [--kind K] [--from T] [--max N]
+                                   [--note "..."] [--role "..."] [--worktree]
+           af ticket close <T> [--failed|--dropped|--cancelled] [--note "..."]    af thread max <T> <N>
+           af queue take    af queue done <seq>...|--all    af reply <seq> "<answer>"
+           af tell / af answer / af status (as above)    af report "<text>" [--done]
+  member:  af submit --status ready|blocked|failed|dropped --note "..." [--to <member>]
+           af progress "<text>"    af ask "<question>"
+  af whoami
 
 Panes (everyone; Herdr owns the layout, the web UI shows it):
   af ls [--json]                                 machines, workspaces, tabs, panes (agents, viewers, shells)
@@ -194,106 +147,158 @@ async function main() {
       const { main: serverMain } = await import("../../server/src/main.ts");
       return serverMain(rest);
     }
-    case "whoami":
-      return console.log(AGENT ? `${AGENT} in run ${RUN}` : `the user${RUN ? ` (run ${RUN})` : ""}`);
-    case "up": {
-      const meta = await call("POST", "/runs", {
-        cwd: resolve(typeof flags.cwd === "string" ? flags.cwd : process.cwd()),
-        team: pos[0],
-        leadKind: typeof flags.kind === "string" ? flags.kind : undefined,
-        prompt: typeof flags.prompt === "string" ? flags.prompt : undefined,
-        workflow: typeof flags.workflow === "string" ? flags.workflow : undefined,
-        goal: typeof flags.goal === "string" ? flags.goal : undefined,
-      });
-      return out(flags, meta, () => `run ${meta.id} started; lead "${meta.lead}" is starting${meta.branch ? `; work goes to branch ${meta.branch}` : ""}`);
+    case "whoami": {
+      const w = await call("GET", "/whoami");
+      return out(flags, w, () => (w.kind === "member" || w.kind === "router" ? `${w.member} (${w.kind}) in team ${w.team}` : w.kind === "pane" ? `the session in pane ${w.pane}` : "the user"));
     }
-    case "run": {
+    case "guide": {
+      const which = pos[0] === "member" ? "member" : "router";
+      return process.stdout.write(readFileSync(join(import.meta.dir, `../../skill/${which}.md`), "utf8"));
+    }
+    case "task": {
+      const kind = flags.to ? undefined : pos[0];
+      const text = readTask(flags, flags.to ? pos : pos.slice(1));
+      if ((!flags.to && !kind) || !text.trim()) die('usage: af task <claude|codex|omp|gemini> "<task>" [--name N] [--worktree]   or   af task --to <name> "<task>"');
+      const r = await call("POST", "/task", { kind, task: text, name: str(flags.name), to: str(flags.to), title: str(flags.title), worktree: !!flags.worktree });
+      return out(flags, r, () =>
+        `${r.ticket} for ${r.member}${r.started ? " (starting in a new tab)" : ""}${r.branch ? ` on branch ${r.branch}` : ""}. Its final reply comes to your queue; end your turn now.`,
+      );
+    }
+    case "team": {
       const sub = pos[0] ?? "list";
       if (sub === "list") {
-        const runs = await call<RunSummary[]>("GET", "/runs");
-        return out(flags, runs, () => runs.map((r) => `${r.id}  ${r.stopped ? "stopped " : r.quiescent ? "quiet   " : "active  "} ${r.attention ? `!${r.attention} ` : "   "}${r.cwd}`).join("\n") || "(no runs)");
+        const teams = await call<TeamSummary[]>("GET", "/teams");
+        return out(flags, teams, () =>
+          teams.map((x) => `${x.id}  ${x.mode.padEnd(6)} ${x.stopped ? "stopped " : "active  "} ${String(x.tickets).padStart(3)} tickets  ${x.name}${x.goal ? ` — ${x.goal.slice(0, 60)}` : ""}`).join("\n") || "(no teams)",
+        );
       }
-      await resolveRun(flags.run);
-      if (sub === "show") return out(flags, await call("GET", "/run"), () => "");
-      if (sub === "stop") return (await call("POST", "/run/stop"), console.log(`run ${RUN} stopped`));
-      return die(`unknown: af run ${sub}`);
+      if (sub === "new") {
+        const goal = str(flags.goal) ?? pos.slice(1).join(" ");
+        if (!goal.trim()) die('usage: af team new --goal "..." [--playbook P] [--router K] [--name N] [--cwd DIR]');
+        const r = await call("POST", "/team/new", { goal, playbook: str(flags.playbook), router: str(flags.router), name: str(flags.name), cwd: typeof flags.cwd === "string" ? absolute(flags.cwd) : undefined });
+        return out(flags, r, () => `team ${r.team} (${r.name}) is starting in its own workspace${r.playbook ? ` with playbook ${r.playbook}` : ""}${r.parent ? `; it is ${r.parent.ticket} in your tickets, and its reports come to your queue` : ""}.`);
+      }
+      if (sub === "stop") {
+        const r = await call("POST", "/team/stop", { id: pos[1] });
+        return console.log(`team ${r.team} stopped`);
+      }
+      return die(`unknown: af team ${sub}`);
     }
-    case "spawn": {
-      await resolveRun(flags.run);
-      if (!pos[0] || typeof flags.kind !== "string") die("usage: af spawn <name> --kind claude|codex|omp|gemini [--role ...]");
-      const a = await call("POST", "/spawn", { name: pos[0], kind: flags.kind, role: flags.role });
-      return console.log(`spawned ${a.name} (${a.kind})`);
+    case "playbook": {
+      const list = await call("GET", "/playbooks", { cwd: process.cwd() });
+      return out(flags, list, () =>
+        (list as any[]).map((p) => `${p.id.padEnd(22)} ${p.source.padEnd(9)} ${p.error ? `ERROR ${p.error}` : `${p.name} — ${p.description}`}`).join("\n") + '\n\nStart one: af team new --playbook <id> --goal "..."',
+      );
     }
-    case "graph":
-      return graph(pos, flags);
-    case "here": {
-      if (!PANE) die("af here makes the session in this Herdr pane the lead of a run; run it inside Herdr");
-      const meta = await call("POST", "/runs/attach", { pane: PANE });
-      const self = process.env.AF_SELF ?? "af";
-      return console.log(
+    case "queue": {
+      const sub = pos[0];
+      if (sub === "take") {
+        const r = await call("POST", "/team/take");
+        return out(flags, r, () => r.text);
+      }
+      if (sub === "done") {
+        if (!flags.all && pos.length < 2) die("usage: af queue done <seq>... | --all");
+        const r = await call("POST", "/team/handled", { all: !!flags.all, seqs: pos.slice(1).map((x) => Number(x.replace(/^#/, ""))) });
+        return console.log(`marked ${r.handled.map((s: number) => `#${s}`).join(", ") || "nothing"} as dealt with`);
+      }
+      const r = await call<{ items: QueueItem[] }>("GET", "/team/queue", { all: flags.all ? "1" : undefined });
+      return out(flags, r, () => r.items.map((q) => `#${q.seq} ${q.state.padEnd(7)} ${q.kind.padEnd(7)} ${q.ticket ?? ""} ${q.from ?? ""}: ${q.text.split("\n")[0]}`).join("\n") || "(your queue is empty)");
+    }
+    case "tickets": {
+      const list = await call("GET", "/team/tickets");
+      return out(flags, list, () => showTickets(list));
+    }
+    case "ticket": {
+      const sub = pos[0];
+      if (sub === "open") {
+        const member = pos[1];
+        const task = readTask(flags, []);
+        if (!member || !task.trim() || typeof flags.title !== "string") die('usage: af ticket open <member> --title "..." (--task "..." | --task-file F) [--kind K] [--from T] [--max N] [--note "..."] [--worktree]');
+        const r = await call("POST", "/team/ticket", {
+          member,
+          title: flags.title,
+          task,
+          kind: str(flags.kind),
+          role: str(flags.role),
+          from: str(flags.from),
+          max: typeof flags.max === "string" ? Number(flags.max) : undefined,
+          note: str(flags.note),
+          inputs: typeof flags.input === "string" ? flags.input.split(",").map((x) => absolute(x.trim())) : undefined,
+          worktree: !!flags.worktree,
+        });
+        return out(flags, r, () => `${r.ticket} for ${r.member}${r.round > 1 ? ` (round ${r.round} of thread ${r.thread})` : ""}${r.started ? "; starting it in a new tab" : ""}. Folder: ${r.dir}`);
+      }
+      if (sub === "close") {
+        if (!pos[1]) die("usage: af ticket close <T> [--failed|--dropped|--cancelled] [--note ...]");
+        const outcome = flags.failed ? "failed" : flags.dropped ? "dropped" : flags.cancelled ? "cancelled" : "done";
+        const r = await call("POST", "/team/close", { ticket: pos[1], outcome, note: str(flags.note) });
+        return console.log(`${r.id} closed (${r.outcome})`);
+      }
+      if (sub === "show") {
+        if (!pos[1]) die("usage: af ticket show <T|member>");
+        const r = await call("GET", "/team/ticket", { ticket: pos[1] });
+        return out(flags, r, () =>
+          [
+            `${r.ticket.id} for ${r.ticket.assignee}: ${r.ticket.title}  [${r.ticket.status}${r.ticket.outcome ? ` ${r.ticket.outcome}` : ""}]${r.ticket.round > 1 ? `  round ${r.ticket.round} of ${r.ticket.thread}` : ""}`,
+            `folder: ${r.dir}`,
+            ...(r.related.length ? [`related: ${r.related.join("; ")}`] : []),
+            "--- task.md", (r.task ?? "").trimEnd(),
+            "--- result.md", (r.result ?? "(not written yet)").trimEnd(),
+          ].join("\n"),
+        );
+      }
+      return die("usage: af ticket open|close|show ...");
+    }
+    case "thread": {
+      if (pos[0] !== "max" || !pos[1] || !pos[2]) die("usage: af thread max <ticket> <N>");
+      const r = await call("POST", "/team/max", { thread: pos[1], max: Number(pos[2]) });
+      return console.log(`thread ${r.thread}: at most ${r.max} rounds per member`);
+    }
+    case "tell": {
+      if (pos.length < 2) die('usage: af tell <ticket|name> "<text>"');
+      const r = await call("POST", "/team/tell", { ref: pos[0], text: pos.slice(1).join(" ") });
+      return console.log(r.opened ? `${r.ticket} opened for ${r.to}` : `${r.to} gets it for ${r.ticket} when it is free`);
+    }
+    case "answer": {
+      if (pos.length < 2) die('usage: af answer <ticket|name> <option number> [--text "..."]');
+      const r = await call("POST", "/team/answer", { ref: pos[0], option: Number(pos[1]), text: str(flags.text) });
+      return console.log(`answered ${r.member}: ${r.option}`);
+    }
+    case "reply": {
+      if (pos.length < 2) die('usage: af reply <seq> "<answer>"');
+      const r = await call("POST", "/team/reply", { seq: Number(pos[0]!.replace(/^#/, "")), text: pos.slice(1).join(" ") });
+      return console.log(`${r.to} gets the answer when it is free`);
+    }
+    case "status": {
+      if (!pos[0]) die("usage: af status <name|ticket>");
+      const r = await call("GET", "/team/status", { ref: pos[0] });
+      return out(flags, r, () =>
         [
-          `This session now leads run ${meta.id}; its graph shows on the right of the agent-flow UI for this workspace.`,
-          meta.branch ? `Code changes from workers are merged into branch ${meta.branch} (worktree ${meta.integration}), not into your checkout.` : `Workers work in ${meta.cwd}.`,
-          `Next: ${self} graph add <id> --kind codex|claude|omp --task "..."   (nodes without --after run in parallel)`,
-          `      ${self} graph apply <workflow> --goal "..."               (a template; ${self} workflow list)`,
-          `When a worker submits, "[agent-flow] New message ..." is typed here: run ${self} inbox, check, then ${self} graph accept|reject <node>.`,
-          `Full guide: ${self} guide lead`,
+          `${r.member} (${r.kind}): ${r.status}${r.asking ? `, asking: ${r.asking}` : ""}${r.ticket ? `; ${r.ticket.id} ${r.ticket.stage}` : ""}`,
+          ...(r.lastReply ? ["--- last reply", r.lastReply] : []),
+          "--- screen", r.screen,
         ].join("\n"),
       );
     }
-    case "guide": {
-      const which = pos[0] === "worker" ? "worker" : "lead";
-      return process.stdout.write(readFileSync(join(import.meta.dir, `../../skill/${which}.md`), "utf8"));
+    case "report": {
+      if (!pos.length) die('usage: af report "<text>" [--done]');
+      const r = await call("POST", "/team/report", { text: pos.join(" "), done: !!flags.done });
+      return console.log(`reported to ${r.to}`);
     }
-    case "workflow": {
-      const sub = pos[0] ?? "list";
-      if (sub === "list") {
-        const list = await call("GET", "/workflows", { cwd: process.cwd() });
-        return out(flags, list, () =>
-          (list as any[])
-            .map((w) => `${w.id.padEnd(24)} ${w.source.padEnd(9)} ${w.error ? `ERROR ${w.error}` : `${w.name} — ${w.description}`}`)
-            .join("\n") + "\n\nStart one: af up --workflow <id> --goal \"...\"",
-        );
-      }
-      if (sub === "save") {
-        await resolveRun(flags.run);
-        if (!pos[1]) die('usage: af workflow save "<name>" [--description "..."]');
-        const w = await call("POST", "/workflows/save", { name: pos.slice(1).join(" "), description: flags.description });
-        return console.log(`saved as workflow ${w.id}: ${w.path}`);
-      }
-      return die(`unknown: af workflow ${sub}`);
+    case "submit": {
+      const status = str(flags.status) ?? "ready";
+      const r = await call("POST", "/team/submit", { status, note: str(flags.note), to: str(flags.to), ticket: str(flags.ticket) });
+      return console.log(`${r.ticket} submitted (${r.status})${r.result ? "" : ". Note: you did not write result.md"}. Now stop and wait.`);
     }
-    case "diff": {
-      await resolveRun(flags.run);
-      if (!pos[0]) die("usage: af diff <node> [--stat]");
-      const r = await call("GET", "/diff", { node: pos[0], stat: flags.stat ? "1" : undefined });
-      return console.log(r.diff || "(no changes)");
+    case "progress": {
+      if (!pos.length) die('usage: af progress "<text>"');
+      const r = await call("POST", "/team/progress", { text: pos.join(" ") });
+      return console.log(`noted on ${r.ticket}`);
     }
-    case "inbox": {
-      await resolveRun(flags.run);
-      const mail = await call<Mail[]>("POST", "/inbox", { all: !!flags.all });
-      return out(flags, mail, () => (mail.length ? mail.map(fmtMail).join("\n\n") : "(no new messages)"));
-    }
-    case "send": {
-      await resolveRun(flags.run);
-      if (pos.length < 2) die("usage: af send <agent|user> <text...>");
-      const m = await call("POST", "/send", { to: pos[0], body: pos.slice(1).join(" "), attachments: typeof flags.attach === "string" ? [absolute(flags.attach)] : undefined });
-      return console.log(`sent ${m.id} to ${m.to}`);
-    }
-    case "reply": {
-      await resolveRun(flags.run);
-      if (pos.length < 2) die("usage: af reply <msg-id> <text...>");
-      const m = await call("POST", "/reply", { id: pos[0], body: pos.slice(1).join(" "), attachments: typeof flags.attach === "string" ? [absolute(flags.attach)] : undefined });
-      return console.log(`sent ${m.id} to ${m.to}`);
-    }
-    case "done": {
-      await resolveRun(flags.run);
-      const r = await call("POST", "/done", {
-        outcome: typeof flags.outcome === "string" ? flags.outcome : undefined,
-        note: typeof flags.note === "string" ? flags.note : undefined,
-        result: typeof flags.result === "string" ? absolute(flags.result) : undefined,
-      });
-      return console.log(r.message);
+    case "ask": {
+      if (!pos.length) die('usage: af ask "<question>"');
+      const r = await call("POST", "/team/ask", { text: pos.join(" ") });
+      return console.log(`asked (#${r.seq}); end your turn, the answer is typed in when it comes`);
     }
     case "deliver": {
       // hand a finished document to the user: shown next to this pane, listed in Needs you with open buttons
@@ -387,65 +392,5 @@ async function main() {
 }
 
 const absolute = (p: string) => (isAbsolute(p) ? p : resolve(process.cwd(), p));
-
-async function graph(pos: string[], flags: Record<string, string | true>) {
-  await resolveRun(flags.run);
-  const [sub, a, b, c] = pos;
-  const send = async (command: Command) => {
-    const r = await call<{ events: { type: string }[] }>("POST", "/graph", { command });
-    const created = r.events.filter((e: any) => e.type === "instance.created").map((e: any) => `${e.node}#${e.n}`);
-    console.log(`ok${created.length ? ` (ready: ${created.join(", ")})` : ""}`);
-  };
-  const need = (cond: unknown, usage: string) => cond || die(`usage: ${usage}`);
-  switch (sub) {
-    case "show": {
-      const s = await call<RunState>("GET", "/run");
-      return out(flags, s.graph, () => showGraph(s));
-    }
-    case "apply": {
-      need(a, 'af graph apply <workflow> --goal "..."');
-      const r = await call("POST", "/graph/apply", { workflow: a, goal: typeof flags.goal === "string" ? flags.goal : undefined });
-      return console.log(`added ${r.nodes.join(", ")} from workflow ${r.workflow}`);
-    }
-    case "add": {
-      need(a, "af graph add <id> --kind K --task ...");
-      const after = typeof flags.after === "string" ? flags.after.split(",").map((f) => ({ from: f.trim(), on: typeof flags.on === "string" ? flags.on : undefined })) : undefined;
-      if (flags.on && !after) die("--on needs --after");
-      return send({ type: "node.add", id: a!, spec: specFromFlags(flags, false) as NodeSpec, after });
-    }
-    case "edit":
-      need(a, "af graph edit <id> [--task ...]");
-      return send({ type: "node.edit", id: a!, patch: specFromFlags(flags, true) });
-    case "rm":
-      need(a, "af graph rm <id>");
-      return send({ type: "node.remove", id: a! });
-    case "link":
-      need(a && b, "af graph link <from> <to> [--on OUTCOME] [--max N]");
-      return send({ type: "edge.link", from: a!, to: b!, on: typeof flags.on === "string" ? flags.on : undefined, max: typeof flags.max === "string" ? Number(flags.max) : undefined });
-    case "unlink":
-      need(a && b, "af graph unlink <from> <to>");
-      return send({ type: "edge.unlink", from: a!, to: b! });
-    case "max":
-      need(a && b && c, "af graph max <from> <to> <N>");
-      return send({ type: "edge.set_max", from: a!, to: b!, max: Number(c) });
-    case "start":
-      need(a, "af graph start <id>");
-      return send({ type: "instance.start", node: a! });
-    case "cancel":
-      need(a, "af graph cancel <id>");
-      return send({ type: "instance.cancel", node: a! });
-    case "retry":
-      need(a, "af graph retry <id>");
-      return send({ type: "instance.retry", node: a! });
-    case "accept":
-      need(a, "af graph accept <id>");
-      return send({ type: "instance.accept", node: a! });
-    case "reject":
-      need(a && typeof flags.reason === "string", 'af graph reject <id> --reason "..."');
-      return send({ type: "instance.reject", node: a!, reason: flags.reason as string });
-    default:
-      die(`unknown: af graph ${sub ?? ""}. Run af help.`);
-  }
-}
 
 await main();

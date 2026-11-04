@@ -1,96 +1,89 @@
 # agent-flow 使用指南
 
-agent-flow 让多个 agent（claude、codex、omp）同时干活，每个 agent 在自己的终端里跑，你在网页里看到它们之间的关系图（右侧的 graph）。有三种用法，从轻到重：
+agent-flow 让多个 agent（claude、codex、omp、gemini）同时干活。每个 agent 在自己的终端里跑，agent-flow 盯着它们，有事就叫醒管它们的那个 agent。网页右侧显示谁派了什么活、做到哪了。
 
-## 1. 在任何一个 session 里直接说（最常用）
+有两种用法：
 
-在你平时用的 claude、codex 或 omp 里，直接用大白话说要让别的 agent 做什么，例如：
+| | 直接派活（模式一） | agent team（模式二） |
+|---|---|---|
+| 谁管 | 你正在说话的 session | 一个专门的 router agent |
+| 适合 | 几件快活，先后由你的 session 安排 | 写 ↔ 审循环、多人接力、一直开着接活 |
+| 右侧显示 | 你的 session 的时间轴 | 泳道图：router 一条线，每个成员一条线 |
 
-> 让一个 codex 和一个 omp 同时做两件事：codex 统计 calc.js 里有几个导出函数，omp 检查 test.js 的断言。做完汇总给我。
+## 1. 直接派活
 
-> 开两个 codex 并行：一个改登录页，一个改注册页；改完让 claude 审一遍，不过就打回。
+在你平时用的 claude、codex、omp 或 gemini 里，直接用大白话说，例如：
 
-这个 session 会用 agent-flow 的 skill（服务器启动时装进 `~/.claude/skills/agent-flow` 和 `~/.codex/skills/agent-flow`；omp 也读 claude 的 skill 目录）：
+> 开几个 session：claude 先把登录页改版拆成计划写进 plan.md，codex 按计划实现第 1 步，gemini 写一份发布说明。
 
-1. 执行 `af here`：这个 session 成为一个 run 的 lead，右侧出现这个 workspace 的 graph。
-2. 用 `af graph add …` 把每件事建成一个节点。没有依赖的节点同时开始，每个节点在这个 workspace 里开一个新 tab，起一个新 agent。
-3. worker 交结果时，这个 session 的终端里会出现 `[agent-flow] New message …`，它会去看结果、通过或打回。
-4. 全部做完后它向你汇报。
-
-改代码的节点在自己的 git 分支上改，通过后合并进这个 run 的集成分支 `af/<run>/main`，**不会动你当前的分支**；要不要合进来由你决定。
-
-## 2. 从 workflow 模板开始一个 run
-
-workflow 模板就是一张事先画好的图：有哪些节点、各用哪种 agent、谁接谁、哪里不通过就打回重做。
-
-**在网页里**：左栏 "+ new" → New run → 选目录 → 在 "Workflow" 里选一个模板（下面会显示它的图）→ 写一句目标 → Start。图立刻建好并开始跑，lead 负责盯着和校验，你也可以随时改图。
-
-**在命令行里**：
+这个 session 会用 agent-flow 的 skill（服务器启动时装进 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`），每派一件活就执行一次：
 
 ```bash
-af workflow list                                   # 有哪些模板
-af up --workflow implement-review --goal "给登录页加验证码"
+af task claude "把登录页改版拆成 3 步，写进 plan.md" --name plan
+af task codex  "按 plan.md 第 1 步实现" --name exec --worktree
 ```
 
-内置的 4 个模板：
+- 每个 `af task` 是一张**工单**（T1、T2……）。新 session 开在同一个 workspace 的新 tab 里，任务就是它收到的第一条消息。`--to plan` 把活交给已经开过的 session，它的上下文还在。
+- 新 session 是普通 session，不用学任何命令。它做完一轮后，agent-flow 从它的对话记录里取最后的回复，放进你那个 session 的**队列**，再往你的 session 里打一行：
+  `[agent-flow] 1 new in your queue: T1 plan finished. Run: af queue take`
+  你的 session 执行 `af queue take` 拿到结果，接着派下一步或向你汇报。
+- 队列里还会出现：某个 session 屏幕上在问和任务有关的问题（你的 session 用 `af answer T2 <选项号>` 回答）、可能卡住了、进程退出了、API 报错（agent-flow 已经自动让它"继续"过 3 次）。
+- **权限审批和"信任这个文件夹"永远只交给你**：出现在左栏"需要你"里，你的 session 碰不到。
+- `--worktree` 让这个 session 在自己的 git worktree 和分支（`af/<team>/<名字>`）上改，适合几个 session 同时改代码。agent-flow 不合并，分支名在工单里，要不要合由你决定。
 
-| id | 名字 | 图 |
-|---|---|---|
-| `implement-review` | 实现 + 审查循环 | code（codex）→ review（claude）；review 不通过 → 打回 code，最多 3 轮 |
-| `bugfix` | 修 bug | reproduce（claude）→ fix（codex）→ verify（claude）；不通过 → 打回 fix |
-| `compare-plans` | 两个方案择优再实现 | plan-a（codex）、plan-b（claude）同时出方案 → choose → implement → review，不通过打回 |
-| `research-write-review` | 调研 → 写作 → 审稿 | research → draft（claude）→ critique（codex）；不通过 → 打回 draft，最多 2 轮 |
+右侧时间轴：竖线是你的 session，每张工单是挂在派出时间上的一个框，结果回来时有一行 "◀ T1 plan: …" 回到竖线上。点框看工单（任务、结果、它的终端），"Go to its pane" 跳过去。一个 session 自己又派了活，它的框上有 ⊕，点开是它的时间轴。
 
-一个已经在跑的 run（包括用 `af here` 开的）也可以加入模板：`af graph apply implement-review --goal "…"`。
+## 2. agent team
 
-## 3. 自己写模板，或把跑得好的 run 存成模板
+在 session 里说"开个 agent team，写和审循环，给登录页加验证码"，它会执行：
 
-- **存下来**：run 的图面板右上角点 "save as workflow"（或 `af workflow save "名字"`）。目标会变回 `{{goal}}`，下次换个目标直接用。
-- **自己写**：放在 `~/.agent-flow/workflows/<id>.yaml`（你自己的，所有项目都能用）或 `<仓库>/.agent-flow/workflows/<id>.yaml`（只在这个项目里出现，可以提交进仓库和别人共享）。同名的会覆盖内置的。
-
-```yaml
-name: 实现 + 审查循环
-description: codex 写代码，claude 审查；不通过就打回重写。
-lead: claude                    # 可选
-nodes:
-  - id: code
-    kind: codex                 # claude | codex | omp，默认 claude
-    task: |
-      目标：{{goal}}
-      实现它，跑测试。完成后提交 outcome pass。
-  - id: review
-    kind: claude
-    after: [code]               # 依赖；也可以写 [{ from: code, on: pass }]
-    shared: true                # 只读工作，在集成分支上做，不单独开分支
-    autoAccept: true            # 它交的结果不用 lead 校验
-    task: |
-      审查 {{goal}} 的改动。没问题提交 pass，否则 fail 并写修改意见。
-loops:
-  - { from: review, to: code, on: fail, max: 3 }   # 环：review 交 fail 就回到 code
+```bash
+af playbook list
+af team new --playbook humanize-loop --goal "给登录页加验证码"
 ```
 
-写任务时让一个**没看过这段对话的新 agent** 也能照着做：目标、涉及的文件、怎么验证、可以交哪些 outcome。长的结果让它写到 `$AF_OUT`（这个 run 的输出目录，不在仓库里），用 `--result` 交上来。
+也可以在网页左栏 "+ new" → New team 里开：选目录、剧本、目标、router 用哪种 agent。
+
+- agent-flow 新开一个 workspace，起一个 **router**。router 只路由不干活：按剧本开成员、开工单、把一个成员的结果交给下一个成员、数循环的轮数、在需要你拍板时汇报。
+- 成员之间不直接说话。成员做完写 `result.md`，执行 `af submit`；结果进 router 的队列，由 router 决定下一步交给谁。
+- 在你的 session 的时间轴上，整个 team 是一个框。router 的汇报进你的 session 的队列；网页里开的 team 的汇报进"需要你"。要给 team 加要求：`af tell <那张工单> "再加一个暗色模式"`。
+- 循环有上限：用 `--from` 串起来的工单是一个线程，router 开线程时定最多几轮（默认 3，humanize-loop 是 5）。到上限时 router 开不了新工单，"需要你"里出现一条；要继续就 `af thread max <T> <N>`。
+
+内置剧本：
+
+| id | 做什么 |
+|---|---|
+| `humanize-loop` | 一个写，另一个（不同种类的 agent）独立审；不通过就带着意见回去改，最多 5 轮 |
+| `super-agent` | router 一直开着，每个新要求一张工单，交给合适的成员，做完汇报，等下一个 |
+| `bugfix` | 复现 → 修复（带回归测试）→ 独立验证；不过就打回修复，最多 3 轮 |
+| `compare-plans` | codex、claude 各出一份方案 → 比较定稿 → 实现 → 审查循环 |
+| `research-write-review` | 调研 → 写作 → codex 严格审稿；不过就重写，最多 2 轮 |
+
+自己写剧本：一个 markdown 文件，头部写 `name` 和 `description`，正文用文字写角色和规则。放在 `~/.agent-flow/playbooks/<id>.md`（所有项目可用）或 `<仓库>/.agent-flow/playbooks/<id>.md`（只在这个项目里，可以提交共享）。同名的覆盖内置的。
+
+## 工单文件夹
+
+每张工单在 `~/.agent-flow/teams/<team>/tickets/T3/`：`task.md`（要做什么）、`result.md`（做完的结果）、`files/`（其他交付文件）。成员之间交接的其他文件放 `$AF_OUT`（`~/.agent-flow/teams/<team>/out/`）。所有变化记在 `events.jsonl` 里，server 重启后队列、工单、通知都接得上。
 
 ## 打开文件、交付文档
 
-- **打开文件**：pane 的 ＋ → "open a file, folder or page…"，在弹出的框里点选或搜索，不用手输路径。预览顶栏有 Obsidian / VS Code / Open（默认程序）/ Finder 按钮。
-- **agent 写完文档会自动交给你**：装了 `deliver-document` skill（服务器启动时写进 claude 和 codex 的 skill 目录）。agent 写完报告、文档、幻灯片这类给你看的东西后会执行 `af deliver <文件>`：文件显示在它旁边，Needs you 里出现 "ready · 文件名" 和打开按钮。
-- **设置**（Needs you 旁边的 ⚙）：点一下才打开，或者交付时直接打开；按文件类型选应用：.md 用 Obsidian，文字/代码/LaTeX 用 VS Code，PPT/Word/PDF 用默认程序。
-- **远程机器上的文件**只能用 VS Code 打开（Remote-SSH，改的就是远程原文件）。
+- **打开文件**：pane 的 ＋ → "open a file, folder or page…"。预览顶栏有 Obsidian / VS Code / Open / Finder 按钮。
+- **agent 写完文档会交给你**：`deliver-document` skill 让 agent 执行 `af deliver <文件>`，文件显示在它旁边，"需要你"里出现打开按钮。⚙ 里可以设成直接打开、按文件类型选应用。
+- 远程机器上的文件只能用 VS Code（Remote-SSH）打开。
 
 ## 常用命令速查
 
 | 做什么 | 命令 |
 |---|---|
-| 让当前 session 当 lead | `af here` |
-| 加节点 | `af graph add <id> --kind codex --task "…" [--after a,b] [--shared] [--auto-accept]` |
-| 加环 | `af graph link review code --on fail --max 3` |
-| 看图 | `af graph show` |
-| 看某个 agent 在干嘛 | `af read <agent>` |
-| 看结果 / 通过 / 打回 | `af inbox` · `af diff <node>` · `af graph accept <node>` · `af graph reject <node> --reason "…"` |
-| 改图 | `af graph edit / rm / cancel / retry <node>` |
-| 结束 | `af run stop` |
-| 交付一份文档给用户 | `af deliver <文件> --title "…"` |
-| 在应用里打开文件 | `af open <文件> --app obsidian\|vscode\|default\|finder` |
-| 改 workspace 名字 | 左栏双击名字（或 ⋯ → Rename…），或 `af workspace rename <workspace> "名字"` |
-| 完整说明 | `af guide lead` |
+| 派一件活 | `af task <claude\|codex\|omp\|gemini> "…" [--name N] [--worktree]` |
+| 给已有的 session 更多活 | `af task --to <名字> "…"` · `af tell <工单\|名字> "…"` |
+| 看 / 取队列 | `af queue` · `af queue take` |
+| 回答成员屏幕上的问题 | `af answer <工单\|名字> <选项号> [--text "…"]` |
+| 看某个成员在干嘛 | `af status <名字>` · `af read <名字>` |
+| 工单 | `af tickets` · `af ticket show <T>` |
+| 开 team | `af playbook list` · `af team new --goal "…" [--playbook P]` |
+| router 用 | `af ticket open/close` · `af reply <seq>` · `af report "…" [--done]` · `af thread max` · `af queue done <seq>` |
+| 成员用 | `af submit --status ready\|blocked\|failed\|dropped --note "…"` · `af progress` · `af ask` |
+| 停掉 team | `af team stop [<team>]`，或关掉它的 workspace |
+| 交付文档 / 打开文件 | `af deliver <文件> --title "…"` · `af open <文件> [--app vscode\|obsidian\|default\|finder]` |
+| 完整说明 | `af guide router` · `af guide member` · `af help` |

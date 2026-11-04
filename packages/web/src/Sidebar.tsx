@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Attention, HPane, HerdrModel, RunState, RunSummary } from "@af/core";
+import type { Attention, HPane, HerdrModel, TeamState, TeamSummary } from "@af/core";
+import { isApproval } from "@af/core";
 import { APP_LABEL, api, failed, notify as notifyUser, useStore } from "./store";
 import { OpenButtons } from "./Viewers";
 
 const KIND_LABEL: Record<Attention["kind"], string> = {
-  blocked: "waiting for an answer",
-  startup_blocked: "stuck starting",
-  merge_conflict: "merge conflict",
-  loop_limit: "loop limit",
-  agent_exited: "agent stopped",
-  no_submit: "did not submit",
-  lead: "message for you",
+  approval: "needs your approval",
+  loop_limit: "round limit reached",
+  exited: "member stopped",
+  startup: "did not start",
+  unhandled: "router left items",
+  notice_ignored: "queue not read",
+  report: "team report",
+  error: "error",
 };
 
 const statusDot = (s: string) =>
@@ -18,26 +20,26 @@ const statusDot = (s: string) =>
 
 export function Sidebar({
   herdr,
-  runs,
-  run,
+  teams,
+  team,
   hidden,
   selectedWs,
   onSelectWs,
   onSelectPane,
-  onSelectRun,
+  onSelectTeam,
   onNew,
   onNeed,
   seen,
   onSeen,
 }: {
   herdr?: HerdrModel;
-  runs: RunSummary[];
-  run?: RunState;
+  teams: TeamSummary[];
+  team?: TeamState;
   hidden: Set<string>;
   selectedWs?: string;
   onSelectWs: (id: string) => void;
   onSelectPane: (workspaceId: string, tabId: string, paneId: string) => void;
-  onSelectRun: (runId: string) => void;
+  onSelectTeam: (teamId: string) => void;
   onNew: (machine?: string) => void;
   onNeed: (n: Need) => void;
   /** When the user last saw each pane (statusAt of the "done" they saw). */
@@ -48,14 +50,16 @@ export function Sidebar({
   const [menu, setMenu] = useState<string>();
   const [renaming, setRenaming] = useState<string>();
   const [adding, setAdding] = useState(false);
-  const runOf = new Map(runs.filter((r) => r.workspace).map((r) => [r.workspace!, r]));
+  // ◆ on a workspace: its router team, else a team a session in it leads (with work handed out)
+  const teamOf = new Map<string, TeamSummary>();
+  for (const r of [...teams].reverse()) if (r.workspace && !r.stopped && (r.mode === "router" || r.tickets > 0) && (!teamOf.has(r.workspace) || r.mode === "router")) teamOf.set(r.workspace, r);
   const liveWs = new Set(herdr?.workspaces.map((w) => w.id));
-  const pastRuns = runs.filter((r) => !r.workspace || !liveWs.has(r.workspace));
+  const pastTeams = teams.filter((r) => (!r.workspace || !liveWs.has(r.workspace)) && r.tickets > 0);
   const toggle = (id: string, def: boolean) => setCollapsed((c) => ({ ...c, [id]: !(c[id] ?? def) }));
 
   return (
     <aside className="side">
-      <NeedsYou herdr={herdr} runs={runs} hidden={hidden} seen={seen} onSeen={onSeen} onNeed={onNeed} />
+      <NeedsYou herdr={herdr} teams={teams} hidden={hidden} seen={seen} onSeen={onSeen} onNeed={onNeed} />
 
       <div className="tree">
         <div className="section-title" style={{ padding: "10px 14px 6px" }}>
@@ -127,7 +131,7 @@ export function Sidebar({
                 workspaces.length > 0 && <div className="tree-note">Last known workspaces; reconnecting{m.error ? `: ${m.error}` : "…"}</div>}
               {open &&
                 workspaces.map((w) => {
-                  const r = runOf.get(w.id);
+                  const r = teamOf.get(w.id);
                   const panes = herdr.panes.filter((p) => p.workspaceId === w.id);
                   const agents = panes.filter((p) => p.agent);
                   return (
@@ -155,7 +159,7 @@ export function Sidebar({
                             {w.label}
                           </span>
                         )}
-                        {r && <span className="run-tag" title={`agent-flow run ${r.id}`}>◆ {r.id}</span>}
+                        {r && <span className="run-tag" title={r.mode === "router" ? `agent team ${r.name} (${r.id})` : `a session here hands out work (team ${r.id})`}>{r.mode === "router" ? "◆" : "◇"} {r.mode === "router" ? r.name : r.tickets}</span>}
                         <span className="row-gap" />
                         <span className="row-actions" onClick={(e) => e.stopPropagation()}>
                           <RowMenu id={`w:${w.id}`} open={menu} setOpen={setMenu}>
@@ -168,7 +172,7 @@ export function Sidebar({
                               className="item danger"
                               onClick={() => {
                                 const what = [agents.length ? `${agents.length} agent${agents.length > 1 ? "s" : ""}` : "", `${panes.length} pane${panes.length > 1 ? "s" : ""}`].filter(Boolean).join(", ");
-                                if (confirm(`Close workspace "${w.label}" on ${m.label}?\n\nThis stops everything running in it (${what})${r ? `, and stops run ${r.id}` : ""}.`))
+                                if (confirm(`Close workspace "${w.label}" on ${m.label}?\n\nThis stops everything running in it (${what})${r ? `, and stops team ${r.name}` : ""}.`))
                                   api("POST", "/workspace/close", { workspace: w.id }).catch(failed("That did not work"));
                               }}
                             >
@@ -184,16 +188,16 @@ export function Sidebar({
             </div>
           );
         })}
-        {pastRuns.length > 0 && (
+        {pastTeams.length > 0 && (
           <>
             <div className="section-title" style={{ padding: "14px 14px 6px" }}>
-              <span>Past runs</span>
+              <span>Past teams</span>
             </div>
-            {pastRuns.map((r) => (
-              <div key={r.id} className={`tree-row ws ${run?.meta?.id === r.id ? "active" : ""}`} onClick={() => onSelectRun(r.id)}>
+            {pastTeams.slice(0, 30).map((r) => (
+              <div key={r.id} className={`tree-row ws ${team?.meta?.id === r.id ? "active" : ""}`} onClick={() => onSelectTeam(r.id)}>
                 <span className="caret">·</span>
                 <span className="dot stopped" />
-                <span className="name mono">{r.id}</span>
+                <span className="name">{r.mode === "router" ? `◆ ${r.name}` : r.name}</span>
                 <span className="meta">{r.cwd.split("/").at(-1)}</span>
               </div>
             ))}
@@ -313,8 +317,7 @@ export interface Need {
   at: string;
   paneId?: string;
   workspace?: string;
-  runId?: string;
-  node?: string;
+  teamId?: string;
   attentionId?: string;
   /** For "finished": the status time to mark seen. */
   statusAt?: string;
@@ -322,14 +325,14 @@ export interface Need {
 
 function NeedsYou({
   herdr,
-  runs,
+  teams,
   hidden,
   seen,
   onSeen,
   onNeed,
 }: {
   herdr?: HerdrModel;
-  runs: RunSummary[];
+  teams: TeamSummary[];
   hidden: Set<string>;
   seen: Record<string, string>;
   onSeen: (paneId: string, at: string) => void;
@@ -370,37 +373,40 @@ function NeedsYou({
   }, [blockedKey]);
 
   const needs: Need[] = [];
-  const covered = new Set<string>();
-  for (const r of runs) {
+  // panes of team members and routers: their manager deals with their results and their questions about the task
+  const managed = new Set<string>();
+  for (const r of teams) {
+    if (r.stopped) continue;
+    for (const p of r.memberPanes) managed.add(p);
+    if (r.mode === "router" && r.managerPane) managed.add(r.managerPane);
+  }
+  for (const r of teams) {
     if (r.stopped) continue;
     for (const a of r.needs ?? []) {
-      if (a.paneId && (a.kind === "blocked" || a.kind === "startup_blocked")) covered.add(a.paneId);
       needs.push({
         key: `a:${r.id}:${a.id}`,
         kind: "attention",
-        label: `${KIND_LABEL[a.kind]}${a.agent ? ` · ${a.agent}` : a.node ? ` · ${a.node}` : ""}`,
-        where: `${wsLabel(r.workspace) || r.cwd.split("/").at(-1)} · run ${r.id}`,
+        label: `${KIND_LABEL[a.kind] ?? a.kind}${a.member ? ` · ${a.member}` : a.ticket ? ` · ${a.ticket}` : ""}`,
+        where: `${wsLabel(r.workspace) || r.cwd.split("/").at(-1)} · ${r.mode === "router" ? `team ${r.name}` : `${r.name}'s tasks`}`,
         text: a.text,
         at: a.at,
         paneId: a.paneId,
         workspace: r.workspace,
-        runId: r.id,
-        node: a.node?.split("#")[0],
+        teamId: r.id,
         attentionId: a.id,
       });
     }
   }
   for (const p of blocked) {
-    if (covered.has(p.id)) continue;
     const q = p.asking || questions[qKey(p)];
+    // a member's question about its task goes to its manager; a permission prompt is always yours
+    if (managed.has(p.id) && q && !isApproval(q)) continue;
     needs.push({ key: `b:${p.id}`, kind: "blocked", label: `waiting for an answer · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: q || p.title || "Open it to answer.", at: p.statusAt ?? "", paneId: p.id, workspace: p.workspaceId });
   }
-  const runWorkspaces = new Map(runs.filter((r) => !r.stopped && r.workspace).map((r) => [r.workspace!, r]));
   for (const p of herdr?.panes ?? []) {
     if (!p.agent || p.agentStatus !== "done" || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
     if ((seen[p.id] ?? "") >= p.statusAt) continue;
-    const r = runWorkspaces.get(p.workspaceId);
-    if (r && r.leadPane !== p.id) continue; // a run's workers report to its lead
+    if (managed.has(p.id)) continue; // members and routers report to whoever manages them
     if (deliveries.some((d) => !d.done && d.pane === p.id)) continue; // its document is listed: that says it finished
     needs.push({ key: `f:${p.id}`, kind: "finished", label: `finished · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: p.title ?? "", at: p.statusAt, paneId: p.id, workspace: p.workspaceId, statusAt: p.statusAt });
   }
@@ -496,7 +502,7 @@ function NeedsYou({
                       if (n.agentPane && n.statusAt) onSeen(n.agentPane, n.statusAt);
                       api("POST", "/deliver/done", { id: n.deliveryId, run: undefined }).catch(failed("That did not work"));
                     }
-                    else api("POST", "/attention/dismiss", { id: n.attentionId, run: n.runId }).catch(failed("That did not work"));
+                    else api("POST", "/attention/dismiss", { id: n.attentionId, team: n.teamId }).catch(failed("That did not work"));
                   }}
                 >
                   ✕

@@ -6,7 +6,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentKind } from "@af/core";
 
-export type Role = "lead" | "worker";
+/** The protocol an agent is started with: a team member (mode 2) or a router. */
+export type Role = "member" | "router";
 
 export interface AgentConfig {
   /** Extra flags per kind, appended after the injection flags. From ~/.agent-flow/config.json. */
@@ -27,9 +28,30 @@ export function writeClaudeSettings(home: string, sock: string, af: string) {
   return file;
 }
 
-/** Flags for claude agents agent-flow starts outside runs. */
+/** Flags for claude agents agent-flow starts outside teams (a split in the UI). */
 export function claudeExtraArgs(config: AgentConfig, session: string) {
   return ["--session-id", session, ...(config.claudeSettings ? ["--settings", config.claudeSettings] : [])];
+}
+
+/**
+ * Flags for a plain session that works on its own: a mode-1 member (af task). No protocol: it is an ordinary
+ * session that gets its task as the first message. The user's extra flags apply (claude auto mode, gemini YOLO),
+ * since nobody watches it approve each step.
+ */
+export function plainArgs(kind: AgentKind, config: AgentConfig, session?: string): string[] {
+  const extra = config.args[kind] ?? [];
+  switch (kind) {
+    case "claude":
+      return [...(session ? ["--session-id", session] : []), ...(config.claudeSettings ? ["--settings", config.claudeSettings] : []), ...extra];
+    case "codex":
+      // network_access: the af CLI talks to the server over a Unix socket, which codex's sandbox blocks otherwise
+      return ["-c", "check_for_update_on_startup=false", "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];
+    case "omp":
+      return [...extra];
+    case "gemini":
+      // no --session-id (see launchArgs)
+      return [...extra];
+  }
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
@@ -96,10 +118,4 @@ export function writeCodexProfile(role: Role, protocolFile: string, codexHome = 
   return name;
 }
 
-/** The line typed into an agent's terminal to wake it up. Matches what the protocols tell agents to look for. */
-export function noticeText(count: number, latest: { id: string; from: string; node?: string }, af = "af") {
-  const about = latest.node ? ` (node ${latest.node})` : "";
-  return count === 1
-    ? `[agent-flow] New message ${latest.id} from ${latest.from}${about}. Run: ${af} inbox`
-    : `[agent-flow] ${count} new messages, latest ${latest.id} from ${latest.from}${about}. Run: ${af} inbox`;
-}
+
