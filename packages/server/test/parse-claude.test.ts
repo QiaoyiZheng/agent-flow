@@ -207,7 +207,7 @@ describe("slash commands, skills, bash mode", () => {
     ]);
     expect(view(ops)).toEqual([
       { kind: "notice", text: "/fork", detail: "session waiting for a prompt · Fix it · 74b8afff" },
-      { kind: "notice", text: "/effort max", detail: "Set effort level to max (this session only)" },
+      { kind: "notice", text: "Set effort level to max (this session only)" }, // a model or effort change says what it set
       { kind: "notice", text: "/rename x", detail: "Session renamed to x" },
     ]);
   });
