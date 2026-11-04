@@ -140,6 +140,11 @@ export interface HPane {
    * some dialogs. Its text also tells two dialogs in a row apart.
    */
   asking?: string;
+  /**
+   * Background tasks the agent still waits on after its turn ended (claude's Monitors and background commands):
+   * while there are any, "done" is not finished. Absent: none (or not known: only claude on this Mac).
+   */
+  background?: number;
 }
 
 export interface HLayout {

@@ -890,3 +890,5 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .seg button.on { background: var(--s-needs); color: #1a1208; font-weight: 600; }
 .seg button:hover:not(.on):not(:disabled) { background: var(--bg-3); color: var(--text); }
 .menu-current { margin-left: 8px; font-size: 10.5px; color: var(--s-accepted); border: 1px solid rgba(79, 180, 134, 0.4); border-radius: 4px; padding: 0 5px; vertical-align: 1px; }
+.pane-head .st.st-background { color: var(--s-running); }
+.agent-status.background { color: var(--text-2); }

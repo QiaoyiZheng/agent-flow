@@ -404,7 +404,8 @@ function NeedsYou({
     needs.push({ key: `b:${p.id}`, kind: "blocked", label: `waiting for an answer · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: q || p.title || "Open it to answer.", at: p.statusAt ?? "", paneId: p.id, workspace: p.workspaceId });
   }
   for (const p of herdr?.panes ?? []) {
-    if (!p.agent || p.agentStatus !== "done" || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
+    // waiting on background work (a Monitor, a background command) is not finished
+    if (!p.agent || p.agentStatus !== "done" || p.background || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
     if ((seen[p.id] ?? "") >= p.statusAt) continue;
     if (managed.has(p.id)) continue; // members and routers report to whoever manages them
     if (deliveries.some((d) => !d.done && d.pane === p.id)) continue; // its document is listed: that says it finished

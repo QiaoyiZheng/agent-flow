@@ -115,3 +115,31 @@ describe("skills written on server start", () => {
     expect(installSkill("/af", bare).map((f) => f.slice(bare.length))).toEqual(["/.claude/skills/agent-flow/SKILL.md", "/.claude/skills/deliver-document/SKILL.md"]);
   });
 });
+
+import { openPaths, runningTasks } from "../src/background.ts";
+
+describe("background work: open output files in claude's task folder", () => {
+  test("lsof's -Fn lines are the open paths", () => {
+    expect(openPaths("p41630\nf1\nn/private/tmp/claude-501/p/s/tasks/b1.output\nf2\nn/private/tmp/claude-501/p/s/tasks/b1.output\np41631\n")).toEqual([
+      "/private/tmp/claude-501/p/s/tasks/b1.output",
+      "/private/tmp/claude-501/p/s/tasks/b1.output",
+    ]);
+  });
+  test.if(!!Bun.which("lsof"))("a running command holding its output file counts once; a finished one does not count", async () => {
+    const dir = join(tmp(), "tasks");
+    mkdirSync(dir);
+    const file = join(dir, "bprobe.output");
+    writeFileSync(file, "");
+    // exec: the shell becomes the sleep, so killing it ends what holds the file (a child left behind would rightly count)
+    const child = Bun.spawn(["sh", "-c", `exec >>'${file}' 2>&1; exec sleep 30`]);
+    await Bun.sleep(300);
+    try {
+      expect((await runningTasks([dir])).get(dir)).toBe(1); // stdout and stderr: one task
+    } finally {
+      child.kill();
+    }
+    await child.exited;
+    expect((await runningTasks([dir])).get(dir)).toBe(0);
+    expect((await runningTasks([])).size).toBe(0);
+  });
+});

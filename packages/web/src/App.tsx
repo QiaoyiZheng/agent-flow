@@ -131,7 +131,7 @@ export function App() {
   }, []);
   const tabAgents = tabPanes.filter((p) => p.agent);
   const looking = present && !creating && !pastTeam ? tabAgents.filter((p) => p.id === focusedPane || tabAgents.length === 1) : [];
-  const unseen = looking.filter((p) => p.agentStatus === "done" && p.statusAt && (seen[p.id] ?? "") < p.statusAt);
+  const unseen = looking.filter((p) => p.agentStatus === "done" && !p.background && p.statusAt && (seen[p.id] ?? "") < p.statusAt);
   const unseenKey = unseen.map((p) => `${p.id}@${p.statusAt}`).join(",");
   useEffect(() => {
     if (unseen.length) markSeen(unseen.map((p) => [p.id, p.statusAt!]));

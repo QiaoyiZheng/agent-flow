@@ -103,12 +103,13 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     icon = "●";
     title = `${runAgent.name}${paneId === ctx.leadPane && runAgent.name !== "lead" ? " · lead" : ""}`;
     color = kindColor(runAgent.kind);
-    status = p?.agentStatus;
+    status = p?.background && (p.agentStatus === "done" || p.agentStatus === "idle") ? "background" : p?.agentStatus;
   } else if (p?.agent) {
     icon = "●";
     title = p.agentName ?? p.label ?? p.agent;
     color = kindColor(p.agent);
-    status = p.agentStatus;
+    // done/idle while it waits on background work: still at work
+    status = p.background && (p.agentStatus === "done" || p.agentStatus === "idle") ? "background" : p.agentStatus;
   } else if (p?.label) title = p.label;
 
   return (
@@ -131,7 +132,11 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
           {title}
         </span>
         {(runAgent || p?.agent) && <span className="kind" style={{ color }}>{runAgent?.kind ?? p?.agent}</span>}
-        {status && <span className={`st st-${status}`}>{status}</span>}
+        {status && (
+          <span className={`st st-${status}`} title={status === "background" ? `${p?.background} background task${p?.background === 1 ? "" : "s"} still running (a Monitor or a background command): the turn ended, the work did not` : undefined}>
+            {status === "background" ? `background · ${p?.background}` : status}
+          </span>
+        )}
         <span className="spacer" />
         {renderable && (
           <span className="view-toggle" title="Rendered output or the raw terminal">
@@ -190,7 +195,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         {view ? (
           isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} paneId={paneId} />
         ) : renderable && !raw ? (
-          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} focused={focused} onForked={(id) => ctx.onFocus(id)} />
+          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} background={p?.background} focused={focused} onForked={(id) => ctx.onFocus(id)} />
         ) : (
           <Terminal paneId={paneId} autoFocus={focused} />
         )}

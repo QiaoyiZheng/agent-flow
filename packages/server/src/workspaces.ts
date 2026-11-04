@@ -15,6 +15,7 @@ import { composePrompt, saveLocal, stamp } from "./attachments.ts";
 import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
 import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from "./controls.ts";
+import { claudeSession, runningTasks, taskDir } from "./background.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
@@ -31,6 +32,8 @@ export interface WorkspacesOptions {
   /** Tell the user about connection trouble. */
   notify?: (level: "error" | "warn" | "info", source: string, text: string, detail?: string) => void;
   now?: () => string;
+  /** How background work is found (see background.ts); tests replace it. */
+  background?: { session: (pid: number) => string | undefined; dir: (session: string) => string | undefined; count: (dirs: string[]) => Promise<Map<string, number>> };
   /** Screen checks (150 ms apart) for a steered message to show up as waiting (tests make it short). */
   steerPolls?: number;
   /** How long a gemini prompt is watched for staying unsent in its box (tests make it short). */
@@ -59,6 +62,10 @@ interface Machine {
   troubled?: boolean;
   /** Each pane's agent status and when it changed to it (undefined: it had it when we first looked). */
   since?: Map<string, { status: string; at?: string }>;
+  /** Background tasks each claude pane still waits on (see background.ts), and when each was last checked. */
+  background?: Map<string, { n: number; at: number }>;
+  /** When each pane last became active (working, or waiting on background work), for turn ends. */
+  activeSince?: Map<string, number>;
   /** Panes showing a question Herdr does not report (see checkAsking), and when they were last checked. */
   asking?: Map<string, string>;
   askingAt?: number;
@@ -72,9 +79,13 @@ const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
  * working > done > idle. Herdr's own workspace status ranks "done" (finished, not looked at yet) above "working", so
  * a workspace with one finished agent showed "done" while another agent in it was still working.
  */
-const STATUS_RANK = ["blocked", "working", "done", "idle", "unknown"];
+const BACKGROUND = { session: (pid: number) => claudeSession(pid), dir: (sid: string) => taskDir(sid), count: runningTasks };
+
+/** done/idle while background work runs is "background" (still at work, not finished). */
+export const effectiveStatus = (status: string, background: number) => ((status === "done" || status === "idle") && background > 0 ? "background" : status);
+const STATUS_RANK = ["blocked", "working", "background", "done", "idle", "unknown"];
 export function workspaceStatus(panes: HPane[], herdrStatus: string) {
-  const statuses = panes.filter((p) => p.agent).map((p) => (p.asking ? "blocked" : p.agentStatus));
+  const statuses = panes.filter((p) => p.agent).map((p) => (p.asking ? "blocked" : effectiveStatus(p.agentStatus, p.background ?? 0) === "background" ? "working" : p.agentStatus));
   if (!statuses.length) return herdrStatus;
   const rank = (st: string) => {
     const i = STATUS_RANK.indexOf(st);
@@ -337,6 +348,53 @@ export class Workspaces {
    * during its folder-trust dialog and "working" during its ask_user dialog; Herdr misses some claude dialogs too).
    * Every 2.5 s here, 6 s on remote machines; a screen read is one socket call.
    */
+  /**
+   * How many background tasks each claude pane waits on. Checked when a pane's turn ends (working → done/idle) or
+   * is seen first, and every 3 s while it waits on some: a background task starts only during a turn. Pane ids
+   * here are Herdr's own (unprefixed), as in the snapshot.
+   */
+  private async checkBackground(m: Machine, panes: { id: string; agent?: string; agentStatus: string }[]) {
+    const state = (m.background ??= new Map());
+    const prev = m.since;
+    const due = panes.filter((x) => {
+      if (x.agent !== "claude" || (x.agentStatus !== "done" && x.agentStatus !== "idle")) return false;
+      const was = prev?.get(x.id)?.status;
+      const st = state.get(x.id);
+      return !st || was === "working" || (st.n > 0 && Date.now() - st.at >= 3000);
+    });
+    for (const x of panes) if (x.agent !== "claude" || x.agentStatus === "working" || x.agentStatus === "blocked") state.delete(x.id);
+    for (const id of state.keys()) if (!panes.some((x) => x.id === id)) state.delete(id);
+    if (due.length) {
+      const dirs = new Map<string, string>();
+      await Promise.all(
+        due.map(async (x) => {
+          const procs = await m.backend!.processes(x.id).catch(() => []);
+          const pid = procs.find((q) => /(^|\/)claude(\.exe)?$/.test(q.argv[0] ?? ""))?.pid ?? procs.find((q) => q.argv.some((a) => /claude/.test(a)))?.pid;
+          const how = this.opts.background ?? BACKGROUND;
+          const sid = pid ? how.session(pid) : undefined;
+          const dir = sid ? (this.taskDirs.get(sid) ?? how.dir(sid)) : undefined;
+          if (sid && dir) this.taskDirs.set(sid, dir);
+          if (dir) dirs.set(x.id, dir);
+          else state.set(x.id, { n: 0, at: Date.now() });
+        }),
+      );
+      const counts = await (this.opts.background ?? BACKGROUND).count([...new Set(dirs.values())]);
+      for (const [pane, dir] of dirs) state.set(pane, { n: counts.get(dir) ?? 0, at: Date.now() });
+    }
+    return new Map([...state].map(([k, v]) => [k, v.n]));
+  }
+  private taskDirs = new Map<string, string>();
+
+  /**
+   * The agent's work has really ended: it is not working, not asking anything, not just given a prompt it has
+   * not started on, and not waiting on background work (a Monitor, a background command). For teams and anything
+   * else that waits for an agent to finish.
+   */
+  settled(pane: string) {
+    const p = this.model.panes.find((x) => x.id === pane);
+    return !!p && !!p.agent && !p.asking && !p.background && (p.agentStatus === "done" || p.agentStatus === "idle") && !this.busy(p);
+  }
+
   private async checkAsking(m: Machine) {
     const every = m.meta.local ? 2500 : 6000;
     if (m.askingBusy || Date.now() - (m.askingAt ?? 0) < every) return;
@@ -393,28 +451,41 @@ export class Workspaces {
       for (const id of Object.keys(m.sigs)) if (!snap.tabs.some((t) => t.id === id)) delete m.sigs[id];
       m.workspaces = snap.workspaces.map((w) => ({ ...w, machine: key, id: p(w.id), activeTabId: w.activeTabId ? p(w.activeTabId) : undefined }));
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
+      // background work claude still waits on after its turn ended (local only: see background.ts)
+      const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : new Map<string, number>();
       // when each agent's status changed: "finished" in Needs you means finished after the user last looked.
-      // Saved across restarts: a status that changed while the server was down changed now.
+      // Saved across restarts: a status that changed while the server was down changed now. The status tracked is
+      // the effective one: done/idle while background work runs counts as "background", not done.
       const since = (m.since ??= new Map(Object.entries(this.savedStatus[key] ?? {})));
+      const active = (m.activeSince ??= new Map());
       const now = new Date().toISOString();
       let changed = false;
       for (const x of snap.panes) {
+        const eff = effectiveStatus(x.agentStatus, bg.get(x.id) ?? 0);
         const was = since.get(x.id);
-        if (!was || was.status !== x.agentStatus) {
-          since.set(x.id, { status: x.agentStatus, at: was ? now : undefined });
-          changed = true;
-          // a turn ended (working → done/idle): tell who wants to know, with when it started
-          if (was?.status === "working" && x.agent && (x.agentStatus === "done" || x.agentStatus === "idle"))
-            for (const l of this.turnListeners) l({ pane: p(x.id), machine: key, agent: x.agent, cwd: x.cwd, started: was.at ? Date.parse(was.at) : undefined, ended: Date.parse(now) });
+        if (eff === "working" || eff === "background") {
+          if (!active.has(x.id)) active.set(x.id, was && was.status !== eff ? Date.now() : (Date.parse(was?.at ?? "") || Date.now()));
         }
+        if (!was || was.status !== eff) {
+          since.set(x.id, { status: eff, at: was ? now : undefined });
+          changed = true;
+          // the work ended (working or waiting on background work → done/idle): tell who wants to know, with when it
+          // began. Wake-ups between monitor events (background → working → background) are not ends.
+          if ((was?.status === "working" || was?.status === "background") && x.agent && (eff === "done" || eff === "idle")) {
+            const started = active.get(x.id);
+            for (const l of this.turnListeners) l({ pane: p(x.id), machine: key, agent: x.agent, cwd: x.cwd, started, ended: Date.parse(now) });
+          }
+        }
+        if (eff !== "working" && eff !== "background") active.delete(x.id);
       }
       for (const id of since.keys())
         if (!snap.panes.some((x) => x.id === id)) {
           since.delete(id);
+          active.delete(id);
           changed = true;
         }
       if (changed) this.saveStatus(key, since);
-      m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at, asking: m.asking?.get(p(x.id)) || undefined }));
+      m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at, asking: m.asking?.get(p(x.id)) || undefined, ...(bg.get(x.id) ? { background: bg.get(x.id) } : {}) }));
       m.workspaces = m.workspaces.map((ws) => ({ ...ws, agentStatus: workspaceStatus(m.panes.filter((x) => x.workspaceId === ws.id), ws.agentStatus) }));
       void this.checkAsking(m);
       m.layouts = layouts;

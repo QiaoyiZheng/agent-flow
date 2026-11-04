@@ -146,7 +146,7 @@ function segments(entries: ChatEntry[]): Segment[] {
   return out;
 }
 
-export function AgentView({ paneId, agent, status, focused, onForked }: { paneId: string; agent: string; status?: string; focused: boolean; onForked?: (paneId: string) => void }) {
+export function AgentView({ paneId, agent, status, background, focused, onForked }: { paneId: string; agent: string; status?: string; background?: number; focused: boolean; onForked?: (paneId: string) => void }) {
   const [source, setSource] = useState<ChatSource | null | undefined>(undefined);
   const [reason, setReason] = useState<string>();
   const log = useRef(new Log());
@@ -460,9 +460,23 @@ export function AgentView({ paneId, agent, status, focused, onForked }: { paneId
           <Terminal key="strip" paneId={paneId} autoFocus={focused && blocked} strip={{ fullHeight: height, viewHeight: stripH }} />
         </div>
       )}
-      <div className={`agent-status ${status ?? ""}`}>
-        <span className={`live-dot ${status ?? ""}`} />
-        <span>{blocked ? (menu ? "waiting for your choice" : overlay ? "the agent shows a notice above" : "waiting for your answer in the terminal") : status === "working" ? "working…" : status === "done" ? "done" : "idle"}</span>
+      <div className={`agent-status ${status ?? ""} ${background && status !== "working" ? "background" : ""}`}>
+        <span className={`live-dot ${background && status !== "working" ? "working" : (status ?? "")}`} />
+        <span>
+          {blocked
+            ? menu
+              ? "waiting for your choice"
+              : overlay
+                ? "the agent shows a notice above"
+                : "waiting for your answer in the terminal"
+            : status === "working"
+              ? "working…"
+              : background
+                ? `waiting on ${background} background task${background === 1 ? "" : "s"} · you can still send it messages`
+                : status === "done"
+                  ? "done"
+                  : "idle"}
+        </span>
         <MetaChips meta={log.current.meta} />
         <span className="spacer" />
         {status === "working" && (

@@ -109,6 +109,58 @@ describe("workspaces: mirror Herdr", () => {
     expect(workspaceStatus([], "unknown")).toBe("unknown"); // no agents: Herdr's value
   });
 
+  test("waiting on background work is not finished: turn ends, status times and settled() wait for it", async () => {
+    const home = tmp("af-ws-home-");
+    const backend = new FakeBackend();
+    const ws = await backend.createWorkspace("proj", home);
+    await backend.startAgent("t1", "claude", ws.paneId, []);
+    backend.procs.set(ws.paneId, [{ pid: 4242, argv: ["claude", "--session-id", "s"] }]);
+    let running = 0; // background tasks holding their output files open
+    const checks: string[][] = [];
+    const w = new Workspaces({
+      home,
+      backend,
+      paneEnv: () => ({}),
+      background: { session: (pid) => (pid === 4242 ? "sid-1" : undefined), dir: (sid) => `/tmp/claude-1/x/${sid}/tasks`, count: async (dirs) => (checks.push(dirs), new Map(dirs.map((d) => [d, running]))) },
+    });
+    await w.start(60_000);
+    const ends: { started?: number; ended: number }[] = [];
+    w.onTurnEnd((t) => ends.push(t));
+    const pane = () => w.model.panes.find((p) => p.id === ws.paneId)!;
+    const step = async (status: "working" | "done", bg?: number) => {
+      if (bg !== undefined) running = bg;
+      backend.set("t1", status);
+      (w as any).machines.get("local").background?.forEach((v: any) => (v.at = 0)); // the 3 s recheck is due
+      await w.refresh();
+    };
+    await step("working");
+    const t0 = Date.now();
+    await step("done", 1); // T1 starts its experiment under a Monitor and ends its turn
+    expect(pane()).toMatchObject({ agentStatus: "done", background: 1 });
+    expect(ends).toEqual([]); // not finished
+    expect(w.settled(ws.paneId)).toBe(false);
+    expect(w.model.workspaces.find((x) => x.id === ws.workspaceId)!.agentStatus).toBe("working");
+    const waitingSince = pane().statusAt;
+    await step("working"); // a monitor event wakes it for a short turn
+    await step("done", 1); // and it waits again
+    expect(ends).toEqual([]);
+    await Bun.sleep(5);
+    await step("done", 0); // the experiment ends: the monitor's file is closed
+    expect(pane().background).toBeUndefined();
+    expect(ends.length).toBe(1); // one end, at the real end, spanning the whole job
+    expect(ends[0]!.started! <= t0).toBe(true);
+    expect(pane().statusAt! > waitingSince!).toBe(true); // a fresh time: "finished" in Needs you comes now
+    expect(w.settled(ws.paneId)).toBe(true);
+    // a plain turn without background work ends at once; a finished pane is not checked again and again
+    await step("working");
+    const n = checks.length;
+    await step("done", 0);
+    expect(ends.length).toBe(2);
+    await w.refresh();
+    await w.refresh();
+    expect(checks.length).toBe(n + 1);
+  });
+
   test("only tabs whose layout changed are exported again", async () => {
     const { backend, w, ws } = await setup();
     const t2 = await w.newTab(ws.workspaceId);
