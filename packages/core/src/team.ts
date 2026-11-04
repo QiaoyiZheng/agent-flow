@@ -101,6 +101,8 @@ export interface Ticket {
   turns: number;
   /** When a follow-up (af tell) last put it back to work. */
   reopenedAt?: string;
+  /** Times the member went on working by itself after the ticket was closed (its result was taken): reopened. */
+  resumed?: number;
   progress?: string;
   report?: TicketReport;
   outcome?: CloseOutcome;
@@ -173,6 +175,7 @@ export type TeamEvent = (
   | E<"ticket.progress", { id: string; text: string }>
   | E<"ticket.submitted", { id: string; report: TicketReport }>
   | E<"ticket.reopened", { id: string }>
+  | E<"ticket.resumed", { id: string }>
   | E<"ticket.closed", { id: string; outcome: CloseOutcome; note?: string }>
   | E<"thread.max", { thread: string; max: number }>
   | E<"queue.added", { item: QueueItem }>
@@ -261,6 +264,20 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
         k.turns++;
         k.reopenedAt = ev.at;
         k.updatedAt = ev.at;
+      }
+      break;
+    }
+    case "ticket.resumed": {
+      // the member went on after its result was taken (a background task woke it, or someone typed to it): the
+      // ticket is open again, so what it says next reaches the manager too
+      const k = t(ev.id);
+      if (k && k.status === "closed") {
+        Object.assign(k, { status: "working", reopenedAt: ev.at, updatedAt: ev.at, resumed: (k.resumed ?? 0) + 1 });
+        k.turns++;
+        delete k.outcome;
+        delete k.closeNote;
+        delete k.closedAt;
+        delete k.report;
       }
       break;
     }

@@ -893,10 +893,14 @@ export class Teams {
       turn: t.state.meta!.mode === "direct" ? "finished" : "finished a turn without af submit",
       report: "report",
     };
+    const again = (q: QueueItem) => {
+      const k = q.ticket ? t.state.tickets[q.ticket] : undefined;
+      return k?.resumed && (q.kind === "turn" || q.kind === "submit") && Date.parse(q.at) >= Date.parse(k.reopenedAt ?? q.at) ? " again (it went on by itself after you took its result)" : "";
+    };
     const out: string[] = [];
     for (const q of items) {
       const k = q.ticket ? t.state.tickets[q.ticket] : undefined;
-      const head = [`#${q.seq}`, q.ticket, q.from ? `${q.from} ${verb[q.kind]}` : verb[q.kind], k && k.round > 1 ? `(round ${k.round} of thread ${k.thread})` : "", q.to ? `→ suggests ${q.to}` : ""].filter(Boolean).join(" ");
+      const head = [`#${q.seq}`, q.ticket, q.from ? `${q.from} ${verb[q.kind]}${again(q)}` : verb[q.kind], k && k.round > 1 ? `(round ${k.round} of thread ${k.thread})` : "", q.to ? `→ suggests ${q.to}` : ""].filter(Boolean).join(" ");
       out.push(head);
       out.push(...q.text.split("\n").map((l) => `  ${l}`));
       if (q.options?.length) out.push(...q.options.map((o, i) => `  ${i + 1}. ${o}`), `  answer: af answer ${q.ticket ?? q.from} <number>`);
@@ -1037,6 +1041,15 @@ export class Teams {
       t.asked.delete(m.name);
       const stale = t.state.queue.filter((q) => (q.kind === "asking" || q.kind === "approval") && q.from === m.name && q.state === "queued").map((q) => q.seq);
       if (stale.length) this.emit(t, { type: "queue.handled", at: this.now(), seqs: stale });
+    }
+
+    // working again after its ticket was closed, with nothing new for it: it went on by itself (a background task
+    // woke it, or someone typed to it). Open the ticket again, so its next result reaches the manager.
+    if (status === "working" && !k && !waitingTickets(t.state, m.name).length && !pendingMessages(t.state, m.name).length) {
+      const last = ticketList(t.state).filter((x) => x.assignee === m.name).at(-1);
+      const since = p.statusAt ? Date.parse(p.statusAt) : now;
+      if (last && last.status === "closed" && last.outcome === "done" && !last.team && last.closedAt && since > Date.parse(last.closedAt))
+        this.emit(t, { type: "ticket.resumed", at: this.now(), id: last.id });
     }
 
     // working: is the conversation still growing?

@@ -94,9 +94,11 @@ function Timeline({ team: s, teams, panes, selected, onSelect, onPickTeam, onGoT
   const manager = meta.manager.pane ? panes.get(meta.manager.pane) : undefined;
   const events = useMemo(() => {
     const out: TlEvent[] = [];
-    for (const k of ticketList(s)) {
-      out.push({ at: k.createdAt, kind: "out", k });
-      if (k.report) out.push({ at: k.report.at, kind: "back", k, text: k.report.note ?? k.report.status });
+    for (const k of ticketList(s)) out.push({ at: k.createdAt, kind: "out", k });
+    // every result that came back (a member that went on by itself comes back more than once)
+    for (const q of s.queue) {
+      const k = q.ticket ? s.tickets[q.ticket] : undefined;
+      if (k && (q.kind === "turn" || q.kind === "submit" || q.kind === "report")) out.push({ at: q.at, kind: "back", k, text: q.text.split("\n").find((l) => l.trim()) ?? q.kind });
     }
     return out.sort((a, b) => a.at.localeCompare(b.at));
   }, [s, s.seq]);

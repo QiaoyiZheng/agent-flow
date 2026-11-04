@@ -133,6 +133,31 @@ describe("mode 1: a session hands out tasks", () => {
     expect(o.get(team).tickets.T2).toMatchObject({ from: "T1", thread: "T1", round: 2, status: "working" });
   });
 
+  test("a member that goes on by itself after its result was taken: the ticket opens again and the new result comes too", async () => {
+    const { o, backend, call, step, turn, typed, replies, lead } = await setup();
+    const r = await call("/task", { callerPane: lead, kind: "claude", task: "run the profile", name: "profile" });
+    await step();
+    const team = r.body.team;
+    const m = o.get(team).members.profile!;
+    const herdr = herdrMemberName(team, "profile");
+    replies.set(m.paneId!, { reply: "Started the experiment; waiting for it." });
+    await turn(herdr);
+    await call("/team/take", { callerPane: lead });
+    expect(o.get(team).tickets.T1!.status).toBe("closed");
+    // its background experiment ends and wakes it
+    replies.set(m.paneId!, { reply: "The experiment finished: 42 tokens/s." });
+    await Bun.sleep(5);
+    await turn(herdr);
+    expect(o.get(team).tickets.T1).toMatchObject({ status: "submitted", resumed: 1 });
+    expect(typed(lead).at(-1)).toContain("T1 profile finished");
+    const take = await call("/team/take", { callerPane: lead });
+    expect(take.body.text).toContain("T1 profile finished again (it went on by itself after you took its result)");
+    expect(take.body.text).toContain("42 tokens/s");
+    expect(readFileSync(join(o.opts.home, "teams", team, "tickets", "T1", "result.md"), "utf8")).toContain("42 tokens/s");
+    expect(o.get(team).tickets.T1!.status).toBe("closed");
+    expect(backend.prompts.filter((x) => x.name === m.paneId).length).toBe(1); // nothing was typed to it
+  });
+
   test("tasks wait for a busy member; --to gives a member more work; a member's session can lead its own team", async () => {
     const { o, call, step, turn, typed, replies, lead } = await setup();
     const a = await call("/task", { callerPane: lead, kind: "claude", task: "plan it", name: "plan" });
