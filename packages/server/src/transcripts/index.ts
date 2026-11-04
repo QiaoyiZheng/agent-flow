@@ -6,6 +6,9 @@
 //   2. what the agent's Herdr integration reported: a path (omp) or a session id (codex);
 //   3. claude only: a session id in the process's own argv (--resume/--session-id, also how Herdr restores);
 //   4. claude only: the newest transcript for the pane's folder, when no other claude pane shares that folder.
+// gemini reports nothing and holds no file open: its session is the newest of the folder's sessions written since its
+// process started (it writes the file at startup, a new one after /clear or a trust restart, and appends to the one
+// it resumes), told apart from other gemini agents in the folder by the screen.
 // If none works, the UI shows the plain terminal.
 
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -123,6 +126,12 @@ export interface TranscriptFS {
   claudeForFolder(cwd: string, limit: number): Promise<string[]>;
   /** Codex rollout files (last two weeks) whose session_meta cwd is `cwd`, newest first, at most `limit`. */
   codexForFolder(cwd: string, limit: number): Promise<string[]>;
+  /** Gemini CLI session files (last two weeks) of the project for `cwd`, last written first, at most `limit`. */
+  geminiForFolder(cwd: string, limit: number): Promise<GeminiSession[]>;
+  /** The Gemini CLI session file of a session id (chats/session-<time>-<first 8 of the id>.jsonl). */
+  geminiById(id: string): Promise<string | undefined>;
+  /** When the youngest of these processes (or their children) that runs Gemini CLI started, by that machine's clock. */
+  geminiStartOfPids(pids: number[]): Promise<number | undefined>;
   exists(path: string): Promise<boolean>;
   /**
    * Bytes from `offset` (at most `max`), and the file's current size. undefined if the file is gone. `file` names the
@@ -155,15 +164,77 @@ export const parseOpenRollout = (out: string) => {
   return lines.find((l) => l !== "#checked") ?? null;
 };
 
+/** A Gemini CLI session file: when it was last written, and when its session started (its header's startTime), in ms. */
+export interface GeminiSession {
+  path: string;
+  mtime: number;
+  start?: number;
+}
+
+/** A shell command printing "<pid> <elapsed> <command>" for these processes and their children, then "#now <epoch s>". */
+export const processStartCmd = (pids: number[]) =>
+  String.raw`pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] && ps -o pid= -o etime= -o command= -p "$pids" 2>/dev/null; echo "#now $(date +%s)"`;
+
+/** ps's elapsed time ("[[dd-]hh:]mm:ss") in seconds. */
+const elapsed = (e: string) => {
+  const m = e.match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : undefined;
+};
+
+/** The answer of processStartCmd: when the youngest Gemini CLI process started (ms), or undefined. */
+export function parseGeminiStart(out: string): number | undefined {
+  const now = Number(out.match(/^#now (\d+)$/m)?.[1]);
+  if (!Number.isFinite(now)) return undefined;
+  let start: number | undefined;
+  for (const line of out.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
+    // the gemini executable or its script (node …/gemini.js), not a command that merely mentions it
+    if (!m || !/(^|\/)gemini(\.js)?(\s|$)/.test(m[3]!)) continue;
+    const e = elapsed(m[2]!);
+    if (e === undefined) continue;
+    const t = (now - e) * 1000;
+    if (start === undefined || t > start) start = t;
+  }
+  return start;
+}
+
+/**
+ * A shell command printing "<mtime s>\t<startTime>\t<path>" for the Gemini CLI sessions of the project whose folder
+ * is `cwd` (the folder ~/.gemini/tmp/<project>/.project_root names), last written first.
+ */
+export const geminiFolderCmd = (cwd: string, limit: number) =>
+  String.raw`g="${"$"}{GEMINI_CLI_HOME:-$HOME}/.gemini"; want=${sq(cwd)}; for d in "$g"/tmp/*/; do [ "$(cat "$d.project_root" 2>/dev/null)" = "$want" ] || continue; find "$d"chats -maxdepth 1 -name 'session-*.jsonl' -mtime -${RECENT_DAYS} 2>/dev/null | while IFS= read -r f; do m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null); st=$(head -c 2000 "$f" | head -n 1 | sed -n 's/.*"startTime":"\([^"]*\)".*/\1/p'); printf '%s\t%s\t%s\n' "$m" "$st" "$f"; done; done | sort -rn | head -n ${Math.max(1, Math.floor(limit))}`;
+
+export const parseGeminiFolder = (out: string): GeminiSession[] =>
+  out
+    .split("\n")
+    .map((l) => l.split("\t"))
+    .filter((p) => p.length >= 3 && p[2]!.trim() && Number.isFinite(Number(p[0])))
+    .map(([m, st, ...path]) => ({ path: path.join("\t").trim(), mtime: Number(m) * 1000, ...(Date.parse(st!) ? { start: Date.parse(st!) } : {}) }));
+
 export interface Roots {
   claude: string;
   codex: string;
+  /** Gemini CLI's folder (~/.gemini). */
+  gemini?: string;
 }
 
 export const defaultRoots = (): Roots => ({
   claude: join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "projects"),
   codex: join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions"),
+  gemini: join(process.env.GEMINI_CLI_HOME ?? homedir(), ".gemini"),
 });
+
+/** The first line of a Gemini session file: {sessionId, startTime, kind}. */
+function geminiHeader(path: string): { sessionId?: string; startTime?: string; kind?: string } {
+  try {
+    const head = readHead(path, 4096);
+    const nl = head.indexOf("\n");
+    return JSON.parse(nl < 0 ? head : head.slice(0, nl));
+  } catch {
+    return {};
+  }
+}
 
 function readHead(path: string, bytes = 16384) {
   const fd = openSync(path, "r");
@@ -178,6 +249,7 @@ function readHead(path: string, bytes = 16384) {
 
 export class LocalFS implements TranscriptFS {
   private cwdCache = new Map<string, { mtime: number; cwd?: string }>();
+  private geminiStarts = new Map<string, number>();
   constructor(readonly roots: Roots = defaultRoots()) {}
 
   async claudeSessionOfPid(pid: number) {
@@ -194,6 +266,77 @@ export class LocalFS implements TranscriptFS {
     if (!validPids(pids).length) return undefined;
     const p = Bun.spawnSync(["sh", "-c", openRolloutCmd(pids)], { stdout: "pipe", stderr: "ignore" });
     return parseOpenRollout(p.stdout.toString());
+  }
+
+  async geminiStartOfPids(pids: number[]) {
+    if (!validPids(pids).length) return undefined;
+    // asked every few seconds while a gemini pane is open: not blocking the server meanwhile
+    const p = Bun.spawn(["sh", "-c", processStartCmd(pids)], { stdout: "pipe", stderr: "ignore" });
+    return parseGeminiStart(await new Response(p.stdout).text());
+  }
+
+  private get geminiRoot() {
+    return this.roots.gemini ?? join(process.env.GEMINI_CLI_HOME ?? homedir(), ".gemini");
+  }
+
+  /** The folder Gemini CLI keeps a project's sessions in (tmp/<project>), from projects.json or the folders' markers. */
+  private geminiProject(cwd: string): string | undefined {
+    const tmp = join(this.geminiRoot, "tmp");
+    try {
+      const slug = JSON.parse(readFileSync(join(this.geminiRoot, "projects.json"), "utf8"))?.projects?.[cwd];
+      if (typeof slug === "string" && existsSync(join(tmp, slug))) return join(tmp, slug);
+    } catch {}
+    if (!existsSync(tmp)) return undefined;
+    for (const d of readdirSync(tmp)) {
+      try {
+        if (readFileSync(join(tmp, d, ".project_root"), "utf8").trim() === cwd) return join(tmp, d);
+      } catch {}
+    }
+    return undefined;
+  }
+
+  async geminiForFolder(cwd: string, limit: number) {
+    const dir = this.geminiProject(cwd);
+    const chats = dir && join(dir, "chats");
+    if (!chats || !existsSync(chats)) return [];
+    const cutoff = Date.now() - RECENT_DAYS * 86400_000;
+    const hits: GeminiSession[] = [];
+    for (const f of readdirSync(chats)) {
+      if (!f.startsWith("session-") || !f.endsWith(".jsonl")) continue;
+      const path = join(chats, f);
+      let mtime: number;
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime < cutoff) continue;
+      // the start never changes: read once per file
+      let start = this.geminiStarts.get(path);
+      if (start === undefined) {
+        start = Date.parse(geminiHeader(path).startTime ?? "");
+        this.geminiStarts.set(path, start);
+      }
+      hits.push({ path, mtime, ...(Number.isFinite(start) ? { start } : {}) });
+    }
+    return hits.sort((a, b) => b.mtime - a.mtime).slice(0, limit);
+  }
+
+  async geminiById(id: string) {
+    const tmp = join(this.geminiRoot, "tmp");
+    if (!/^[0-9a-z_-]+$/i.test(id) || !existsSync(tmp)) return undefined;
+    const short = `-${id.slice(0, 8)}.jsonl`;
+    for (const d of readdirSync(tmp)) {
+      const chats = join(tmp, d, "chats");
+      let files: string[];
+      try {
+        files = readdirSync(chats);
+      } catch {
+        continue;
+      }
+      for (const f of files) if (f.startsWith("session-") && f.endsWith(short) && geminiHeader(join(chats, f)).sessionId === id) return join(chats, f);
+    }
+    return undefined;
   }
 
   async claudeById(id: string) {
@@ -349,6 +492,23 @@ export class SshFS implements TranscriptFS {
     return parseOpenRollout(r.out.toString());
   }
 
+  async geminiStartOfPids(pids: number[]) {
+    if (!validPids(pids).length) return undefined;
+    const r = await this.exec(processStartCmd(pids));
+    return parseGeminiStart(r.out.toString());
+  }
+
+  async geminiForFolder(cwd: string, limit: number) {
+    const r = await this.exec(geminiFolderCmd(cwd, limit));
+    return parseGeminiFolder(r.out.toString());
+  }
+
+  geminiById(id: string) {
+    if (!/^[0-9a-z_-]+$/i.test(id)) return Promise.resolve(undefined);
+    const needle = sq(`"sessionId":${JSON.stringify(id)}`);
+    return this.line(`for f in "${"$"}{GEMINI_CLI_HOME:-$HOME}"/.gemini/tmp/*/chats/session-*-${id.slice(0, 8)}.jsonl; do [ -f "$f" ] && head -c 2000 "$f" | head -n 1 | grep -qF ${needle} && echo "$f"; done 2>/dev/null | head -n 1`);
+  }
+
   claudeById(id: string) {
     if (!/^[0-9a-f-]+$/i.test(id)) return Promise.resolve(undefined);
     return this.line(`ls -1 "$HOME"/.claude/projects/*/${id}.jsonl 2>/dev/null | head -n 1`);
@@ -430,16 +590,16 @@ export interface ResolveInput {
   pids?: () => Promise<number[]>;
 }
 
-const isAgent = (a: string | undefined): a is Agent => a === "claude" || a === "codex" || a === "omp";
+const isAgent = (a: string | undefined): a is Agent => a === "claude" || a === "codex" || a === "omp" || a === "gemini";
 
 /** Text compared between a screen and a transcript: no whitespace, markdown marks, or bullets. */
-export const norm = (t: string) => t.replace(/[\s*_`#>|$\\~•●⏺❯›⎿]+/g, "").toLowerCase();
+export const norm = (t: string) => t.replace(/[\s*_`#>|$\\~•●⏺❯›⎿✦]+/g, "").toLowerCase();
 
 /** Lines the agent drew for prompts and replies ("❯ …", "● …"), normalized, as matching keys. */
 export function screenSnippets(screen: string) {
   const out = new Set<string>();
   for (const line of screen.split("\n")) {
-    const m = line.match(/^\s*(?:❯|›|>|●|⏺|•)\s*(.+)$/);
+    const m = line.match(/^\s*(?:❯|›|>|●|⏺|•|✦)\s*(.+)$/);
     if (!m) continue;
     const n = norm(m[1]!);
     if (n.length >= 10) out.add(n.slice(0, 24));
@@ -527,6 +687,7 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
   /** Locked to a conversation the agent has not written yet. */
   const pending = (path = "") => ({ source: { agent, path, how: "session" as const, pending: true } });
   const procs = pids ? await pids().catch(() => [] as number[]) : [];
+  if (agent === "gemini") return resolveGemini(fs, { pane, panes, knownSession, knownPath, screen, argv, pids }, procs);
   const args = procs.length || agent !== "omp" ? await argv().catch(() => [] as string[][]) : [];
   const flat = args.flat();
 
@@ -601,6 +762,62 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     if (candidates.length) return { reason: `${sharing} codex agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
   }
   return { reason: `${agent} has not reported its session to Herdr yet` };
+}
+
+/** ps gives a process's start in whole seconds, and a session file is written a moment after its process starts. */
+const START_SLACK = 3000;
+
+/**
+ * gemini: Herdr reports no session for it and it holds no file open. It writes its session file when it starts (and a
+ * new one after /clear, or when it restarts itself after the folder-trust question), and appends to a session it
+ * resumes, so its session is the last written of the folder's sessions that were written since its process started.
+ * Several gemini agents in one folder are told apart by the session that started with the process, or the screen.
+ */
+async function resolveGemini(fs: TranscriptFS, { pane, panes, knownSession, knownPath, screen }: ResolveInput, procs: number[]): Promise<{ source: ChatSource } | { reason: string }> {
+  const agent = "gemini" as const;
+  const found = (path: string, how: ChatSource["how"]) => ({ source: { agent, path, how } });
+  const start = procs.length ? await fs.geminiStartOfPids(procs).catch(() => undefined) : undefined;
+  const all = await fs.geminiForFolder(pane.cwd, 20).catch(() => [] as GeminiSession[]);
+  const mine = start === undefined ? [] : all.filter((c) => c.mtime >= start - START_SLACK);
+  const sharing = panes.filter((p) => p.agent === "gemini" && p.cwd === pane.cwd && p.machine === pane.machine).length;
+
+  // what agent-flow or Herdr was told: exact, unless the process started after it was last written (a restart)
+  const told =
+    knownPath && (await fs.exists(knownPath))
+      ? knownPath
+      : knownSession
+        ? await fs.geminiById(knownSession).catch(() => undefined)
+        : pane.session?.kind === "path" && (await fs.exists(pane.session.value))
+          ? pane.session.value
+          : pane.session?.kind === "id"
+            ? await fs.geminiById(pane.session.value).catch(() => undefined)
+            : undefined;
+  if (told) {
+    const c = all.find((x) => x.path === told);
+    if (start === undefined || !c || c.mtime >= start - START_SLACK) {
+      // alone in the folder, a session of this process written after it (/clear) is the one shown now
+      const newer = sharing <= 1 && c ? mine.find((x) => x.mtime > c.mtime && x.path !== told) : undefined;
+      return found(newer?.path ?? told, "session");
+    }
+  }
+
+  if (start !== undefined) {
+    if (!mine.length) return { source: { agent, path: "", how: "session", pending: true } }; // starting: its file comes in a moment
+    if (sharing <= 1) return found(mine[0]!.path, "session");
+    // the only session that started with this process (another agent's older session may have been written since)
+    const own = mine.filter((c) => c.start !== undefined && c.start >= start - START_SLACK);
+    if (own.length === 1) return found(own[0]!.path, "session");
+    const hit = screen ? await matchByScreen(fs, mine.map((c) => c.path), await screen().catch(() => ""), agent) : undefined;
+    if (hit) return found(hit, "screen");
+    return { reason: `${sharing} gemini agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
+  }
+
+  // the process could not be asked: guesses from the folder
+  if (!all.length) return { reason: "no gemini session for this folder yet" };
+  if (sharing <= 1) return found(all[0]!.path, "folder");
+  const hit = screen ? await matchByScreen(fs, all.slice(0, 15).map((c) => c.path), await screen().catch(() => ""), agent) : undefined;
+  if (hit) return found(hit, "screen");
+  return { reason: `${sharing} gemini agents run in ${pane.cwd} and the screen does not show which conversation is this one yet` };
 }
 
 /** A transcript's first line, parsed (session headers), or undefined. */
