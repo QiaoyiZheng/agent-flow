@@ -283,7 +283,7 @@ export type ChatOp =
   | { op: "remove"; keys: string[] };
 
 export interface ChatSource {
-  agent: "claude" | "codex" | "omp";
+  agent: "claude" | "codex" | "omp" | "gemini";
   path: string;
   /** How the transcript was found: exact session id/path, the screen's content, or a guess from the pane's folder. */
   how: "session" | "title" | "screen" | "folder";

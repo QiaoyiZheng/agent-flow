@@ -12,8 +12,8 @@
 export const NODE_ID = /^[a-z][a-z0-9_-]{0,31}$/;
 export const DEFAULT_LOOP_MAX = 3;
 
-export type AgentKind = "claude" | "codex" | "omp";
-export const AGENT_KINDS: readonly AgentKind[] = ["claude", "codex", "omp"];
+export type AgentKind = "claude" | "codex" | "omp" | "gemini";
+export const AGENT_KINDS: readonly AgentKind[] = ["claude", "codex", "omp", "gemini"];
 
 export type Executor = { kind: AgentKind } | { agent: string };
 export type Isolation = "isolated" | "shared";

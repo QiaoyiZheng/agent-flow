@@ -6,7 +6,7 @@
 
 import type { ChatBlock, ChatOp, ToolBlock } from "@af/core";
 
-export type Agent = "claude" | "codex" | "omp";
+export type Agent = "claude" | "codex" | "omp" | "gemini";
 
 export const MAX_OUTPUT = 6000;
 /** Images larger than this (as a data: URL) are left out: they would be sent to the browser on every reload. */

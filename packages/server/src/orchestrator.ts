@@ -515,7 +515,7 @@ export class Orchestrator {
       node: a.node,
       status: "starting",
       spawnedAt: this.now(),
-      session: a.kind === "claude" ? crypto.randomUUID() : undefined,
+      session: a.kind === "claude" || a.kind === "gemini" ? crypto.randomUUID() : undefined,
     };
     this.emit(run, { type: "agent.spawned", at: this.now(), agent: rec });
     run.starting.add(a.name);

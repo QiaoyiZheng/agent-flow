@@ -3,7 +3,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentKind } from "@af/core";
 
 export type Role = "lead" | "worker";
@@ -59,6 +59,19 @@ export function launchArgs(kind: AgentKind, role: Role, protocolFile: string, co
       return ["-p", writeCodexProfile(role, protocolFile), "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ...extra];
     case "omp":
       return [`--append-system-prompt=${protocolFile}`, ...extra];
+    case "gemini":
+      // Gemini CLI has no flag that adds to its system prompt (GEMINI_SYSTEM_MD replaces all of it, and goes stale
+      // with every update), so the protocol is its first message: -i runs it and stays interactive, and "@<file>"
+      // is Gemini's own way of putting a file's text into a message (the folder must be in its workspace).
+      // --session-id: lets agent-flow find the conversation (~/.gemini/tmp/<project>/chats/session-*-<id8>.jsonl).
+      return [
+        ...(session ? ["--session-id", session] : []),
+        "--include-directories",
+        dirname(protocolFile),
+        "-i",
+        `@${protocolFile} These are your agent-flow instructions for this whole session. Reply only: ready`,
+        ...extra,
+      ];
   }
 }
 
