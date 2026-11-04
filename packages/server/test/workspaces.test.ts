@@ -463,6 +463,26 @@ describe("composer: prompt with attachments, keys", () => {
   });
 });
 
+describe("questions Herdr does not report", () => {
+  test("an agent Herdr calls idle but showing a dialog is marked asking, until the dialog is gone", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("g1", "claude", ws.paneId, []);
+    backend.set("g1", "idle");
+    const rule = "─".repeat(40);
+    backend.screens.set(ws.paneId, ["Do you trust the files in this folder?", "", "❯ 1. Trust folder", "  2. Don't trust", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"].join("\n"));
+    (w as any).machines.get("local").askingAt = 0;
+    await w.refresh();
+    for (let i = 0; i < 20 && !w.model.panes.find((p) => p.id === ws.paneId)?.asking; i++) await Bun.sleep(10);
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBe(true);
+    // answered: the input box is back
+    backend.screens.set(ws.paneId, `done\n${rule}\n❯ \n${rule}\n`);
+    (w as any).machines.get("local").askingAt = 0;
+    await w.refresh();
+    for (let i = 0; i < 20 && w.model.panes.find((p) => p.id === ws.paneId)?.asking; i++) await Bun.sleep(10);
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBeUndefined();
+  });
+});
+
 describe("af deliver: a finished document handed to the user", () => {
   test("shown next to the agent, then in the same viewer; listed until done; bad paths refused", async () => {
     const { home, backend, w, ws } = await setup();

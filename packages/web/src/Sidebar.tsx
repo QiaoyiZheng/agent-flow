@@ -347,7 +347,7 @@ function NeedsYou({
     const m = w && herdr?.machines.find((x) => x.id === w.machine);
     return w ? (m && !m.local ? `${m.label} / ${w.label}` : w.label) : "";
   };
-  const blocked = useMemo(() => (herdr?.panes ?? []).filter((p) => p.agent && p.agentStatus === "blocked" && !hidden.has(p.workspaceId) && online(p)), [herdr, hidden]);
+  const blocked = useMemo(() => (herdr?.panes ?? []).filter((p) => p.agent && (p.agentStatus === "blocked" || p.asking) && !hidden.has(p.workspaceId) && online(p)), [herdr, hidden]);
   const blockedKey = blocked.map((p) => `${p.id}@${p.statusAt ?? ""}`).join(",");
 
   // the question each waiting agent asks (what the rendered view's question card shows)
@@ -358,7 +358,8 @@ function NeedsYou({
       setQuestions((q) => ({ ...q, [k]: "" }));
       api<{ menu: { question: string[] } | null; overlay: { lines: string[] } | null }>("GET", "/pane/menu", { pane: p.id, run: undefined })
         .then((r) => {
-          const text = (r.menu?.question.join(" ") || r.overlay?.lines.find((l) => l.trim()) || "").replace(/\s+/g, " ").trim();
+          // box-drawing characters from a dialog's edge are not part of its question
+          const text = (r.menu?.question.join(" ") || r.overlay?.lines.find((l) => l.trim()) || "").replace(/[─-╿▀-▟]/g, " ").replace(/\s+/g, " ").trim();
           setQuestions((q) => ({ ...q, [k]: text }));
         })
         .catch(() => {});

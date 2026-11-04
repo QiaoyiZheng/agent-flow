@@ -57,6 +57,10 @@ interface Machine {
   troubled?: boolean;
   /** Each pane's agent status and when it changed to it (undefined: it had it when we first looked). */
   since?: Map<string, { status: string; at?: string }>;
+  /** Panes showing a question Herdr does not report (see checkAsking), and when they were last checked. */
+  asking?: Map<string, boolean>;
+  askingAt?: number;
+  askingBusy?: boolean;
 }
 
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
@@ -310,6 +314,34 @@ export class Workspaces {
     return this.refreshing;
   }
 
+  /**
+   * Which agents show a question or approval on screen though Herdr does not report them blocked (gemini is "idle"
+   * during its folder-trust dialog and "working" during its ask_user dialog; Herdr misses some claude dialogs too).
+   * Every 2.5 s here, 6 s on remote machines; a screen read is one socket call.
+   */
+  private async checkAsking(m: Machine) {
+    const every = m.meta.local ? 2500 : 6000;
+    if (m.askingBusy || Date.now() - (m.askingAt ?? 0) < every) return;
+    m.askingBusy = true;
+    m.askingAt = Date.now();
+    try {
+      const next = new Map<string, boolean>();
+      for (const p of m.panes) {
+        if (!p.agent || p.agentStatus === "blocked" || p.scrolled) continue;
+        const st = await this.screenState(p.id).catch(() => ({}) as { menu?: Menu });
+        if (st.menu) next.set(p.id, true);
+      }
+      const changed = next.size !== (m.asking?.size ?? 0) || [...next.keys()].some((k) => !m.asking?.has(k));
+      m.asking = next;
+      if (changed) {
+        m.panes = m.panes.map((x) => ({ ...x, asking: next.get(x.id) || undefined }));
+        this.publish();
+      }
+    } finally {
+      m.askingBusy = false;
+    }
+  }
+
   private async refreshMachine(m: Machine) {
     if (!m.backend) return; // remote and not connected: the last known model stays until it disconnects
     if (!m.meta.local && Date.now() - m.lastPoll < (this.opts.remotePollMs ?? 3000)) return;
@@ -357,7 +389,8 @@ export class Workspaces {
           changed = true;
         }
       if (changed) this.saveStatus(key, since);
-      m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at }));
+      m.panes = snap.panes.map((x) => ({ ...x, machine: key, id: p(x.id), tabId: p(x.tabId), workspaceId: p(x.workspaceId), statusAt: since.get(x.id)?.at, asking: m.asking?.get(p(x.id)) || undefined }));
+      void this.checkAsking(m);
       m.layouts = layouts;
       if (m.meta.local && m.failedPolls > 0) this.opts.notify?.("info", "herdr", "Herdr is responding again");
       m.failedPolls = 0;
