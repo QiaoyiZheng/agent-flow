@@ -18,7 +18,7 @@ import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from ".
 import { claudeSession, parseRemoteCounts, remoteCheckScript, runningTasks, taskDir } from "./background.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
-export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive">>;
+export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive" | "forwardRemoteSocket">>;
 
 export interface WorkspacesOptions {
   home: string;
@@ -63,7 +63,7 @@ interface Machine {
   /** Each pane's agent status and when it changed to it (undefined: it had it when we first looked). */
   since?: Map<string, { status: string; at?: string }>;
   /** Background tasks each claude pane still waits on (see background.ts), and when each was last checked. */
-  background?: Map<string, { n: number; at: number }>;
+  background?: Map<string, { n: number; at: number; for?: string }>;
   /** Remote machines: panes whose check is on its way over SSH (their turn end waits for it), and whether one runs. */
   bgPending?: Set<string>;
   bgRunning?: boolean;
@@ -400,14 +400,18 @@ export class Workspaces {
     const prev = m.since;
     for (const x of panes) if (x.agent !== "claude" || x.agentStatus === "working" || x.agentStatus === "blocked") (state.delete(x.id), pending.delete(x.id));
     for (const id of state.keys()) if (!panes.some((x) => x.id === id)) state.delete(id);
+    // the status change a check is for: once a check for it has answered, it is not due again for it (the turn end
+    // waits for the answer, so the saved status still says "working" when the answer is applied)
+    const change = (id: string) => `${prev?.get(id)?.status}@${prev?.get(id)?.at ?? ""}`;
     const due = panes.filter((x) => {
       if (x.agent !== "claude" || (x.agentStatus !== "done" && x.agentStatus !== "idle") || pending.has(x.id)) return false;
       const was = prev?.get(x.id)?.status;
       const st = state.get(x.id);
-      return !st || was === "working" || (st.n > 0 && Date.now() - st.at >= 6000);
+      return !st || (was === "working" && st.for !== change(x.id)) || (st.n > 0 && Date.now() - st.at >= 6000);
     });
     if (due.length && !m.bgRunning && m.remote && m.backend) {
       for (const x of due) pending.add(x.id);
+      const forChange = new Map(due.map((x) => [x.id, change(x.id)]));
       m.bgRunning = true;
       const remote = m.remote;
       const backend = m.backend;
@@ -419,7 +423,7 @@ export class Workspaces {
           for (const [k, v] of parseRemoteCounts(r.out.toString())) counts.set(k, v);
         } catch {}
         for (const x of due) {
-          state.set(x.id, { n: counts.get(x.id) ?? 0, at: Date.now() });
+          state.set(x.id, { n: counts.get(x.id) ?? 0, at: Date.now(), for: forChange.get(x.id) });
           pending.delete(x.id);
         }
         m.bgRunning = false;
