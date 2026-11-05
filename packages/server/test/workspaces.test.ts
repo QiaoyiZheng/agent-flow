@@ -722,6 +722,32 @@ describe("questions Herdr does not report", () => {
   });
 });
 
+describe("notices that wait for a key", () => {
+  test("a notice still on screen at the next check counts as asking (not finished); the input box back clears it", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("n1", "claude", ws.paneId, []);
+    backend.set("n1", "done");
+    await w.refresh(); // the model knows the pane's agent
+    const rule = "─".repeat(40);
+    backend.screens.set(ws.paneId, ["⏺ Running the first command", "", rule, " Auto mode now uses your extra usage when your plan's limit is reached.", " You can change this in /config.", "", " Enter to continue"].join("\n"));
+    const check = async () => {
+      (w as any).machines.get("local").askingAt = 0;
+      await w.refresh();
+      for (let i = 0; i < 10 && (w as any).machines.get("local").askingBusy; i++) await Bun.sleep(10);
+      await Bun.sleep(20);
+    };
+    await check();
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBeUndefined(); // seen once: maybe a redraw
+    await check();
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toContain("Auto mode now uses your extra usage");
+    expect(w.settled(ws.paneId)).toBe(false);
+    backend.screens.set(ws.paneId, `done\n${rule}\n❯ \n${rule}\n`);
+    await check();
+    expect(w.model.panes.find((p) => p.id === ws.paneId)?.asking).toBeUndefined();
+    expect(w.settled(ws.paneId)).toBe(true);
+  });
+});
+
 describe("af deliver: a finished document handed to the user", () => {
   test("recorded for the agent's reply, no pane opened; marked done when opened; bad paths refused", async () => {
     const { home, backend, w, ws } = await setup();

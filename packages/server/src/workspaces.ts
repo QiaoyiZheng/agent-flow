@@ -71,6 +71,8 @@ interface Machine {
   activeSince?: Map<string, number>;
   /** Panes showing a question Herdr does not report (see checkAsking), and when they were last checked. */
   asking?: Map<string, string>;
+  /** Panes that showed a notice (not a question) on the last check: a notice seen twice in a row counts as asking. */
+  overlaySeen?: Set<string>;
   askingAt?: number;
   askingBusy?: boolean;
 }
@@ -450,9 +452,18 @@ export class Workspaces {
     m.askingAt = Date.now();
     try {
       const next = new Map<string, string>();
+      const overlays = new Set<string>();
       for (const p of m.panes) {
         if (!p.agent || p.agentStatus === "blocked" || p.scrolled) continue;
-        const st = await this.screenState(p.id).catch(() => ({}) as { menu?: Menu });
+        const st = await this.screenState(p.id).catch(() => ({}) as { menu?: Menu; overlay?: Overlay });
+        if (!st.menu && st.overlay && (p.agentStatus === "done" || p.agentStatus === "idle")) {
+          // a notice that waits for a key (claude's auto mode billing notice: "Enter to continue"): the turn has not
+          // really ended. Counted once seen on two checks in a row, so a screen caught mid-redraw does not count.
+          const text = st.overlay.lines.join(" ").replace(/[─-╿▀-▟]/g, " ").replace(/\s+/g, " ").trim();
+          if (text && m.overlaySeen?.has(p.id)) next.set(p.id, text.slice(0, 300));
+          if (text) overlays.add(p.id);
+          continue;
+        }
         if (!st.menu) continue;
         const q = [...st.menu.question, ...(st.menu.code ?? [])]
           .join(" ")
@@ -463,6 +474,7 @@ export class Workspaces {
       }
       const changed = next.size !== (m.asking?.size ?? 0) || [...next].some(([k, v]) => m.asking?.get(k) !== v);
       m.asking = next;
+      m.overlaySeen = overlays;
       if (changed) {
         m.panes = m.panes.map((x) => ({ ...x, asking: next.get(x.id) || undefined }));
         m.workspaces = m.workspaces.map((ws) => ({ ...ws, agentStatus: workspaceStatus(m.panes.filter((x) => x.workspaceId === ws.id), ws.agentStatus) }));
