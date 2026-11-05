@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG, launchArgs, plainArgs } from "../src/agents.ts";
-import { Sleeper, agentProcess, childWork, etimeSeconds, keptOptions, memoryMb, parsePs, resumeArgs, scheduledWork, sessionOf } from "../src/sleep.ts";
+import { Sleeper, agentArgs, dropMissingFiles, agentProcess, childWork, etimeSeconds, keptOptions, memoryMb, parsePs, resumeArgs, scheduledWork, sessionOf } from "../src/sleep.ts";
 import { LocalFS } from "../src/transcripts/index.ts";
 import { Workspaces } from "../src/workspaces.ts";
 import { FakeBackend } from "./fake.ts";
@@ -42,6 +42,18 @@ describe("resuming an agent with the flags it was started with", () => {
     expect(resumeArgs("omp", ["--append-system-prompt=/t/member.md", "--continue"], { path: "/s/x.jsonl" })).toEqual(["--append-system-prompt=/t/member.md", "--resume=/s/x.jsonl"]);
     expect(resumeArgs("gemini", launchArgs("gemini", "member", "/t/p/member.md", config), { id: ID })).toEqual(["--include-directories", "/t/p", "--approval-mode=yolo", "--resume", ID]);
     expect(keptOptions("nope", ["--x"])).toEqual([]);
+  });
+
+  test("the agent's own arguments, also when it runs through an interpreter; files that are gone left out", () => {
+    expect(agentArgs("omp", ["bun", "/Users/u/.bun/bin/omp", "--append-system-prompt=/tmp/p.md"])).toEqual(["--append-system-prompt=/tmp/p.md"]);
+    expect(agentArgs("gemini", ["node", "--import=/u/.gemini/agent-flow/gateway-fix.mjs", "/opt/lib/gemini-cli/bundle/gemini.js", "--approval-mode=yolo"])).toEqual(["--approval-mode=yolo"]);
+    expect(agentArgs("claude", ["claude", "--resume"])).toEqual(["--resume"]);
+    // "--resume" without a value (claude's list): the next option is not taken for its value
+    expect(resumeArgs("claude", ["--resume", "--settings", "/af/s.json"], { id: ID })).toEqual(["--settings", "/af/s.json", "--resume", ID]);
+    const gone = (f: string) => !f.startsWith("/tmp/");
+    expect(dropMissingFiles("claude", ["--settings", "/tmp/af-e2e/claude-settings.json", "--permission-mode", "auto", "--resume", ID], gone)).toEqual({ args: ["--permission-mode", "auto", "--resume", ID], dropped: ["/tmp/af-e2e/claude-settings.json"] });
+    expect(dropMissingFiles("omp", ["--append-system-prompt=/tmp/t/member.md", "--resume=/s/x.jsonl"], gone)).toEqual({ args: ["--resume=/s/x.jsonl"], dropped: ["/tmp/t/member.md"] });
+    expect(dropMissingFiles("claude", ["--settings", "/home/u/s.json"], gone).args).toEqual(["--settings", "/home/u/s.json"]);
   });
 
   test("the conversation: from the transcript's name, what Herdr reports, or gemini's first line", () => {
@@ -119,7 +131,9 @@ describe("an idle agent stopped and started again in its pane", () => {
     const { home, backend, w, ws, child } = await setup();
     backend.panes.get(ws.paneId)!.agent = { name: "", kind: "claude", args: [], status: "done" };
     await w.refresh();
-    const args = ["--settings", "/af/s.json", "--session-id", ID];
+    const settings = join(home, "s.json");
+    writeFileSync(settings, "{}");
+    const args = ["--settings", settings, "--session-id", ID];
     await w.putToSleep({ pane: ws.paneId, agent: "claude", bin: "claude", args, cwd: home, status: "done", session: { id: ID }, since: new Date().toISOString(), reason: "idle 8 h" }, child.pid);
     await child.exited;
     // Herdr still reports claude for a few seconds after it exits: not taken for a new start
@@ -148,7 +162,7 @@ describe("an idle agent stopped and started again in its pane", () => {
     const r = await w.send(ws.paneId, "hello again", []);
     expect(r).toMatchObject({ waking: true });
     for (let i = 0; i < 60 && !backend.prompts.some((x) => x.text === "hello again"); i++) await Bun.sleep(100);
-    expect(backend.panes.get(ws.paneId)!.typed).toEqual([`cd '${home}' && 'claude' '--settings' '/af/s.json' '--resume' '${ID}'`]);
+    expect(backend.panes.get(ws.paneId)!.typed).toEqual([`cd '${home}' && 'claude' '--settings' '${settings}' '--resume' '${ID}'`]);
     expect(backend.prompts.map((x) => x.text)).toEqual(["hello again"]);
     p = w.model.panes.find((x) => x.id === ws.paneId)!;
     expect([p.agent, p.asleep]).toEqual(["claude", undefined]);
@@ -159,12 +173,14 @@ describe("an idle agent stopped and started again in its pane", () => {
   test("a team member comes back under its Herdr name; exit forgets a stopped agent; a closed pane too", async () => {
     const { home, backend, w, ws, child } = await setup();
     await backend.startAgent("t1abc-writer", "claude", ws.paneId, []);
+    const proto = join(home, "m.md");
+    writeFileSync(proto, "protocol");
     backend.panes.get(ws.paneId)!.agent!.status = "done";
     await w.refresh();
-    await w.putToSleep({ pane: ws.paneId, agent: "claude", name: "t1abc-writer", bin: "claude", args: ["--append-system-prompt-file", "/t/m.md", "--session-id", ID], cwd: home, status: "done", session: { id: ID }, since: new Date().toISOString(), reason: "finished worker" }, child.pid);
+    await w.putToSleep({ pane: ws.paneId, agent: "claude", name: "t1abc-writer", bin: "claude", args: ["--append-system-prompt-file", proto, "--session-id", ID], cwd: home, status: "done", session: { id: ID }, since: new Date().toISOString(), reason: "finished worker" }, child.pid);
     expect(w.model.panes.find((x) => x.id === ws.paneId)?.agentName).toBe("t1abc-writer");
     expect(await w.wake(ws.paneId)).toBe(true);
-    expect(backend.panes.get(ws.paneId)!.agent).toMatchObject({ name: "t1abc-writer", args: ["--append-system-prompt-file", "/t/m.md", "--resume", ID] });
+    expect(backend.panes.get(ws.paneId)!.agent).toMatchObject({ name: "t1abc-writer", args: ["--append-system-prompt-file", proto, "--resume", ID] });
     expect(await w.wake(ws.paneId)).toBe(false); // running already
 
     // stopped again, then the user exits it: the pane is a shell
@@ -221,5 +237,57 @@ describe("an idle agent stopped and started again in its pane", () => {
     expect(w.asleepRecord(ws.paneId)?.args).toEqual(["--session-id", ID]);
     expect(existsSync(join(home, "settings.json"))).toBe(true);
     w.stop();
+  });
+});
+
+describe("after a Herdr restart (a reboot): pages stay, agents resume on a message", () => {
+  test("a remembered agent whose pane has a new shell and no agent is shown stopped; the same shell: exited, forgotten", async () => {
+    const home = tmp();
+    const backend = new FakeBackend();
+    const w = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    await w.start(60_000);
+    const ws = await backend.createWorkspace("proj", home);
+    const other = await backend.splitPane(ws.paneId, "right", home, {});
+    for (const id of [ws.paneId, other.paneId]) backend.panes.get(id)!.agent = { name: "", kind: "claude", args: [], status: "done" };
+    backend.procs.set(ws.paneId, [{ pid: 4242, argv: ["claude", "--permission-mode", "auto", "--session-id", ID] }]);
+    backend.procs.set(other.paneId, [{ pid: 4243, argv: ["claude"] }]);
+    backend.shellPids.set(ws.paneId, 500);
+    backend.shellPids.set(other.paneId, 501);
+    await w.refresh();
+    const file = join(home, `${ID}.jsonl`);
+    writeFileSync(file, "{}\n");
+    const OTHER = "11111111-2222-4333-8444-555555555555";
+    const access = { resolve: async (pane: string) => ({ source: { agent: "claude", path: pane === ws.paneId ? file : join(home, `${OTHER}.jsonl`), how: "session" } }), fsFor: () => ({ fs: new LocalFS() }) } as any;
+    const s = new Sleeper(w, access, { sleepInfo: () => undefined }, home);
+    await s.rememberAll();
+    expect(w.knownAgent(ws.paneId)).toMatchObject({ shellPid: 500, agentPid: 4242, session: { id: ID }, args: ["--permission-mode", "auto", "--session-id", ID] });
+    expect(JSON.parse(readFileSync(join(home, "known-agents.json"), "utf8"))[other.paneId].session.id).toBe(OTHER);
+    w.stop();
+
+    // the machine restarts: Herdr makes the panes again with new shells and no agents; agent-flow starts again
+    for (const id of [ws.paneId, other.paneId]) backend.panes.get(id)!.agent = undefined;
+    backend.shellPids.set(ws.paneId, 900);
+    const w2 = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    await w2.start(60_000);
+    await w2.refresh();
+    for (let i = 0; i < 50 && !w2.model.panes.find((x) => x.id === ws.paneId)?.asleep; i++) await Bun.sleep(20);
+    const p = w2.model.panes.find((x) => x.id === ws.paneId)!;
+    expect([p.agent, p.agentStatus, !!p.asleep]).toEqual(["claude", "done", true]);
+    expect(w2.asleepRecord(ws.paneId)?.reason).toBe("Herdr restarted");
+    // the other pane kept its shell (its claude was exited by hand): a shell, and forgotten
+    expect(w2.model.panes.find((x) => x.id === other.paneId)?.agent).toBeUndefined();
+    expect(w2.knownAgent(other.paneId)).toBeUndefined();
+    // a message resumes it on its conversation, with its flags
+    const run = backend.runInPane.bind(backend);
+    backend.runInPane = async (id, cmd) => {
+      await run(id, cmd);
+      backend.panes.get(id)!.agent = { name: "", kind: "claude", args: [], status: "idle" };
+      backend.screens.set(id, BOX());
+    };
+    await w2.send(ws.paneId, "go on", []);
+    for (let i = 0; i < 60 && !backend.prompts.some((x) => x.text === "go on"); i++) await Bun.sleep(100);
+    expect(backend.panes.get(ws.paneId)!.typed.at(-1)).toBe(`cd '${home}' && 'claude' '--permission-mode' 'auto' '--resume' '${ID}'`);
+    expect(backend.prompts.map((x) => x.text)).toEqual(["go on"]);
+    w2.stop();
   });
 });

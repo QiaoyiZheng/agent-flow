@@ -16,7 +16,7 @@ import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
 import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from "./controls.ts";
 import { claudeSession, parseRemoteCounts, remoteCheckScript, runningTasks, taskDir } from "./background.ts";
-import { type SleepRecord, resumeArgs } from "./sleep.ts";
+import { type SleepRecord, dropMissingFiles, resumeArgs } from "./sleep.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive" | "forwardRemoteSocket">>;
@@ -78,6 +78,14 @@ interface Machine {
   askingBusy?: boolean;
 }
 
+/** A running agent remembered for after a Herdr restart (see Workspaces.known). */
+export type KnownAgent = SleepRecord & { shellPid: number; agentPid: number; paneCwd: string; at: string };
+
+const sameDir = (a: string, b: string) => {
+  const t = (x: string) => x.replace(/\/+$/, "").replace(/^\/private\//, "/");
+  return t(a) === t(b) || t(a).startsWith(`${t(b)}/`) || t(b).startsWith(`${t(a)}/`);
+};
+
 const isUrl = (s: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
 
 /**
@@ -123,6 +131,16 @@ export class Workspaces {
    */
   private asleep: Record<string, SleepRecord & { stopping?: boolean }> = {};
   private asleepFile: string;
+  /**
+   * How to start each running agent again, kept up to date (sleep.ts remembers them), with the pane's shell then.
+   * After the Herdr server restarts (a reboot), Herdr makes the panes again from its saved layout with new shells and
+   * no agents: a pane whose shell is new and whose agent is gone becomes a stopped agent (asleep), so its page stays
+   * and a message resumes it. The same shell with no agent: the user exited it; forgotten. Saved across restarts.
+   */
+  private known: Record<string, KnownAgent> = {};
+  private knownFile: string;
+  private restoreChecked = new Map<string, number>();
+  private restoring = false;
   private sleepOps = new Map<string, Promise<void>>();
   private wakeOps = new Map<string, Promise<void>>();
   private machines = new Map<string, Machine>();
@@ -143,6 +161,10 @@ export class Workspaces {
     this.statusFile = join(opts.home, "status.json");
     try {
       if (existsSync(this.statusFile)) this.savedStatus = JSON.parse(readFileSync(this.statusFile, "utf8"));
+    } catch {}
+    this.knownFile = join(opts.home, "known-agents.json");
+    try {
+      if (existsSync(this.knownFile)) this.known = JSON.parse(readFileSync(this.knownFile, "utf8"));
     } catch {}
     this.asleepFile = join(opts.home, "asleep.json");
     try {
@@ -526,6 +548,7 @@ export class Workspaces {
       m.workspaces = snap.workspaces.map((w) => ({ ...w, machine: key, id: p(w.id), activeTabId: w.activeTabId ? p(w.activeTabId) : undefined }));
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
       snap.panes = this.overlayAsleep(key, snap.panes, p);
+      this.checkRestored(key, snap.panes, p);
       // background work claude still waits on after its turn ended (local only: see background.ts)
       const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : m.remote ? this.checkBackgroundRemote(m, snap.panes) : new Map<string, number>();
       const bgPending = m.bgPending ?? new Set<string>();
@@ -1066,6 +1089,83 @@ export class Workspaces {
     return this.asleep[pane];
   }
 
+  knownAgent(pane: string): KnownAgent | undefined {
+    return this.known[pane];
+  }
+
+  /** Remember how to start the agent in rec.pane again (sleep.ts calls it while the agent runs). */
+  rememberAgent(rec: KnownAgent) {
+    if (this.asleep[rec.pane]) return;
+    const { source: _s, ...cmp } = rec;
+    const was = this.known[rec.pane];
+    if (was) {
+      const { source: _w, at: _a, ...old } = was;
+      const { at: _b, ...now } = cmp;
+      if (JSON.stringify(old) === JSON.stringify(now) && Date.now() - Date.parse(was.at) < 30 * 60_000) return;
+    }
+    this.known[rec.pane] = rec;
+    this.saveKnown();
+  }
+
+  private saveKnown() {
+    writeFileSync(this.knownFile, JSON.stringify(this.known, null, 2));
+  }
+
+  async shellPid(pane: string) {
+    const r = this.route(pane);
+    return r.backend.shellPid(r.raw);
+  }
+
+  /**
+   * Panes with a remembered agent that is not running there now: a new shell (Herdr restarted and made the pane
+   * again) → the agent is shown stopped and resumes on a message; the same shell → it was exited, forgotten. Each
+   * pane is looked at once a minute at most; a gone pane is forgotten.
+   */
+  private checkRestored(machine: string, panes: HPane[], p: (id: string) => string) {
+    const here = Object.keys(this.known).filter((id) => splitId(id).machine === machine);
+    if (!here.length || this.restoring) return;
+    const live = new Map(panes.map((x) => [p(x.id), x]));
+    let dropped = false;
+    const todo: HPane[] = [];
+    for (const id of here) {
+      const x = live.get(id);
+      if (!x) {
+        delete this.known[id];
+        dropped = true;
+      } else if (!x.agent && !this.asleep[id] && !this.wakeOps.has(id) && Date.now() - (this.restoreChecked.get(id) ?? 0) > 60_000) todo.push(x);
+    }
+    if (dropped) this.saveKnown();
+    if (!todo.length) return;
+    this.restoring = true;
+    void (async () => {
+      let changed = false;
+      try {
+        for (const x of todo) {
+          const id = p(x.id);
+          const rec = this.known[id];
+          if (!rec) continue;
+          this.restoreChecked.set(id, Date.now());
+          const shell = await this.shellPid(id).catch(() => undefined);
+          if (shell === undefined) continue; // not known now: looked at again later
+          delete this.known[id];
+          changed = true;
+          if (shell === rec.shellPid || !sameDir(x.cwd, rec.paneCwd)) continue; // exited by hand, or another pane now
+          const { shellPid: _s, agentPid: _a, paneCwd: _c, at: _t, ...sleep } = rec;
+          const busy = sleep.status === "working" || sleep.status === "blocked" || sleep.status === "background";
+          this.asleep[id] = { ...sleep, status: busy ? "idle" : sleep.status, since: new Date().toISOString(), reason: busy ? "Herdr restarted during its turn" : "Herdr restarted" };
+        }
+      } finally {
+        this.restoring = false;
+        if (changed) {
+          this.saveKnown();
+          this.saveAsleep();
+          this.changed(machine);
+          void this.refresh();
+        }
+      }
+    })();
+  }
+
   private saveAsleep() {
     writeFileSync(this.asleepFile, JSON.stringify(this.asleep, null, 2));
   }
@@ -1193,8 +1293,14 @@ export class Workspaces {
     if (!op) {
       op = (async () => {
         const r = this.route(pane);
-        const args = resumeArgs(rec.agent, rec.args, rec.session);
+        let args = resumeArgs(rec.agent, rec.args, rec.session);
         if (!args) throw new AfError("cannot_resume", `cannot tell how to resume ${rec.agent}`);
+        // files it was started with that are gone now (after a reboot: what was under /tmp) are left out
+        if (r.local) {
+          const d = dropMissingFiles(rec.agent, args, existsSync);
+          args = d.args;
+          if (d.dropped.length) this.opts.notify?.("warn", `wake:${pane}`, `${rec.agent} in ${pane} resumed without ${d.dropped.join(", ")} (gone)`);
+        }
         if (rec.name) {
           // a named agent (a team member) comes back under its name, as Herdr started it
           let res = await r.backend.startAgent(rec.name, rec.agent as AgentKind, r.raw, args);

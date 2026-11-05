@@ -531,6 +531,7 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   // the stop/resume buttons always; stopping idle agents by itself only in the main server (sleep: false for a second)
   const sleeper = new Sleeper(w, access, o, opts.home, dispatchers);
   if (opts.sleep !== false) sleeper.start();
+  sleeper.startRemembering(); // for after a Herdr restart (a reboot): pages stay, agents resume on a message
   const handler = makeHandler(o, w, opts.backend, access, sleeper);
   if (opts.watchDocs !== false) watchDocuments(w, access);
   watchTakeBacks(w, access);

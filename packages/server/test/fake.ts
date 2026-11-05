@@ -183,6 +183,11 @@ export class FakeBackend implements TerminalBackend {
   async processes(paneId: string) {
     return this.procs.get(paneId) ?? [];
   }
+  /** pane id → its shell's pid (tests change it to act out a Herdr restart). */
+  shellPids = new Map<string, number>();
+  async shellPid(paneId: string) {
+    return this.panes.has(paneId) ? (this.shellPids.get(paneId) ?? 1000) : undefined;
+  }
   saved: { id: string; label: string; target: string; session: string }[] = [];
   addFails?: string;
   async savedMachines() {

@@ -56,6 +56,8 @@ export interface TerminalBackend {
   processArgv(paneId: string): Promise<string[][]>;
   /** The pane's foreground processes: pid and argv. */
   processes(paneId: string): Promise<{ pid: number; argv: string[] }[]>;
+  /** The pane's shell: a new one after the Herdr server restarted (the pane was made again from its saved layout). */
+  shellPid(paneId: string): Promise<number | undefined>;
   /** Call `onEvent` on any workspace/tab/pane/layout lifecycle event. Returns a stop function. */
   watchLifecycle(onEvent: () => void): () => void;
 }
@@ -312,6 +314,12 @@ export class Herdr implements TerminalBackend {
 
   async processArgv(paneId: string): Promise<string[][]> {
     return (await this.processes(paneId)).map((p) => p.argv);
+  }
+
+  async shellPid(paneId: string): Promise<number | undefined> {
+    const r = await this.rpc("pane.process_info", { pane_id: paneId }).catch(() => undefined);
+    const pid = Number(r?.process_info?.shell_pid);
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   }
 
   async processes(paneId: string): Promise<{ pid: number; argv: string[] }[]> {

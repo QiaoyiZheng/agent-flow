@@ -88,11 +88,54 @@ export function keptOptions(agent: string, args: string[]): string[] {
     const eq = a.startsWith("--") ? a.indexOf("=") : -1;
     const name = eq > 0 ? a.slice(0, eq) : a;
     const vals: string[] = [];
+    // a value never starts with "-": `claude --resume --settings x` is --resume without one (it picks from a list)
     if (eq < 0 && many.has(name)) while (i + 1 < args.length && !args[i + 1]!.startsWith("-")) vals.push(args[++i]!);
-    else if (eq < 0 && value.has(name) && i + 1 < args.length) vals.push(args[++i]!);
+    else if (eq < 0 && value.has(name) && i + 1 < args.length && !args[i + 1]!.startsWith("-")) vals.push(args[++i]!);
     if (!drop.has(name)) out.push(a, ...vals);
   }
   return out;
+}
+
+/**
+ * The agent's own arguments in its process's argv: after the agent itself, which may run through an interpreter
+ * (`bun …/omp …`, `node --import=… …/gemini.js …`). It is started again by its name, as a shell finds it (the user's
+ * shell functions and settings apply again, like a gemini gateway), so the interpreter's part is left out.
+ */
+export function agentArgs(agent: string, argv: string[]): string[] {
+  const i = argv.findIndex((a) => basename(a).startsWith(agent));
+  return argv.slice(i < 0 ? 1 : i + 1);
+}
+
+/** Options naming a file that must exist for the agent to start (agent-flow's hook settings, a protocol file). */
+const FILE_OPTS: Record<string, string[]> = { claude: ["--settings", "--append-system-prompt-file"], omp: ["--append-system-prompt"] };
+
+/**
+ * Leave out options whose file is gone (`exists` says), so the agent still starts: after a reboot, files under /tmp
+ * (agent-flow's own when its home is there) are gone. Returns the arguments and the files left out.
+ */
+export function dropMissingFiles(agent: string, args: string[], exists: (path: string) => boolean): { args: string[]; dropped: string[] } {
+  const opts = new Set(FILE_OPTS[agent] ?? []);
+  const out: string[] = [];
+  const dropped: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const eq = a.indexOf("=");
+    const name = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    if (!opts.has(name)) {
+      out.push(a);
+      continue;
+    }
+    const file = eq > 0 && a.startsWith("--") ? a.slice(eq + 1) : args[i + 1];
+    const takesNext = !(eq > 0 && a.startsWith("--"));
+    if (file && !file.startsWith("-") && !exists(file)) {
+      dropped.push(file);
+      if (takesNext) i++;
+      continue;
+    }
+    out.push(a);
+    if (takesNext && file !== undefined) out.push(args[++i]!);
+  }
+  return { args: out, dropped };
 }
 
 /** The arguments that start `agent` again on its conversation; undefined when the conversation is not known. */
@@ -326,14 +369,63 @@ export class Sleeper {
     } catch {}
   }
 
+  /** Stopping idle agents (every `everyMs`, if the settings say so). */
   start(everyMs = 5 * 60_000) {
     this.first = setTimeout(() => void this.tick(), 60_000);
     this.timer = setInterval(() => void this.tick(), everyMs);
   }
 
+  /**
+   * Remembering how to start each running agent again, for after a Herdr restart (Workspaces.known): right after
+   * each turn (a /clear or a resume may have changed its conversation), and every `everyMs` for agents not
+   * remembered yet, started again since, or not looked at for half an hour.
+   */
+  startRemembering(everyMs = 2 * 60_000) {
+    this.unTurn = this.w.onTurnEnd((t) => void this.remember(t.pane, true).catch(() => {}));
+    this.rememberFirst = setTimeout(() => void this.rememberAll(), 20_000);
+    this.rememberTimer = setInterval(() => void this.rememberAll(), everyMs);
+  }
+
   stop() {
     clearTimeout(this.first);
     clearInterval(this.timer);
+    clearTimeout(this.rememberFirst);
+    clearInterval(this.rememberTimer);
+    this.unTurn?.();
+  }
+
+  private rememberFirst?: ReturnType<typeof setTimeout>;
+  private rememberTimer?: ReturnType<typeof setInterval>;
+  private unTurn?: () => void;
+  private remembering = false;
+
+  async rememberAll() {
+    if (this.remembering) return;
+    this.remembering = true;
+    try {
+      for (const p of this.w.model.panes) {
+        if (!p.agent || p.asleep || !SLEEP_AGENTS.includes(p.agent as (typeof SLEEP_AGENTS)[number])) continue;
+        if (this.w.model.machines.find((m) => m.id === p.machine)?.state !== "online") continue;
+        await this.remember(p.id).catch(() => {});
+      }
+    } finally {
+      this.remembering = false;
+    }
+  }
+
+  /** Remember how to start the agent in `pane` again. `fresh`: even if it was looked at recently. */
+  async remember(pane: string, fresh = false) {
+    const p = this.w.model.panes.find((x) => x.id === pane);
+    if (!p?.agent || p.asleep) return;
+    const me = agentProcess(p.agent, await this.w.processes(pane));
+    if (!me) return;
+    const was = this.w.knownAgent(pane);
+    if (!fresh && was && was.agentPid === me.pid && this.now() - Date.parse(was.at) < 30 * 60_000) return;
+    const shellPid = await this.w.shellPid(pane);
+    if (!shellPid) return;
+    const rec = await this.record(p, me);
+    if (!rec) return;
+    this.w.rememberAgent({ ...rec, shellPid, agentPid: me.pid, paneCwd: p.cwd, at: new Date(this.now()).toISOString() });
   }
 
   setSettings(s: Partial<ProcessSettings>) {
@@ -429,31 +521,38 @@ export class Sleeper {
   private async plan(p: HPane, me: { pid: number; argv: string[] }): Promise<{ rec: SleepRecord } | { keep: string }> {
     const r = await this.access.resolve(p.id);
     const source = "source" in r && !r.source.pending ? r.source : undefined;
-    const fs = this.access.fsFor(p.id).fs;
     if (p.agent === "claude" && source) {
-      const out = await fs.sh(`grep -h -E ${sq(SCHEDULE_GREP)} ${sq(source.path)} 2>/dev/null | tail -n 200`).catch(() => "");
+      const out = await this.access.fsFor(p.id).fs.sh(`grep -h -E ${sq(SCHEDULE_GREP)} ${sq(source.path)} 2>/dev/null | tail -n 200`).catch(() => "");
       const sched = scheduledWork(out.split("\n").filter(Boolean), this.now());
       if (sched) return { keep: sched };
     }
+    const rec = await this.record(p, me, r);
+    return rec ? { rec } : { keep: "cannot tell its conversation, so it could not be resumed" };
+  }
+
+  /** How to start the agent in `p` (process `me`) again on its conversation; undefined when that is not known. */
+  private async record(p: HPane, me: { pid: number; argv: string[] }, resolved?: Awaited<ReturnType<TranscriptAccess["resolve"]>>): Promise<SleepRecord | undefined> {
+    const r = resolved ?? (await this.access.resolve(p.id));
+    const source = "source" in r && !r.source.pending ? r.source : undefined;
+    const fs = this.access.fsFor(p.id).fs;
     const head = p.agent === "gemini" && source ? (await fs.readFrom(source.path, 0, 64 * 1024).catch(() => undefined))?.data.toString("utf8") : undefined;
     const session = sessionOf(p.agent!, source, p.session, head);
-    if (!session || !resumeArgs(p.agent!, me.argv.slice(1), session)) return { keep: "cannot tell its conversation, so it could not be resumed" };
+    const args = agentArgs(p.agent!, me.argv);
+    if (!session || !resumeArgs(p.agent!, args, session)) return undefined;
     return {
-      rec: {
-        pane: p.id,
-        agent: p.agent!,
-        name: p.agentName,
-        bin: me.argv[0] ?? p.agent!,
-        args: me.argv.slice(1),
-        cwd: p.cwd,
-        status: p.agentStatus,
-        statusAt: p.statusAt,
-        session,
-        source,
-        herdrSession: p.session,
-        since: new Date(this.now()).toISOString(),
-        reason: "",
-      },
+      pane: p.id,
+      agent: p.agent!,
+      name: p.agentName,
+      bin: p.agent!,
+      args,
+      cwd: p.cwd,
+      status: p.agentStatus,
+      statusAt: p.statusAt,
+      session,
+      source,
+      herdrSession: p.session,
+      since: new Date(this.now()).toISOString(),
+      reason: "",
     };
   }
 
