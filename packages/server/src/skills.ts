@@ -66,7 +66,7 @@ until it passes) or a team that keeps taking requests.
 
 /**
  * The "deliver-document" skill: when an agent has finished a document for the user (a report, a write-up, slides),
- * it hands it over with af deliver. The user sees it next to the agent and opens it in Obsidian / VS Code / its
+ * it hands it over with af deliver. The user gets buttons under the agent's reply to open it in Obsidian / VS Code / its
  * app with one click (or it opens by itself, per the user's settings).
  */
 export function deliverSkillText(af: string) {
@@ -83,9 +83,9 @@ When a document for the user is done, run (one shell command; use the full path)
 
 - Several documents: \`${af} deliver a.md b.pptx --title "..."\`.
 - \`--note "<one line>"\` for something the user should know before opening it (e.g. "figures are placeholders").
-- It shows the file next to your pane in the agent-flow UI and lists it under "Needs you" with buttons to open it in
-  Obsidian (Markdown), VS Code (text, code, LaTeX) or its own app (PowerPoint, Word, PDF…). Depending on the user's
-  settings it may also open the app by itself. You do not open apps yourself.
+- It puts buttons under your reply in the agent-flow UI to open it in Obsidian (Markdown), VS Code (text, code,
+  LaTeX) or its own app (PowerPoint, Word, PDF…), or to preview it next to you. Nothing opens by itself unless the user
+  chose that. You do not open apps yourself.
 - Hand over a document once when it is ready, and again only after a revision the user should look at.
 - Then, in your reply, say what the document is and where it is (its path).
 

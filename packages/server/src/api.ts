@@ -248,7 +248,7 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           const file = String(body.path ?? "");
           if (!file.startsWith("/")) throw new AfError("bad_path", "give the file's absolute path");
           if (!existsSync(file) || statSync(file).isDirectory()) throw new AfError("not_found", `${file} is not a file`, 404);
-          const rec = await handOver(w, access, { path: file, pane, agent: who.kind === "member" || who.kind === "router" ? who.member : undefined, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined, show: body.show !== false });
+          const rec = await handOver(w, access, { path: file, pane, agent: who.kind === "member" || who.kind === "router" ? who.member : undefined, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined });
           return json({ delivery: rec, kind: fileKind(file), app: access.deliveries.appFor(file) });
         }
         case "POST /deliver/done":
@@ -440,28 +440,23 @@ export function watchDocuments(w: Workspaces, access: TranscriptAccess) {
 }
 
 /**
- * Hand a document over to the user: shown next to the agent that wrote it (in the viewer its last document went
- * to, else a new one), listed in "Needs you", or opened in its app at once when the settings say so.
+ * Hand a document over to the user: recorded for the agent's pane, where the chat view shows a row of open buttons
+ * under the agent's reply (Obsidian / VS Code / its app / a preview pane, on a click). Nothing opens by itself and
+ * nothing goes to "Needs you": with many agents at once, a viewer pane per document made everything slow. Only
+ * the user's setting "open right away" opens the app at once.
  */
-export async function handOver(w: Workspaces, access: TranscriptAccess, d: { path: string; pane?: string; agent?: string; title?: string; note?: string; show?: boolean; found?: boolean }) {
+export async function handOver(w: Workspaces, access: TranscriptAccess, d: { path: string; pane?: string; agent?: string; title?: string; note?: string; found?: boolean }) {
   const p = d.pane ? w.model.panes.find((x) => x.id === d.pane) : undefined;
   const list = access.deliveries;
-  let viewer: string | undefined;
-  if (p && p.machine === "local" && d.show !== false) {
-    const last = [...list.list].reverse().find((x) => x.pane === d.pane && x.viewer && w.views[x.viewer]);
-    const rec = last ? await w.show({ target: d.path, in: last.viewer }, d.agent ?? "agent") : await w.show({ target: d.path, of: d.pane, split: "right" }, d.agent ?? "agent");
-    viewer = rec.paneId;
-  }
   const opened = list.settings.auto ? (await openWith(list.appFor(d.path), d.path).catch(() => undefined))?.app : undefined;
   return list.add({
     path: d.path,
-    machine: "local",
+    machine: p?.machine ?? "local",
     pane: d.pane,
     workspace: p?.workspaceId,
     agent: d.agent,
     title: d.title?.slice(0, 200),
     note: d.note?.slice(0, 1000),
-    viewer,
     opened,
     done: !!opened,
     ...(d.found ? { found: true } : {}),
@@ -502,7 +497,7 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
     const msg = herdrPush();
     for (const c of clients) c.send(msg);
   });
-  const deliveriesPush = (): ServerPush => ({ type: "deliveries", list: access.deliveries.list.slice(-100), settings: access.deliveries.settings, apps: installedApps() });
+  const deliveriesPush = (): ServerPush => ({ type: "deliveries", list: access.deliveries.list.slice(-300), settings: access.deliveries.settings, apps: installedApps() });
   access.deliveries.onChange(() => {
     const msg = JSON.stringify(deliveriesPush());
     for (const c of clients) c.send(msg);

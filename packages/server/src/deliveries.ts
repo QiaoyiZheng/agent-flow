@@ -1,6 +1,6 @@
-// Documents an agent hands over to the user (af deliver): a report, a write-up, slides. Each is shown next to the
-// agent that wrote it and listed in "Needs you" with buttons to open it in VS Code / Obsidian / its app, or
-// opened at once when the user's settings say so. Kept on disk, so a restart keeps the list.
+// Documents an agent hands over to the user (af deliver, or found at the end of its turn): a report, a write-up,
+// slides. The chat view shows each under the agent's reply with buttons to open it in Obsidian / VS Code / its app,
+// or it opens at once when the user's settings say so. Kept on disk, so a restart keeps the list.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,8 +47,7 @@ export class Deliveries {
   }
 
   add(d: Omit<Delivery, "id" | "at">): Delivery {
-    // the same file handed over again: one item, the newest
-    this.list = this.list.filter((x) => !(x.path === d.path && x.machine === d.machine && !x.done));
+    // each hand-over is kept: the chat shows it under the reply of the turn it came in (one row per file per turn)
     const rec: Delivery = { ...d, id: Math.random().toString(36).slice(2, 10), at: new Date().toISOString() };
     this.list.push(rec);
     this.changed();

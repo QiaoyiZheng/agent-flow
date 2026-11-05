@@ -4,11 +4,12 @@
 // user asks for it.
 
 import { memo, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { ChatBlock, ChatEntry, ChatMeta, ChatOp, ChatSource, QueuedMessage } from "@af/core";
+import type { ChatBlock, ChatEntry, ChatMeta, ChatOp, ChatSource, Delivery, QueuedMessage } from "@af/core";
 import { TOKEN, api, failed, fileUrl, notify, onChat, onReconnect, openIn, send, useStore } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
 import { basename } from "./view";
+import { OpenButtons } from "./Viewers";
 
 type Tool = Extract<ChatBlock, { kind: "tool" }>;
 let seq = 0;
@@ -376,6 +377,27 @@ export function AgentView({ paneId, agent, status, background, focused, onForked
   const termVisible = (blocked && !menu && !overlay) || showTerm;
   const stripH = Math.round(Math.min(height * 0.7, Math.max(180, height * (blocked ? 0.55 : 0.4))));
   const segs = useMemo(() => segments(log.current.entries), [version]);
+  // documents this agent handed over (af deliver, or found at the end of its turn): a row of open buttons at the end
+  // of the turn they came in, i.e. under the agent's reply, before the next user message. Ones from turns not loaded
+  // yet (earlier pages) wait until those are.
+  const { deliveries } = useStore();
+  const docsAt = useMemo(() => {
+    const mine = deliveries.filter((d) => d.pane === paneId);
+    const at = new Map<number, Delivery[]>();
+    if (!mine.length || !segs.length) return at;
+    const times = segs.map((g) => (g.kind === "entry" && g.entry.block.kind === "user" ? entryTime(g.entry.at) : NaN));
+    const first = segs.map((g) => (g.kind === "entry" ? entryTime(g.entry.at) : NaN)).find((t) => !Number.isNaN(t));
+    for (const d of mine) {
+      const t = Date.parse(d.at);
+      if (first !== undefined && t < first - 60_000) continue; // its turn is in an earlier page
+      let i = times.findIndex((u) => !Number.isNaN(u) && u > t);
+      if (i < 0) i = segs.length;
+      const list = at.get(i) ?? [];
+      // one row per file per turn: the latest hand-over of it
+      at.set(i, [...list.filter((x) => x.path !== d.path), d]);
+    }
+    return at;
+  }, [deliveries, segs, paneId]);
 
   if (source === null)
     return (
@@ -429,7 +451,8 @@ export function AgentView({ paneId, agent, status, background, focused, onForked
         {source && !segs.length && !out.length && (
           <div className="chat-empty">{source.pending ? `New conversation. Send ${agent} a message below; it shows up here as you go.` : "Nothing yet. Send a message below."}</div>
         )}
-        {segs.map((s) =>
+        {segs.map((s, i) => [
+          docsAt.get(i) && <DeliveredFiles key={`docs-${i}`} docs={docsAt.get(i)!} paneId={paneId} />,
           s.kind === "steps" ? (
             <Steps key={s.key} tools={s.tools} />
           ) : (
@@ -445,7 +468,8 @@ export function AgentView({ paneId, agent, status, background, focused, onForked
               }
             />
           ),
-        )}
+        ])}
+        {docsAt.get(segs.length) && <DeliveredFiles docs={docsAt.get(segs.length)!} paneId={paneId} />}
         {out.map((o) => (
           <OutgoingMessage key={o.id} o={o} pane={paneId} working={status === "working"} stale={o.state === "sent" && now - o.at > 30_000 && status !== "working"} onTerminal={() => setShowTerm(true)} />
         ))}
@@ -792,6 +816,34 @@ function OutgoingMessage({ o, pane, working, stale, onTerminal }: { o: Outgoing;
 export function Prose({ text, hl }: { text: string; hl: number }) {
   const html = useMemo(() => renderMarkdown(text), [text, hl]);
   return <div className="c-text md" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/** Documents the agent handed over in this turn: one line each, with buttons to open it (nothing opens by itself). */
+function DeliveredFiles({ docs, paneId }: { docs: Delivery[]; paneId: string }) {
+  const remote = paneId.includes("~");
+  return (
+    <div className="c-docs">
+      {docs.map((d) => (
+        <div key={d.id} className="c-doc" title={d.path}>
+          <span className="c-doc-ic">≡</span>
+          <span className="c-doc-name">{basename(d.path)}</span>
+          {(d.title || d.note) && <span className="c-doc-note">{[d.found ? "" : d.title, d.note].filter(Boolean).join(" — ")}</span>}
+          <span className="c-doc-btns">
+            <OpenButtons path={d.path} remote={remote} pane={paneId} delivery={d.id} />
+            {!remote && (
+              <button
+                className="btn subtle"
+                title="Preview it in a pane next to this one"
+                onClick={() => api("POST", "/show", { target: d.path, of: paneId, run: undefined }).catch(failed("Could not show it"))}
+              >
+                Preview
+              </button>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** A folded group of tool calls: "4 steps · Bash ×3 · Edit calc.js". */

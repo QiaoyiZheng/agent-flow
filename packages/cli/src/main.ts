@@ -146,7 +146,7 @@ Panes (everyone; Herdr owns the layout, the web UI shows it):
   af open <path|url> --in <viewer pane>          show it in an existing viewer pane instead
   af open <path|url> --tab [WORKSPACE]           show it in a new tab
   af open <path> --app vscode|obsidian|default|finder   open it in that app on the user's Mac
-  af deliver <file>... [--title T] [--note N]    hand a finished document to the user (preview + open buttons)
+  af deliver <file>... [--title T] [--note N]    hand a finished document to the user (open buttons under your reply)
   af split [PANE] [--down] [--agent K]           split a pane (default yours): a shell, or an agent
   af close <pane>
   af workspace rename <workspace> "<name>"
@@ -337,7 +337,7 @@ async function main() {
       return console.log(`asked (#${r.seq}); end your turn, the answer is typed in when it comes`);
     }
     case "deliver": {
-      // hand a finished document to the user: shown next to this pane, listed in Needs you with open buttons
+      // hand a finished document to the user: open buttons under this agent's reply in the chat view
       if (!pos.length) die('usage: af deliver <file>... [--title "<what it is>"] [--note "<one line>"]');
       for (const f of pos) {
         const r = await call("POST", "/deliver", {
@@ -349,7 +349,7 @@ async function main() {
         const d = r.delivery;
         const app = { vscode: "VS Code", obsidian: "Obsidian", default: "its default app", finder: "Finder" }[r.app as string] ?? r.app;
         console.log(
-          `handed over ${d.path}${d.viewer ? `; shown in pane ${d.viewer}` : ""}; ${d.opened ? `opened in ${app}` : `the user can open it in ${app} from agent-flow`}`,
+          `handed over ${d.path}; ${d.opened ? `opened in ${app}` : `the user can open it in ${app} from the buttons under your reply in agent-flow`}`,
         );
       }
       return;

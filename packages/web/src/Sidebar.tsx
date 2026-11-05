@@ -339,7 +339,6 @@ function NeedsYou({
   onNeed: (n: Need) => void;
 }) {
   const [questions, setQuestions] = useState<Record<string, string>>({});
-  const { deliveries } = useStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const online = (p: HPane) => {
     const m = herdr?.machines.find((x) => x.id === p.machine);
@@ -408,29 +407,7 @@ function NeedsYou({
     if (!p.agent || p.agentStatus !== "done" || p.background || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
     if ((seen[p.id] ?? "") >= p.statusAt) continue;
     if (managed.has(p.id)) continue; // members and routers report to whoever manages them
-    if (deliveries.some((d) => !d.done && d.pane === p.id)) continue; // its document is listed: that says it finished
     needs.push({ key: `f:${p.id}`, kind: "finished", label: `finished · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: p.title ?? "", at: p.statusAt, paneId: p.id, workspace: p.workspaceId, statusAt: p.statusAt });
-  }
-  // documents agents handed over (af deliver) and not yet opened or dismissed
-  for (const d of deliveries) {
-    if (d.done) continue;
-    const name = d.path.split("/").at(-1) ?? d.path;
-    const ag = d.pane ? herdr?.panes.find((p) => p.id === d.pane) : undefined;
-    needs.push({
-      key: `d:${d.id}`,
-      kind: "delivery",
-      label: `${d.found ? "changed" : "ready"} · ${name}`,
-      where: [wsLabel(d.workspace), d.agent ?? ag?.agentName ?? ag?.agent].filter(Boolean).join(" · "),
-      text: [d.title, d.note].filter(Boolean).join(" — "),
-      at: d.at,
-      paneId: d.viewer && herdr?.panes.some((p) => p.id === d.viewer) ? d.viewer : d.pane,
-      workspace: d.workspace,
-      path: d.path,
-      deliveryId: d.id,
-      // opening or dismissing it counts as having seen the agent that wrote it
-      agentPane: d.pane,
-      statusAt: ag?.statusAt,
-    });
   }
   const rank = (n: Need) => (n.kind === "finished" ? 1 : 0);
   needs.sort((a, b) => rank(a) - rank(b) || b.at.localeCompare(a.at));
@@ -548,7 +525,7 @@ function OpenSettingsMenu({ onClose }: { onClose: () => void }) {
       <div className="os-title">When an agent hands over a document</div>
       <label className="os-row radio">
         <input type="radio" checked={!s.auto} onChange={() => set({ auto: false })} />
-        <span>Show it next to the agent; I open it with a click</span>
+        <span>Buttons under the agent's reply; I open it with a click</span>
       </label>
       <label className="os-row radio">
         <input type="radio" checked={s.auto} onChange={() => set({ auto: true })} />

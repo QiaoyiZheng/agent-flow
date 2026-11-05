@@ -718,7 +718,7 @@ describe("questions Herdr does not report", () => {
 });
 
 describe("af deliver: a finished document handed to the user", () => {
-  test("shown next to the agent, then in the same viewer; listed until done; bad paths refused", async () => {
+  test("recorded for the agent's reply, no pane opened; marked done when opened; bad paths refused", async () => {
     const { home, backend, w, ws } = await setup();
     await backend.startAgent("a1", "claude", ws.paneId, []);
     await w.refresh();
@@ -734,18 +734,20 @@ describe("af deliver: a finished document handed to the user", () => {
     const first = await post("/deliver", { path: report, title: "Weekly report", pane: ws.paneId });
     expect(first.status).toBe(200);
     expect(first.body).toMatchObject({ kind: "markdown", app: "obsidian", delivery: { path: report, title: "Weekly report", pane: ws.paneId, machine: "local", done: false } });
-    const viewer = first.body.delivery.viewer;
-    expect(w.views[viewer]?.target).toBe(report); // a viewer pane split off the agent's pane
+    // nothing opens by itself: no viewer pane (with many agents a pane per document made everything slow)
+    expect(first.body.delivery.viewer).toBeUndefined();
+    expect(Object.keys(w.views)).toEqual([]);
+    expect(w.model.panes.filter((p) => p.workspaceId === ws.workspaceId).length).toBe(1);
     const second = await post("/deliver", { path: deck, pane: ws.paneId });
-    expect(second.body.delivery.viewer).toBe(viewer); // the same viewer, not a pile of panes
     expect(second.body).toMatchObject({ kind: "document", app: "default" });
-    expect(w.views[viewer]?.target).toBe(deck);
+    expect(Object.keys(w.views)).toEqual([]);
     expect((await post("/deliver/done", { id: first.body.delivery.id })).body.ok).toBe(true);
     expect((await post("/deliver", { path: "relative.md", pane: ws.paneId })).status).toBe(400);
     expect((await post("/deliver", { path: join(home, "nope.md"), pane: ws.paneId })).status).toBe(404);
-    // outside Herdr (no pane): listed, not shown
+    // outside Herdr (no pane): recorded too
     const loose = await post("/deliver", { path: report });
-    expect(loose.body.delivery.viewer).toBeUndefined();
+    expect(loose.body.delivery.path).toBe(report);
+    expect(loose.body.delivery.pane).toBeUndefined();
     // a file that is not there is refused before any app starts
     expect((await post("/open-with", { path: "/x/a.md", app: "obsidian" })).status).toBe(404);
   });

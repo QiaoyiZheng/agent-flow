@@ -892,3 +892,11 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .menu-current { margin-left: 8px; font-size: 10.5px; color: var(--s-accepted); border: 1px solid rgba(79, 180, 134, 0.4); border-radius: 4px; padding: 0 5px; vertical-align: 1px; }
 .pane-head .st.st-background { color: var(--s-running); }
 .agent-status.background { color: var(--text-2); }
+/* documents handed over in a turn: under the agent's reply */
+.c-docs { margin: 6px 0 10px; display: flex; flex-direction: column; gap: 4px; }
+.c-doc { display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-1); font-size: 12.5px; min-width: 0; }
+.c-doc-ic { color: var(--accent); flex: none; }
+.c-doc-name { color: var(--text); font-weight: 600; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-doc-note { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.c-doc-btns { margin-left: auto; display: inline-flex; gap: 4px; flex: none; }
+.c-doc-btns .btn { padding: 2px 9px; font-size: 11.5px; }

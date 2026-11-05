@@ -42,16 +42,15 @@ describe("opening files in apps", () => {
 });
 
 describe("documents handed over", () => {
-  test("one item per file, done when opened or dismissed; settings choose the app and survive a restart", () => {
+  test("every hand-over kept (the chat shows one per file per turn), done when opened; settings choose the app and survive a restart", () => {
     const home = tmp();
     const d = new Deliveries(home);
     expect(d.settings).toEqual({ auto: false, markdown: "obsidian", text: "vscode", document: "default" });
     const a = d.add({ path: "/p/report.md", machine: "local", pane: "w1:p1", title: "Report" });
-    d.add({ path: "/p/report.md", machine: "local", pane: "w1:p1", title: "Report v2" }); // handed over again
+    d.add({ path: "/p/report.md", machine: "local", pane: "w1:p1", title: "Report v2" }); // handed over again, a later turn
+    expect(d.list.map((x) => x.title)).toEqual(["Report", "Report v2"]);
+    d.done(a.id);
     expect(d.list.filter((x) => !x.done).map((x) => x.title)).toEqual(["Report v2"]);
-    expect(d.list.some((x) => x.id === a.id)).toBe(false);
-    d.done(d.list[0]!.id);
-    expect(d.list.filter((x) => !x.done)).toEqual([]);
     expect(d.appFor("/p/a.md")).toBe("obsidian");
     expect(d.appFor("/p/a.tex")).toBe("vscode");
     expect(d.appFor("/p/a.pptx")).toBe("default");
@@ -60,7 +59,7 @@ describe("documents handed over", () => {
     writeFileSync(join(home, "other.json"), "{}");
     const again = new Deliveries(home);
     expect(again.settings.auto).toBe(true);
-    expect(again.list.length).toBe(1);
+    expect(again.list.length).toBe(2);
   });
 });
 
