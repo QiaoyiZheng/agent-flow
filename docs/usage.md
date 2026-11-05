@@ -45,9 +45,9 @@ af playbook list
 af team new --playbook humanize-loop --goal "给登录页加验证码"
 ```
 
-也可以在网页左栏 "+ new" → New team 里开：选目录、剧本、目标、router 用哪种 agent。`af team new --on <机器> --cwd '<目录>'` 把 router 开在远程机器上。
+也可以在网页左栏 "+ new" → New team 里开：选目录（可点 Browse… 在文件浏览器里选文件夹）、剧本、目标、router 用哪种 agent。点 "+ new" → New workspace（或机器行上的 "+"）新建普通 workspace：本地机器上会在 shell 旁边打开这个文件夹的查看器 pane。`af team new --on <机器> --cwd '<目录>'` 把 router 开在远程机器上。
 
-远程机器上你自己开的 session 也能直接派活：agent-flow 连上一台机器后，会在那边放一个 `~/.agent-flow/bin/af`（经 SSH 转给 Mac 上的 server），并把 agent-flow skill 装进那边的 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`（有这些目录时）。那边能用的只有派活、工单、队列这些命令。
+远程机器上你自己开的 session 也能直接派活：agent-flow 连上一台机器后，会在那边放一个 `~/.agent-flow/bin/af`（经 SSH 转给 Mac 上的 server），并把 agent-flow skill 装进那边的 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`（有这些目录时）。那边能用的只有派活、工单、队列、`af machines` 这些命令。
 
 - agent-flow 新开一个 workspace，起一个 **router**。router 只路由不干活：按剧本开成员、开工单、把一个成员的结果交给下一个成员、数循环的轮数、在需要你拍板时汇报。
 - 成员之间不直接说话。成员做完写 `result.md`，执行 `af submit`；结果进 router 的队列，由 router 决定下一步交给谁。
@@ -73,7 +73,7 @@ af team new --playbook humanize-loop --goal "给登录页加验证码"
 ## 打开文件、交付文档
 
 - **打开文件**：pane 的 ＋ → "open a file, folder or page…"。预览顶栏有 Obsidian / VS Code / Open / Finder 按钮。
-- **agent 写完文档会交给你**：`deliver-document` skill 让 agent 执行 `af deliver <文件>`，文件显示在它旁边，"需要你"里出现打开按钮。⚙ 里可以设成直接打开、按文件类型选应用。
+- **agent 写完文档会交给你**：`deliver-document` skill 让 agent 执行 `af deliver <文件>`（一轮结束时改过的文档也会自动记录），在聊天视图里那个 agent 的回复下面出现一行，带 Obsidian / VS Code / 默认应用（Open）/ Finder / 旁边预览（Preview）这些按钮，不会自动开查看器 pane，不进"需要你"，也不发通知。⚙ 里可以设成直接打开、按文件类型选应用。
 - 远程机器上的文件只能用 VS Code（Remote-SSH）打开。
 
 ## 常用命令速查
@@ -81,6 +81,7 @@ af team new --playbook humanize-loop --goal "给登录页加验证码"
 | 做什么 | 命令 |
 |---|---|
 | 派一件活 | `af task <claude\|codex\|omp\|gemini> "…" --worktree\|--no-worktree [--name N] [--on 机器 --cwd D] [--prepare "…"]` |
+| 看 `--on` 能用的机器 | `af machines` |
 | 给已有的 session 更多活 | `af task --to <名字> "…"` · `af tell <工单\|名字> "…"` |
 | 看 / 取队列 | `af queue` · `af queue take` |
 | 回答成员屏幕上的问题 | `af answer <工单\|名字> <选项号> [--text "…"]` |

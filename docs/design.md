@@ -114,7 +114,7 @@ af task gemini "根据 plan.md 写一份发布说明" --name write
 - `--prepare "<命令>"`（可选，默认没有）：成员启动前在它的目录里跑一次（装依赖、链数据）。最多 10 分钟，输出存进工单的 `prepare.log`；失败时工单关成 failed，管理者在队列里收到最后几行。用户的意见：大多数活用不上，所以不设默认的准备脚本。
 - `--on <机器> [--cwd <那台机器上的目录>]`：成员开在一台已连接的 SSH 机器上，见 4.8。
 - `af task --to plan "…"` 把新工单交给已有的成员（同一个 session）；`af tell T1 "…"` 在同一张工单上追加要求。
-- 成员做完一轮（working → idle，6 秒后仍空闲，防止状态抖动），agent-flow 从它的对话记录里取这一轮最后的回复，写进 `result.md`，工单变 submitted，队列里进一条 `turn`。取不到对话记录就用屏幕最后 60 行。
+- 成员做完一轮（working → idle/done，6 秒后仍空闲且无后台任务、屏幕上也没有提示或提问，防止状态抖动），agent-flow 从它的对话记录里取这一轮最后的回复，写进 `result.md`，工单变 submitted，队列里进一条 `turn`。对话记录里找不到回复时，标明没有找到回复并附上屏幕最后 25 行。
 - 模式一里 `af queue take` 取走即算处理完；工单不需要显式关闭。
 
 ### 4.4 模式二：agent team 和 router
@@ -148,9 +148,9 @@ T4 reviewer  审 T3             submit pass → #4 → router 关 T4，af report
   "text": "第 1 版写完，测试过了", "state": "queued" }
 ```
 
-- 种类：`user`（用户或上级的新要求）、`ask`（成员提问）、`asking`（成员屏幕上有任务相关的提问）、`stuck`（可能卡住）、`exited`（进程退出）、`error`（API 错误重试 3 次仍失败）、`submit`（成员交结果）、`turn`（做完一轮：模式一是结果，模式二是"没提交"）、`report`（下级 team 的汇报）。
+- 种类：`user`（用户或上级的新要求）、`ask`（成员提问）、`asking`（成员屏幕上有任务相关的提问）、`approval`（成员屏幕上有权限审批或等按键的提示，需等用户处理）、`stuck`（可能卡住）、`exited`（进程退出）、`error`（API 错误重试 3 次仍失败）、`submit`（成员交结果）、`turn`（做完一轮：模式一是结果，模式二是"没提交"）、`report`（下级 team 的汇报）。
 - 状态：`queued` → `taken` → `handled`。
-- **一次取走全部**（借鉴 Super-Agent 的批处理）：`af queue take` 取走所有 queued 项，按 user > ask/asking/stuck/exited/error > submit/turn/report、同类按先后打印。每项带工单号、成员、前 400 字和文件路径（全文按路径读）。
+- **一次取走全部**（借鉴 Super-Agent 的批处理）：`af queue take` 取走所有 queued 项，按 user > ask/asking/approval/stuck/exited/error > submit/turn/report、同类按先后打印。每项带工单号、成员、前 400 字和文件路径（全文按路径读）。
 - 模式二里每一项都要用一个动作结束：对它的工单 `af ticket open --from` / `af ticket close` / `af reply` / `af answer` / `af tell`，或 `af report`、`af queue done <seq>`。对某张工单做了动作，这张工单已取走的项都算处理完。router 空闲了手上还压着取走没处理的项，server 提醒一次，再不处理就进"需要你"。
 - **通知**：管理者空闲、屏幕上没有菜单或面板、队列里有没通知过的项时，往它的终端打一行：`[agent-flow] 3 new in your queue: T2 reviewer submitted; T3 coder asking. Run: af queue take`。它忙时只排队，不重复通知。通知打出去 30 秒内它没开始工作，再打一次；两次都没反应就进"需要你"。server 重启后，没通知过的项照样会通知。
 
@@ -160,8 +160,8 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 
 | 看到什么 | 怎么做 |
 |---|---|
-| 做完一轮 | 见 4.3（模式一）；模式二里没 `af submit` 就等 20 秒，进一条 `turn`（"做完一轮没提交"，带最后的回复） |
-| 屏幕上有提问 | 任务本身的问题（"用 A 还是 B"）进队列，管理者 `af answer <工单> <选项号> [--text …]` 回答（和用户在卡片上点选一样：先确认菜单没变，再按键）。**权限审批和"信任这个文件夹"不进队列**，只在"需要你"里交给用户 |
+| 做完一轮 | 见 4.3（模式一）；模式二里没 `af submit` 就等 20 秒，进一条 `turn`（"做完一轮没提交"，带最后的回复）。**判定做完前先读一次屏幕**：如果屏幕上有提问或提示（包括等按键的提示，如 claude 的 auto mode 计费通知"Enter to continue"，此时 Herdr 可能报 `done`），**不算这一轮做完** |
+| 屏幕上有提问或提示 | 任务本身的问题（"用 A 还是 B"）进队列（`asking`），管理者 `af answer <工单> <选项号> [--text …]` 回答（和用户在卡片上点选一样：先确认菜单没变，再按键）。**权限审批、"信任这个文件夹"和等按键的通知面板**由用户在界面处理（连续两次检查仍在屏幕上的等按键提示也会把 pane 标为 `asking`，workspace 显示 blocked，进"需要你"并挡住队列投递）；成员遇上这类提示时，管理者的队列只收到一次 `approval` 知会（告知成员正在等用户按键、不要代答） |
 | 还在工作中，但对话记录 10 分钟没有变长 | 进一条 `stuck`，带屏幕最后几行；同一段只报一次 |
 | 进程退出 | 进一条 `exited` |
 | 一轮以临时错误结束（429、5xx、overloaded、连接被重置、超时） | 自动打一句"继续"，最多 3 次；还不行进一条 `error` |
@@ -196,9 +196,9 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 **远程的 `af`**（`packages/server/src/remote-af.ts`）：
 - 每台连上的机器，server 在 Mac 上开一个只服务它的 socket（`~/.agent-flow/ssh/<机器>.af.sock`），用这台机器的 SSH 主连接反向转发到那边的 `~/.agent-flow/af.sock`（`ssh -O forward -R`），并写一个 `~/.agent-flow/bin/af` 脚本（只要 sh 和 curl）。
 - 那边执行 `af …` 时，脚本把参数、目录、`AF_TEAM` / `AF_AGENT` / `HERDR_PANE_ID` 送过来，server 在 Mac 上用 `AF_REMOTE=<机器>` 跑同一个 af CLI，输出和退出码送回去。所以所有命令在哪里都一样。
-- 只开放派活、工单、队列相关的命令；不能往 pane 里打字，也不能读 Mac 上的文件。调用者的 pane 加上机器前缀；成员只能代表在这台机器上跑的成员说话。`af read` 只读这台机器上的 pane。
+- 只开放派活、工单、队列、`af machines` 相关的命令；不能往 pane 里打字，也不能读 Mac 上的文件。调用者的 pane 加上机器前缀；成员只能代表在这台机器上跑的成员说话。`af read` 只读这台机器上的 pane。
 - 远程机器上有 `~/.claude`、`~/.codex`、`~/.gemini` 时，写入 agent-flow skill（af 路径是那台机器上的）。
-- 后台任务的判断由 agent-flow-1b 的 `background.ts` 负责，对远程机器同样有效（通过 SSH 检查）。
+- 后台任务的判断由 `background.ts` 负责，对远程机器同样有效（通过 SSH 检查；每次状态变化只查一次，不会在普通一轮结束后循环重查）。
 - claude 的 SessionStart hook（`--settings`）是 Mac 上的文件，不用于远程成员；远程 claude 的对话记录按 `--session-id` 找。
 - 第二个 server（`AF_SECOND_SERVER=1`）不接管远程的 `af.sock`。
 
@@ -209,7 +209,7 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 - **相同**：router 不干活（文章的对照实验：一个 session 带 subagent 工具，提示词中性时 5 次里一次也没交出去，p95 29.5 分钟；Super-Agent 15.7 分钟）；工单 + 派工；成员不直接说话；界面只显示要人处理的事。
 - **不同**：它常驻 GitHub 仓库、接团队群聊，有一大块准入和授权；我们是一个用户在本地说话。它的成员之间几乎不接力（一张工单一个 PR）；我们的成员要接力和循环，这正是文章列为"还没解决"的部分。它控制 agent 内部（能在一轮中间插消息、长命令转后台）；我们驱动的是原版 CLI，只能打字、读屏幕和对话记录。它让后续消息绕过 router 直接给 worker；我们一切经过 router（它的数据：去掉直通后完成时间几乎不变，router 多做约 30% 的决定，cache read token 多约 37%）。
 - **借来的**：一次处理整个队列（4.5）；router 不改写，只转原文（task.md 放原话或上游 result.md 的路径，备注一句）；固定的几种报告（ready / blocked / failed / dropped，progress 不进队列）；先存再做、确认送到（4.6）；一个函数算阶段（4.7）；空闲不等于做完（`turn` 项、`af status`）；临时错误自动"继续"；重启后的恢复说明；通知里带 id、前 400 字和路径，`af ticket show` 带相关工单的 id，可以一步步往回找。
-- **以后再说**：Watchdog（一个独立 agent 定时检查成员有没有实际进展）、每张工单的准备命令、同时工作的成员数上限、成员把不属于自己的活交回 router。
+- **以后再说**：Watchdog（一个独立 agent 定时检查成员有没有实际进展）、同时工作的成员数上限、成员把不属于自己的活交回 router。
 - **不借**：异步工具（要改 agent 自己的工具循环）、事件来源和准入规则、计算/状态/环境分离（Herdr 已经让终端独立于 af server）。
 
 ## 6. 仓库
@@ -254,6 +254,7 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 | `af report "…" [--done]` | router | 向调用者（或"需要你"）汇报 |
 | `af submit --status ready\|blocked\|failed\|dropped --note "…" [--to 成员] [--ticket T]` | 成员 | 交结果（result.md 写在工单文件夹里） |
 | `af progress "…"` · `af ask "…"` | 成员 | 进展（不进队列）· 提问（进队列） |
+| `af machines` | 所有人 | 列出 `--on` 能用的机器（本机和已连接的 SSH 机器，远程机器上也可调用） |
 | `af ls` / `af read` / `af open` / `af deliver` / `af split` / `af close` …… | 所有人 | 不变 |
 
 ## 9. 协议和 skill
@@ -262,7 +263,11 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 - `packages/skill/member.md`：成员的规则（读 task.md、写 result.md、`af submit` 正好一次、提问用 `af ask`、不和别的成员说话）。
 - 注入方式：claude `--append-system-prompt-file`，codex profile，omp `--append-system-prompt=`。gemini 没有追加系统提示的参数，协议作为它的**第一条消息打进去**（再等它回 ready 才送工单）。不用 `-i "@<文件>"`：那要把协议所在的文件夹加进 gemini 的 workspace，gemini 会为这个文件夹弹"是否信任"（2026-11-04 实测，每个 gemini 成员都会卡住）。**协议文本绝不能放在命令行上**（macOS 单行 1024 字节）。
 - 模式一的成员不注入协议，用平常的启动参数（claude 带 `--session-id` 和 SessionStart hook，codex `--no-alt-screen`，gemini YOLO）。
-- `agent-flow` skill（server 启动时写进 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`）教会用户的 session 两件事：直接派活用 `af task`；要循环或长期运转的活用 `af team new`。
+- `agent-flow` 和 `deliver-document` skill（server 启动时写进 `~/.claude/skills`、`~/.codex/skills`、`~/.gemini/skills`）：`agent-flow` 教会用户的 session 直接派活用 `af task`、要循环或长期运转的活用 `af team new`；`deliver-document` 让 agent 写完给用户看的文档后执行 `af deliver`。
+
+### 9.1 第二个 server
+
+`AF_SECOND_SERVER=1`（配合自己的 `AF_HOME`、`AF_SOCK`、`--port`）：在主 server 旁边再开一个（测试、试一个分支）。它不改写用户 skill 目录里的 skill，也不交付 agent 改过的文档（这两件事由主 server 做），所以不会影响用户正在用的 session。
 
 ## 10. UI
 
@@ -285,17 +290,18 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 ```
 
 - **布局归 Herdr 管。** 网页显示 Herdr 真实的 机器 → workspace → tab → 分屏 pane；在网页里分屏、关闭、拖分隔线都直接改 Herdr，所以 Herdr TUI 和网页永远一致，在 TUI 里建的分屏网页里也看得到。
-- **左栏**：顶部是"需要你"；下面是一棵树：机器 → workspace（有 team 的 workspace 带 ◆ 标记）。已关闭 workspace 的 team 列在"Past teams"。SSH 机器折叠成一组。
-- **中间**：所选 workspace 的 Herdr tab；每个 tab 是 Herdr 的二叉分屏树。pane 有三种：终端（shell）、agent、查看器（文件 / 文件夹 / 网页）。pane 头上有分屏（右 / 下）、"＋"（在旁边开 claude / codex / omp agent，或文件 / URL）、关闭。run 的 workspace 默认打开 lead 的 tab。
+- **左栏**：顶部是"需要你"（由 team 或旧 run 派出的成员/worker 的完成状态由派活的 session 处理，不进用户的"需要你"；用户自己 fork 的 agent 照旧提醒）；下面是一棵树：机器 → workspace（有 team 的 workspace 带 ◆ 标记）。已关闭 workspace 的 team 列在"Past teams"。SSH 机器折叠成一组。
+- **中间**：所选 workspace 的 Herdr tab；每个 tab 是 Herdr 的二叉分屏树。pane 有三种：终端（shell）、agent、查看器（文件 / 文件夹 / 网页）。pane 头上有分屏（右 / 下）、"＋"（在旁边开 claude / codex / omp / gemini agent，或文件 / URL）、关闭。run 的 workspace 默认打开 lead 的 tab。
 - **右栏**（2026-11-04 改）：workspace 里有 team 时出现。
   - 模式一：主 agent 的竖时间轴。每张工单是挂在时间轴上的一个框（成员名、agent 种类、阶段、用时、结果的第一句），结果回来时画一条回到时间轴的线。点框跳到成员的 tab；框下方展开工单详情（task.md、result.md、轮次、"Go to pane"）。成员自己又开了 team 的，框上有 ⊕，点开是那个 team。team 工单的框点进去切到那个 team 的 workspace。
   - 模式二：泳道图。router 一条竖线，每个成员一条；每张工单是 router → 成员的箭头，每次提交是成员 → router 的箭头，标出线程和轮次。点箭头打开对应的 task.md 或 result.md。上方显示队列里还没处理的项。
 - **底部**：常驻终端抽屉，它自己的 Herdr workspace 不在树里显示。
 
-### 10.2 查看器 pane 和 `af open`
+### 10.2 查看器 pane、`af open` 与 `af deliver`
 
 - 查看器是一个普通的 Herdr pane，里面运行 `af viewer`。server 在 `~/.agent-flow/views.json` 里记"哪个 pane 显示什么"。网页看到这个记录，就画高亮的文件 / Markdown / 图片 / PDF / 网页；Herdr TUI 里则显示 `af viewer` 打出的纯文本（有 bat 就用 bat 高亮）。pane 被关掉后记录自动清除。
-- `af open` 默认在**调用者自己的 pane 旁边**开查看器，所以 worker 开的文件出现在它自己的 tab 里，不抢用户的焦点；`--of` 指定开在谁旁边，`--in` 换掉已有查看器的内容（避免越开越多），`--tab` 开新 tab。run 里的调用仍然记一条 `open.requested`，节点详情的 "opened" 列表照旧。
+- `af open` 默认在**调用者自己的 pane 旁边**开查看器，所以 worker 开的文件出现在它自己的 tab 里，不抢用户的焦点；`--of` 指定开在谁旁边，`--in` 换掉已有查看器的内容（避免越开越多），`--tab` 开新 tab，`--app vscode|obsidian|default|finder` 在对应应用里打开（远程机器上的文件只能用 VS Code 通过 Remote-SSH 打开）。
+- **交付文档（`af deliver` 与自动检测）**：agent 执行 `af deliver <文件>` 交付写完的文档，或一轮结束时 `doc-watch.ts` 自动发现在该轮内修改过的文档（本地 agent），都记在 `~/.agent-flow/deliveries.json` 里。聊天视图里在该轮 agent 的回复下方显示一行打开按钮（Obsidian / VS Code / 默认应用 Open / Finder / 旁边预览 Preview，每轮每个文件一行）；**不会自动在旁边分屏开查看器 pane，不进"需要你"，也不发通知**（除非用户在"需要你"旁的 ⚙ 设置里勾选了立即用应用打开）。
 - agent 也能直接用 `herdr` CLI 做其余的排布（`herdr pane move`、`herdr tab create`……），因为它们本来就跑在 Herdr pane 里。
 
 ### 10.2.1 与 Herdr 同步的实现（实测）
@@ -351,10 +357,10 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
   - "Disconnect" 结束后台 SSH 连接（`ssh -O exit`）并不再自动重连；"Remove machine" 同时从 Herdr 的列表里删除。
 - 需要免密 SSH（BatchMode）。实测 allinai2plus、ds03 可以；其余机器未测。
 - **增删机器**（用户要求）：侧栏"+ machine"填 SSH 目标（和可选名字）→ `herdr machine add`，写进 Herdr 自己的机器列表（Herdr TUI 里也会出现），随后自动连接。远程没装 Herdr、需要确认安装时，Herdr 要交互确认：表单给出"在常驻终端里运行 setup"按钮，把 `herdr machine add …` 打进常驻终端，由用户回答。机器"⋯"菜单里"Remove machine…"→ `herdr machine remove`；那台机器上的 Herdr server 和 agent 继续运行，再加回来就能接上。每 15 秒同步一次 Herdr 的机器列表，在 Herdr TUI 里增删的机器也会跟着变；机器的 id 按 Herdr profile 固定。
-- **增删 workspace**（用户要求）：每台机器行上的"+"新建 workspace（远程机器支持 `~` 路径，目录在那台机器上检查）；workspace"⋯"菜单里"Close workspace…"关闭并停止其中所有进程（如果是 run 的 workspace，同时停止该 run），确认框里写明会停掉几个 agent、几个 pane。
+- **增删 workspace**（用户要求）：每台机器行上的"+"（或 "+ new" → New workspace）新建 workspace（表单里本机可点 Browse… 选目录，远程机器支持 `~` 路径且目录在那台机器上检查；本机新建普通 workspace 时会在 shell 右侧分屏打开该文件夹的查看器 pane）；workspace"⋯"菜单里"Close workspace…"关闭并停止其中所有进程（如果是 team 的 workspace，同时停止该 team），确认框里写明会停掉几个 agent、几个 pane。
 - 远程 agent 的渲染视图：对话记录在远程读，按 session 精确匹配（实测 3 个远程 agent 都命中）；轮询 1.5 秒一次；打开时只读最后 8 MB。
 - 远程 agent 粘贴图片：附件写到**远程机器**上，提示词里给的是远程路径，agent 能直接读。
-- 暂不支持：在远程 pane 旁边开查看器（查看器是本地进程）；在远程机器上跑 run 的 worker。
+- 暂不支持：在远程 pane 旁边开查看器（查看器是本地进程）。
 - 注意：网页里打开远程 pane 时，那个 pane 的 PTY 会变成网页里的尺寸（和本地同一条 Herdr 多客户端规则）。
 
 ### 10.2.4 报错信息、"/" 菜单、fork（2026-11-02，用户要求）
@@ -369,11 +375,11 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 
 ### 10.2.5 剧本、`$AF_OUT` 和 agent-flow skill（2026-11-03，2026-11-04 改）
 
-- **剧本**（原来的 workflow 模板改写而来）：见 4.4。网页 "+ new" → New team：选目录、剧本、目标、router 的 agent 种类。
+- **剧本**（原来的 workflow 模板改写而来）：见 4.4。网页 "+ new" → New team：选目录（可点 Browse… 选文件夹）、剧本、目标、router 的 agent 种类。
 - **`$AF_OUT`**：每个 team 的输出目录（`~/.agent-flow/teams/<team>/out`，不在仓库里），成员之间交接报告用。
 - `af here` 去掉了：模式一第一次 `af task` 时自动建 team，按调用者的 `HERDR_PANE_ID` 认人。
-- **agent-flow skill**：server 启动时写进 `~/.claude/skills/agent-flow/SKILL.md` 和 `~/.codex/skills/agent-flow/SKILL.md`（omp 读 claude 的目录），内容含本 server 的 af 路径（af shim 里带默认 AF_SOCK）。实测：新开的 claude 收到"让一个 codex 和一个 omp 同时做…"后自己加载 skill、执行 `af here`、建两个并行节点、校验 omp 的结果；codex 卡在"信任此文件夹"时它停下来问用户，没有替用户选。
-- **面板和通知**：除了选项菜单，agent 的屏幕底部如果不是它平常的输入框（claude 的 ──/❯/── 框、codex 的 `›` 行、omp 的 `╰─` 行），就是开着一个面板或通知（如 claude 的 auto mode 计费通知，它要回车确认）。渲染视图把它显示成一张卡片（文字、链接、Continue / Esc 按钮）；pane 往上滚动时不判断。**agent-flow 绝不往开着菜单或面板的 agent 里打字**（输入框、通知投递都检查屏幕）：Herdr 有时认不出这些对话框，此前一次通知就这样误答了 claude 的提问。
+- **agent-flow skill**：server 启动时写进 `~/.claude/skills/agent-flow/SKILL.md`、`~/.codex/skills/agent-flow/SKILL.md` 和 `~/.gemini/skills/agent-flow/SKILL.md`（omp 读 claude 的目录），内容含本 server 的 af 路径（af shim 里带默认 AF_SOCK）。实测：新开的 claude 收到"让一个 codex 和一个 omp 同时做…"后自己加载 skill、执行 `af here`、建两个并行节点、校验 omp 的结果；codex 卡在"信任此文件夹"时它停下来问用户，没有替用户选。
+- **面板和通知**：除了选项菜单，agent 的屏幕底部如果不是它平常的输入框（claude 的 ──/❯/── 框、codex 的 `›` 行、omp 的 `╰─` 行、gemini 的输入行），就是开着一个面板或通知（如 claude 的 auto mode 计费通知，它要回车确认）。渲染视图把它显示成一张卡片（文字、链接、Continue / Esc 按钮）；pane 往上滚动时不判断。连续两次检查（本地约 2.5 秒、远程约 6 秒）仍停留在屏幕上的等按键通知会把该 pane 标为 `asking`（带通知文字），workspace 显示 blocked，进"需要你"，且不算这一轮做完。**agent-flow 绝不往开着菜单或面板的 agent 里打字**（输入框、通知投递都检查屏幕）：Herdr 有时认不出这些对话框，此前一次通知就这样误答了 claude 的提问。
 - 问题预览：claude 在选项右边画预览框，屏幕上只有当前高亮那项的预览；卡片从 claude 自己的对话记录里取每个选项的预览和说明，显示在旁边（窄 pane 时在下方）。
 - codex 没向 Herdr 报告 session 时，按目录找它的 rollout 文件（session_meta 里有 cwd），同目录多个 codex 时用屏幕内容比对，和 claude 一样。
 - 中文 Markdown 里 `**位置：**main.tex` 这类粗体按 CommonMark 不成立，agent 自己的界面却显示为粗体；渲染时按 agent 的写法处理。
@@ -399,11 +405,11 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 ```
 agent-flow/
   packages/
-    core/     共享类型：图、实例、消息、事件
-    server/   Bun：Herdr 适配层、调度器、信箱、git、WebSocket
+    core/     共享类型：team、工单、队列、事件
+    server/   Bun：Herdr 适配层、team 与工单调度、对话记录、git、WebSocket
     cli/      af
-    web/      React + Vite + xterm.js + React Flow
-    skill/    lead/ 与 worker/ 两份 SKILL.md
+    web/      React + Vite + xterm.js
+    skill/    router.md、member.md 与内置 playbooks/
   spikes/     第 0 步的验证代码，验证完就丢
   docs/
 ```
@@ -415,12 +421,12 @@ agent-flow/
 ## 12. v0 范围
 
 **包含：**
-- server：Herdr 适配层、信箱、图调度（自动派发、条件边、回边、`--max`）、worktree 隔离与合并、`events.jsonl`
+- server：Herdr 适配层（含 SSH 远程机器）、两种模式（直接派活与 router team）、工单与队列（含循环上限 `--max`、准备命令 `--prepare`）、worktree 隔离、`events.jsonl`
 - cli：第 8 节列出的全部命令
-- skill：lead 和 worker 两份，支持 claude、codex、omp
-- web：第 10 节的布局、标签页、图、节点详情、"需要你"待办、深色主题
+- skill：`router.md`、`member.md`、内置剧本（含常驻接活的 `super-agent`），支持 claude、codex、omp、gemini
+- web：第 10 节的布局、标签页、时间轴与泳道图、"需要你"待办、渲染视图与交付文档按钮、深色主题
 
-**不包含：** 常驻总控（Super-Agent 那种一直在线接活的）、脚本式 workflow、文件编辑、Tauri 打包、手机端和远程访问、claude / codex / omp 以外的 agent、浅色主题、worktree 依赖安装（`setup:`）。
+**不包含：** 外部事件来源（盯 GitHub 或群聊自动接活）、脚本式 workflow、文件编辑、Tauri 打包、手机端和远程访问 UI、claude / codex / omp / gemini 以外的 agent、浅色主题。
 
 ## 13. 第 0 步：风险验证（2026-11-02 完成，全部通过）
 
@@ -433,10 +439,6 @@ agent-flow/
 | S1 | `terminal session control` 接到 xterm.js 上的延迟和流畅度 | 打字回显延迟中位数低于 30 ms；`seq 1 200000` 时界面不卡死、不丢最终画面；和 Herdr TUI 同时开着时不打架 | 改用 observe 读画面 + `pane send-text` 写输入；还不行就重新评估自研 PTY |
 | S2 | claude / codex / omp 拿到 skill 后会不会老实用 `af done` 交结果 | 每种 agent 跑 5 个小任务，交结果的格式正确、outcome 合法的比例不低于 90% | 加强 skill；加超时提醒；或者让 server 在 agent 变 idle 时追问一次 |
 | S3 | 派发时能不能自动给新开的 agent 注入 skill、角色和环境变量 | 三种 agent 都能用一条命令起来，并且拿到任务 | 某种 agent 只能退回"第一条 prompt 里写全部说明" |
-
-### 9.1 第二个 server
-
-`AF_SECOND_SERVER=1`（配合自己的 `AF_HOME`、`AF_SOCK`、`--port`）：在主 server 旁边再开一个（测试、试一个分支）。它不改写用户 skill 目录里的 skill，也不交付 agent 改过的文档（这两件事由主 server 做），所以不会影响用户正在用的 session。
 
 ## 14. 验收场景
 
@@ -454,9 +456,8 @@ agent-flow/
 
 ## 15. 以后再做
 
-- 常驻总控：super-agent 剧本的 router 已经能一直开着接活；盯 GitHub 或群聊的事件来源以后再做。
-- Watchdog、工单准备命令、成员数上限、把活交回 router：见第 5 节。
+- 外部事件来源：super-agent 剧本的 router 已经能一直开着接活；盯 GitHub 或群聊的事件来源以后再做。
+- Watchdog、成员数上限、把活交回 router：见第 5 节。
 - 脚本式 workflow：TS 脚本调用同一套 `af` 命令，用于需要严格可重复的流水线。
 - 文件编辑：基于 CodeMirror，保存前检查 agent 有没有改过这个文件。
 - Tauri 打包：解决快捷键被浏览器抢走、iframe 不能嵌入部分网站、系统通知受限这几个问题。
-- worktree 依赖安装：工单的准备命令。
