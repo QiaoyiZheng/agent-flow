@@ -286,19 +286,20 @@ export function AgentView({ paneId, agent, status, background, focused, onForked
     });
     return info;
   }, [version]);
+  // a message taken back comes back into the box, as in the agent's own terminal (after what is typed there already)
+  const restoreDraft = (text: string) => {
+    const m = text.match(ATTACH_HEAD);
+    const files = m ? m[1]!.trim().split("\n").map((l) => l.replace(/^- /, "")) : [];
+    const body = m ? text.slice(m[0].length) : text;
+    drafts.update(paneId, (d) => ({ text: d.text.trim() ? `${d.text}\n${body}` : body, files: [...d.files, ...files.map((f) => ({ id: ++fileSeq, name: basename(f), path: f }))] }));
+  };
   const rewindTo = (e: ChatEntry & { block: { kind: "user"; text: string } }, code: boolean) => {
     const at = rewindInfo.get(e.key);
     if (!at) return;
     setRewinding(true);
     setPicking(false);
     api("POST", "/pane/rewind", { pane: paneId, text: e.block.text, back: at.back, occurrence: at.occurrence, ref: e.ref, code })
-      .then(() => {
-        // the message comes back into the box, as in the agent's own terminal
-        const m = e.block.text.match(ATTACH_HEAD);
-        const files = m ? m[1]!.trim().split("\n").map((l) => l.replace(/^- /, "")) : [];
-        const body = m ? e.block.text.slice(m[0].length) : e.block.text;
-        drafts.update(paneId, () => ({ text: body, files: files.map((f) => ({ id: ++fileSeq, name: basename(f), path: f })) }));
-      })
+      .then(() => restoreDraft(e.block.text))
       .catch(failed("Could not rewind"))
       .finally(() => setRewinding(false));
   };
@@ -310,8 +311,10 @@ export function AgentView({ paneId, agent, status, background, focused, onForked
   }, [picking]);
   const [controls, setControls] = useState(false);
   const control = (action: "interrupt" | "rewind" | "clear" | "exit") =>
-    api<{ hint?: string }>("POST", "/pane/control", { pane: paneId, action })
+    api<{ hint?: string; restored?: string }>("POST", "/pane/control", { pane: paneId, action })
       .then((r) => {
+        // Esc before the agent replied: claude took the message back (the server hid it in the view)
+        if (r.restored) restoreDraft(r.restored);
         // a rewind picker is the agent's own screen: show it, with what to do there
         if (action === "rewind") {
           setShowTerm(true);

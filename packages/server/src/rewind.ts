@@ -20,7 +20,9 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { TranscriptAccess } from "./access.ts";
+import { inputText } from "./controls.ts";
 import { AfError } from "./errors.ts";
+import { parseClaude } from "./transcripts/parse/claude.ts";
 import type { Workspaces } from "./workspaces.ts";
 
 export interface Cut {
@@ -207,6 +209,79 @@ const DRIVERS: Record<string, Driver> = {
   },
 };
 
+// ---------------------------------------------------------------------------------------------
+// A message taken back. Esc that stops claude's turn before it replied takes the message back: it leaves claude's
+// conversation and goes back into claude's own box (checked live, claude 2.1.318: its rewind list then says "Nothing
+// to rewind to yet"). The transcript keeps the line, with nothing answering it; the next message continues from the
+// line before it, which the parser follows as a rewind. Until then the view showed the message as sent, and a
+// rewind to it found nothing to pick. So after an Esc: if claude's box holds the newest message and nothing answered
+// it, that message is hidden (a cut) and moved out of claude's box into the UI's.
+
+/** How much of the transcript's end is read for its newest message (the lines after it are small: attachments). */
+const TAIL = 1024 * 1024;
+
+/**
+ * The newest message the user typed in a claude transcript's end (`tail`, read from byte `offset`), with where its
+ * line starts, if nothing answered it: no reply, tool result or system line after it.
+ */
+export function unansweredPrompt(tail: Buffer, offset: number): { at: number; text: string } | undefined {
+  let end = tail.length;
+  while (end > 0) {
+    let start = tail.lastIndexOf(10, end - 1) + 1;
+    if (start === 0 && offset > 0) return undefined; // the line began before the part read
+    const raw = tail.subarray(start, end);
+    end = start - 1;
+    let line: any;
+    try {
+      line = JSON.parse(raw.toString("utf8"));
+    } catch {
+      continue;
+    }
+    if (line?.isSidechain) continue;
+    if (line?.type === "assistant" || line?.type === "system") return undefined;
+    if (line?.type !== "user") continue;
+    const c = line.message?.content;
+    if (line.toolUseResult !== undefined || (Array.isArray(c) && c.some((x: any) => x?.type === "tool_result"))) return undefined;
+    const add = parseClaude(line, { n: 0 }).find((o) => o.op === "add" && o.entry.block.kind === "user");
+    if (add?.op === "add" && add.entry.block.kind === "user" && !add.entry.block.command) return { at: offset + start, text: add.entry.block.text };
+  }
+  return undefined;
+}
+
+/**
+ * After an Esc: if claude took its newest message back (see above), hide it in the view and return its text. `clear`
+ * also empties claude's box (the UI puts the text in its own box); without it the text stays there (the user
+ * pressed Esc in claude's terminal). `expect`: only that message.
+ */
+export async function takeBack(w: Workspaces, access: TranscriptAccess, pane: string, opts: { clear: boolean; expect?: string; waitMs?: number }): Promise<string | undefined> {
+  const p = w.model.panes.find((x) => x.id === pane);
+  if (p?.agent !== "claude") return undefined;
+  // claude draws the message back into its box a moment after the Esc
+  let box: string | undefined;
+  for (let t = Date.now(); ; ) {
+    box = inputText("claude", await w.visible(pane, true).catch(() => ""));
+    if (box || Date.now() - t >= (opts.waitMs ?? 1500)) break;
+    await sleep(100);
+  }
+  if (!box) return undefined;
+  const src = await access.resolve(pane).catch(() => undefined);
+  const path = src && "source" in src && !src.source.pending ? src.source.path : undefined;
+  if (!path) return undefined;
+  const fs = access.fsFor(pane).fs;
+  const size = (await fs.readFrom(path, 0, 0))?.size;
+  if (size === undefined) return undefined;
+  const from = Math.max(0, size - TAIL);
+  const r = await fs.readFrom(path, from, size - from);
+  const last = r && unansweredPrompt(r.data, from);
+  if (!last || !sameMessage(box, last.text) || (opts.expect !== undefined && firstLine(opts.expect) !== firstLine(last.text))) return undefined;
+  if (opts.clear) await w.clearBox(pane);
+  if (!access.cuts.for(path).some((c) => last.at >= c.from && last.at < c.to)) {
+    access.cuts.add(path, { from: last.at, to: from + r!.data.length });
+    access.cuts.changed(pane);
+  }
+  return last.text;
+}
+
 export interface RewindRequest {
   pane: string;
   /** The message's text as the transcript has it. */
@@ -243,6 +318,9 @@ export async function rewindTo(w: Workspaces, access: TranscriptAccess, req: Rew
         if (w.model.panes.find((x) => x.id === req.pane)?.agentStatus !== "working") break;
       }
     }
+    // the newest message, not answered yet: claude took it back on that Esc (or on one pressed in its terminal), as
+    // its own Esc does; its rewind list does not have it
+    if (await takeBack(w, access, req.pane, { clear: true, expect: req.text, waitMs: p.agentStatus === "working" ? 1500 : 0 })) return { agent: p.agent, restored: req.text };
     // where the transcript ends now: the hidden part ends here (codex and gemini record the rewind themselves)
     const src = p.agent !== "codex" && p.agent !== "gemini" && req.ref !== undefined ? await access.resolve(req.pane).catch(() => undefined) : undefined;
     const path = src && "source" in src && !src.source.pending ? src.source.path : undefined;

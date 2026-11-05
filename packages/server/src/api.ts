@@ -17,7 +17,7 @@ import { chatImage } from "./transcripts/index.ts";
 import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
 import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
-import { rewindTo } from "./rewind.ts";
+import { rewindTo, takeBack } from "./rewind.ts";
 import { type Remote, fileKind, installedApps, openWith } from "./open-with.ts";
 import { changedDocuments, docLabel } from "./doc-watch.ts";
 import { enrichFromTranscript } from "./menu.ts";
@@ -282,8 +282,13 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
               code: !!body.code,
             }),
           );
-        case "POST /pane/control":
-          return json(await w.control(String(body.pane ?? ""), String(body.action ?? "")));
+        case "POST /pane/control": {
+          const pane = String(body.pane ?? "");
+          const r = await w.control(pane, String(body.action ?? ""));
+          // claude takes its newest message back when Esc stops it before it replied: the UI puts it in its box
+          const restored = r.action === "interrupt" ? await takeBack(w, access, pane, { clear: true }).catch(() => undefined) : undefined;
+          return json({ ...r, ...(restored ? { restored } : {}) });
+        }
         case "POST /keys":
           await w.sendKeys(body.pane, Array.isArray(body.keys) ? body.keys.map(String) : []);
           return json({ ok: true });
@@ -440,6 +445,17 @@ export function watchDocuments(w: Workspaces, access: TranscriptAccess) {
 }
 
 /**
+ * Esc pressed in claude's own terminal before it replied takes the message back into claude's box (see rewind.ts
+ * takeBack): when the turn ends that way, the view stops showing the message. The text stays in claude's box, where
+ * the user pressed Esc.
+ */
+export function watchTakeBacks(w: Workspaces, access: TranscriptAccess) {
+  return w.onTurnEnd((t) => {
+    if (t.agent === "claude") void takeBack(w, access, t.pane, { clear: false, waitMs: 0 }).catch(() => undefined);
+  });
+}
+
+/**
  * Hand a document over to the user: recorded for the agent's pane, where the chat view shows a row of open buttons
  * under the agent's reply (Obsidian / VS Code / its app / a preview pane, on a click). Nothing opens by itself and
  * nothing goes to "Needs you": with many agents at once, a viewer pane per document made everything slow. Only
@@ -491,6 +507,7 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   const access = opts.access ?? makeTranscriptAccess(o, w);
   const handler = makeHandler(o, w, opts.backend, access);
   if (opts.watchDocs !== false) watchDocuments(w, access);
+  watchTakeBacks(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   // ids of teams and of the runs before them: their agents' Herdr names start with "<id>-" (see ServerPush herdr)
   const dispatchers = () => {

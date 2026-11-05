@@ -10,6 +10,9 @@
 //   clear input   Ctrl+C                     Ctrl+C                         Ctrl+C                       Ctrl+E Ctrl+U per line
 //   exit          Ctrl+C Ctrl+C              Ctrl+D (empty input)           Ctrl+D (empty input)         Ctrl+C Ctrl+C (empty input)
 //
+// claude's Esc before it replied takes the message back (out of its conversation, into its box): the server then
+// moves it into the UI's box and hides it in the view (rewind.ts takeBack).
+//
 // Esc on an empty input is how claude and codex start their rewind pickers, so a second Esc right after an
 // interrupt can open one: "interrupt" sends one Esc only. "exit" first clears the input (Ctrl+C): codex and omp
 // exit on Ctrl+D only from an empty input, and claude exits on a second Ctrl+C.
