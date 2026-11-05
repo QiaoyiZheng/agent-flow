@@ -710,6 +710,29 @@ describe("members on another machine", () => {
     expect(parseCliBody(new TextEncoder().encode("/home/u/x\0t1\0dev\0w1:p2\0task\0claude\0do it\0"))).toEqual({ cwd: "/home/u/x", team: "t1", agent: "dev", pane: "w1:p2", argv: ["task", "claude", "do it"] });
   });
 
+  test("a machine where af cannot be set up is tried again later and later, its reason logged once", async () => {
+    const { home, o, w, h } = await setupRemote();
+    const remote = w.remoteOf("gpu~x") as any;
+    let forwards = 0;
+    remote.forwardRemoteSocket = async () => {
+      forwards++;
+      throw new Error("this sshd does not forward Unix sockets");
+    };
+    const log: string[] = [];
+    const raf = new RemoteAf({ home, w, teams: o, handler: h, cliMain: join(import.meta.dir, "../../cli/src/main.ts"), log: (m) => log.push(m) });
+    await raf.ensure("gpu");
+    await raf.ensure("gpu");
+    await raf.ensure("gpu");
+    expect(forwards).toBe(1); // the next try waits a minute
+    expect(log).toEqual(["af on gpu: this sshd does not forward Unix sockets (trying again later, at most every 30 min)"]);
+    (raf as any).failed.get("gpu").until = 0;
+    await raf.ensure("gpu");
+    expect(forwards).toBe(2);
+    expect(log.length).toBe(1); // the same reason: not logged again
+    expect((raf as any).failed.get("gpu").n).toBe(2);
+    raf.stop();
+  });
+
   test("the af script: sends the command, prints the answer, and exits with its code", async () => {
     const dir = tmp("af-shim-");
     mkdirSync(join(dir, ".agent-flow", "bin"), { recursive: true });

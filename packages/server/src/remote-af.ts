@@ -10,9 +10,9 @@
 // The machine also gets the agent-flow skill (in ~/.claude, ~/.codex, ~/.gemini skills, where those exist), with
 // the path of its af.
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { MACHINE_SEP } from "@af/core";
 import { sq } from "./remote.ts";
 import type { Teams } from "./teams.ts";
@@ -94,6 +94,8 @@ export class RemoteAf {
   private ready = new Map<string, number>();
   private busy = new Set<string>();
   private skilled = new Set<string>();
+  /** Machines where setting up af failed: when to try again (1 min, doubling to 30 min), and the last reason logged. */
+  private failed = new Map<string, { n: number; until: number; why: string }>();
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private opts: RemoteAfOptions) {}
@@ -124,6 +126,7 @@ export class RemoteAf {
   /** Set the machine up (or check it is still set up): its socket here, the forward, the af script, the skill. */
   async ensure(machine: string) {
     if (this.busy.has(machine) || Date.now() - (this.ready.get(machine) ?? 0) < 60_000) return;
+    if (Date.now() < (this.failed.get(machine)?.until ?? 0)) return;
     // forwardRemoteSocket: RemoteMachine's (remote.ts); fakes in tests may not have it
     const remote = this.opts.w.remoteOf(`${machine}${MACHINE_SEP}x`) as (RemoteLike & { forwardRemoteSocket?: (remotePath: string, localPath: string) => Promise<void> }) | undefined;
     if (!remote?.home || !remote.forwardRemoteSocket) return;
@@ -150,8 +153,17 @@ export class RemoteAf {
         }
       }
       this.ready.set(machine, Date.now());
+      if (this.failed.has(machine)) this.opts.log?.(`af on ${machine}: works again`);
+      this.failed.delete(machine);
     } catch (e) {
-      this.opts.log?.(`af on ${machine}: ${(e as Error).message}`);
+      // a machine whose sshd does not forward Unix sockets fails the same way every time: try again later and later,
+      // and log a reason only when it is new
+      const why = (e as Error).message;
+      const was = this.failed.get(machine);
+      const n = (was?.n ?? 0) + 1;
+      const wait = Math.min(60_000 * 2 ** (n - 1), 30 * 60_000);
+      this.failed.set(machine, { n, until: Date.now() + wait, why });
+      if (was?.why !== why) this.opts.log?.(`af on ${machine}: ${why} (trying again later, at most every 30 min)`);
     } finally {
       this.busy.delete(machine);
     }
@@ -161,6 +173,7 @@ export class RemoteAf {
     const sock = this.sockOf(machine);
     if (this.servers.has(machine)) return sock;
     if (existsSync(sock)) rmSync(sock);
+    mkdirSync(dirname(sock), { recursive: true, mode: 0o700 }); // made by the SSH connection too, but not always first
     const server = Bun.serve({ unix: sock, fetch: (req) => this.serve(machine, req) });
     this.servers.set(machine, { stop: (f) => server.stop(f), sock });
     return sock;
