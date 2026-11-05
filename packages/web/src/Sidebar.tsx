@@ -339,6 +339,7 @@ function NeedsYou({
   onNeed: (n: Need) => void;
 }) {
   const [questions, setQuestions] = useState<Record<string, string>>({});
+  const { dispatchers } = useStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const online = (p: HPane) => {
     const m = herdr?.machines.find((x) => x.id === p.machine);
@@ -407,6 +408,9 @@ function NeedsYou({
     if (!p.agent || p.agentStatus !== "done" || p.background || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
     if ((seen[p.id] ?? "") >= p.statusAt) continue;
     if (managed.has(p.id)) continue; // members and routers report to whoever manages them
+    // dispatched by a session (a member of a team, or a worker of a run from before teams, also when that team or
+    // run is no longer loaded): the session that sent it deals with its result
+    if (p.agentName && dispatchers.some((id) => p.agentName!.startsWith(`${id}-`))) continue;
     needs.push({ key: `f:${p.id}`, kind: "finished", label: `finished · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: p.title ?? "", at: p.statusAt, paneId: p.id, workspace: p.workspaceId, statusAt: p.statusAt });
   }
   const rank = (n: Need) => (n.kind === "finished" ? 1 : 0);

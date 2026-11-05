@@ -26,6 +26,8 @@ interface State {
   views: Record<string, ViewRec>;
   /** Messages waiting for their agent's turn to end, by pane. */
   queue: Record<string, QueuedMessage[]>;
+  /** Ids of teams and old runs: agents named "<id>-…" were dispatched by a session (see ServerPush herdr). */
+  dispatchers: string[];
   /** Documents agents handed over (af deliver), how they open, and which apps this Mac has. */
   deliveries: Delivery[];
   openSettings?: OpenSettings;
@@ -36,7 +38,7 @@ interface State {
   seenNotices: number;
 }
 
-let state: State = { connected: false, teams: [], version: 0, views: {}, queue: {}, deliveries: [], apps: {}, notices: [], seenNotices: 0 };
+let state: State = { connected: false, teams: [], version: 0, views: {}, queue: {}, dispatchers: [], deliveries: [], apps: {}, notices: [], seenNotices: 0 };
 const subs = new Set<() => void>();
 const termSubs = new Map<string, TermListener>();
 let ws: WebSocket | undefined;
@@ -99,7 +101,7 @@ function connect() {
         set({ deliveries: m.list, openSettings: m.settings, apps: m.apps });
         break;
       case "herdr":
-        set({ herdr: m.model, views: m.views, queue: m.queue ?? {} });
+        set({ herdr: m.model, views: m.views, queue: m.queue ?? {}, dispatchers: m.dispatchers ?? state.dispatchers });
         break;
       case "snapshot":
         if (m.team === state.teamId) set({ team: m.state });

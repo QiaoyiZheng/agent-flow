@@ -1,7 +1,7 @@
 // HTTP API. The same routes are served on the Unix socket (for the af CLI and agents) and on
 // 127.0.0.1 (for the web UI, behind a token). WebSocket pushes run events and terminal frames.
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { AgentKind, ClientPush, ServerPush, ShowRequest } from "@af/core";
 import { AGENT_KINDS } from "@af/core";
@@ -492,7 +492,16 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   const handler = makeHandler(o, w, opts.backend, access);
   if (opts.watchDocs !== false) watchDocuments(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
-  const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue } satisfies ServerPush);
+  // ids of teams and of the runs before them: their agents' Herdr names start with "<id>-" (see ServerPush herdr)
+  const dispatchers = () => {
+    const ids = new Set(o.list().map((t) => t.id));
+    for (const sub of ["teams", "runs"])
+      try {
+        for (const d of readdirSync(join(opts.home, sub))) if (/^[tr][0-9a-z]{4}$/.test(d)) ids.add(d);
+      } catch {}
+    return [...ids];
+  };
+  const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue, dispatchers: dispatchers() } satisfies ServerPush);
   w.onChange(() => {
     const msg = herdrPush();
     for (const c of clients) c.send(msg);

@@ -384,7 +384,12 @@ export interface QueuedMessage {
 
 export type ServerPush =
   | { type: "hello"; teams: TeamSummary[] }
-  | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec>; queue: Record<string, QueuedMessage[]> }
+  /**
+   * dispatchers: ids of teams and of runs from before teams (on disk under agent-flow's home). agent-flow names the
+   * agents it starts for them "<id>-<name>" in Herdr: a pane whose agent is named so was dispatched by a session, and
+   * that session deals with its result.
+   */
+  | { type: "herdr"; model: HerdrModel; views: Record<string, ViewRec>; queue: Record<string, QueuedMessage[]>; dispatchers?: string[] }
   /** more: earlier conversation exists; it comes as chat.prepend when asked for with chat.more. */
   | { type: "chat.reset"; id: string; source: ChatSource | null; reason?: string; ops: ChatOp[]; more?: boolean }
   | { type: "chat.prepend"; id: string; ops: ChatOp[]; more: boolean }
