@@ -1179,6 +1179,12 @@ export class Teams {
     // a turn that ended since the ticket was last dealt with: done or idle and no longer waiting on background work
     // (a Monitor, a background command): Workspaces.settled. Waiting on background work is not the end of the job.
     if (k && k.status === "working" && changed > this.turnMark(t, k) && settled && w.settled(m.paneId!) && t.looked.get(m.name) !== changed) {
+      // a notice or a question on its screen (Herdr can report "done" while one is up, and the question check runs
+      // only every few seconds): it waits for an answer, it has not finished. Looked at once per status change.
+      if (await this.waitsOnScreen(t, m, k)) {
+        t.looked.set(m.name, changed);
+        return;
+      }
       if (await this.turnEnded(t, m, k, changed)) return;
     }
     if (!settled) return;
@@ -1209,6 +1215,33 @@ export class Teams {
     }
   }
 
+  /**
+   * Whether a member that looks finished shows a question or a notice instead (claude's notices, like the one about
+   * auto mode billing, wait for Enter; Herdr may call that "done"). If so, its manager hears it once: a question
+   * about the task it may answer (af answer); anything else is the user's, so it only hears that the member waits.
+   */
+  private async waitsOnScreen(t: Team, m: Member, k: Ticket): Promise<boolean> {
+    const st = await this.opts.w.screenState(m.paneId!).catch(() => ({}) as { menu?: undefined; overlay?: undefined });
+    if (!st.menu && !st.overlay) return false;
+    const text = st.menu
+      ? [...st.menu.question, ...(st.menu.code ?? [])].join(" ").replace(/\s+/g, " ").trim()
+      : (st.overlay!.lines ?? []).filter((l) => l.trim()).join(" ").replace(/\s+/g, " ").trim();
+    const head = firstLine(text, 200);
+    const known = t.state.queue.some((q) => q.from === m.name && (q.kind === "asking" || q.kind === "approval") && q.text.includes(head) && q.state !== "handled");
+    if (known || !head) return true;
+    t.asked.set(m.name, text);
+    const approval = !st.menu || isApproval(text) || isApproval(st.menu.options.map((o) => o.label).join(" "));
+    if (!approval) this.enqueue(t, { kind: "asking", ticket: k.id, from: m.name, text, options: st.menu!.options.map((o) => o.label) });
+    else
+      this.enqueue(t, {
+        kind: "approval",
+        ticket: k.id,
+        from: m.name,
+        text: `Waiting for the user to answer a ${st.menu ? "prompt" : "notice"} on its screen: "${head}". Only the user can answer it (in agent-flow, on that session's pane); do not answer it yourself. It has not finished its task.`,
+      });
+    return true;
+  }
+
   /** When the ticket's current turn of work began: a turn that ended after it is new. */
   private turnMark(t: Team, k: Ticket) {
     const sent = t.state.outbox.filter((o) => o.ticket === k.id && o.delivered).map((o) => Date.parse(o.delivered!));
@@ -1237,7 +1270,9 @@ export class Teams {
       this.enqueue(t, { kind: "error", ticket: k.id, from: m.name, text: `${m.name} keeps failing with: ${firstLine(pk.error, 300)} (told to continue 3 times)` });
       return true;
     }
-    const reply = pk?.reply ?? (await this.opts.w.read(m.paneId!, 60).catch(() => "")).trimEnd();
+    // no reply in its conversation (none found, or it stopped before writing one): the end of its screen instead
+    const screen = pk?.reply ? "" : (await this.opts.w.read(m.paneId!, 25).catch(() => "")).trimEnd();
+    const reply = pk?.reply ?? (screen ? `(no reply found in its conversation; its screen ends with:)\n${screen}` : "");
     if (m.protocol === "none") {
       const file = join(this.ticketDir(t, k.id), "result.md");
       writeFileSync(file, `${reply || "(no reply found)"}\n`);

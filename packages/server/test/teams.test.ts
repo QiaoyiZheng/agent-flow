@@ -225,6 +225,34 @@ describe("mode 1: a session hands out tasks", () => {
     expect(refused.body.error.code).toBe("approval");
   });
 
+  test("a member that looks done but shows a notice waits for the user: no result, its manager told once", async () => {
+    const { o, backend, call, step, turn, typed, replies, lead } = await setup();
+    const r = await call("/task", { callerPane: lead, kind: "claude", task: "survey the folder", name: "survey" });
+    await step();
+    const team = r.body.team;
+    const m = o.get(team).members.survey!;
+    const herdr = herdrMemberName(team, "survey");
+    // claude's billing notice (it waits for Enter), with Herdr calling the pane done
+    const NOTICE = ["⏺ Bash(ls)", "  ⎿  Waiting…", "─".repeat(60), "  We're changing auto mode to no longer charge for", "  classifier requests in Claude Code.", "", "  Nothing breaks: auto mode keeps working.", "", "  Enter to continue · Esc to cancel"].join("\n");
+    backend.screens.set(m.paneId!, NOTICE);
+    await turn(herdr);
+    expect(o.get(team).tickets.T1!.status).toBe("working");
+    const q = o.get(team).queue.at(-1)!;
+    expect(q).toMatchObject({ kind: "approval", ticket: "T1", from: "survey" });
+    expect(q.text).toContain("We're changing auto mode");
+    expect(typed(lead).at(-1)).toContain("T1 survey waits for the user's approval");
+    await step();
+    expect(o.get(team).queue.filter((x) => x.kind === "approval").length).toBe(1);
+    // the user dismissed it; the member goes on and finishes: that is its result
+    backend.screens.delete(m.paneId!);
+    replies.set(m.paneId!, { reply: "3 folders: code, data, docs." });
+    await Bun.sleep(5);
+    await turn(herdr);
+    expect(o.get(team).tickets.T1).toMatchObject({ status: "submitted" });
+    expect(o.get(team).queue.at(-1)).toMatchObject({ kind: "turn", ticket: "T1" });
+    expect(o.get(team).queue.at(-1)!.text).toContain("3 folders");
+  });
+
   test("a turn that ends in a passing API error gets 'continue' three times, then the error is reported", async () => {
     const { o, call, step, turn, typed, replies, lead } = await setup();
     const r = await call("/task", { callerPane: lead, kind: "codex", task: "fix the build", name: "fixer" });
