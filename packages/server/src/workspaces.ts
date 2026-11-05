@@ -649,7 +649,14 @@ export class Workspaces {
     const r = await m.backend.createWorkspace(label.trim() || basename(dir) || "workspace", dir);
     await this.changed(machine);
     const p = (x: string) => (machine === "local" ? x : `${machine}${MACHINE_SEP}${x}`);
-    return { workspaceId: p(r.workspaceId), tabId: p(r.tabId), paneId: p(r.paneId) };
+    // the folder next to the shell, so the workspace opens on its files (viewer panes are local only)
+    let folderPane: string | undefined;
+    if (m.meta.local) {
+      try {
+        folderPane = (await this.show({ target: dir, of: p(r.paneId), split: "right" }, "user")).paneId;
+      } catch {}
+    }
+    return { workspaceId: p(r.workspaceId), tabId: p(r.tabId), paneId: p(r.paneId), folderPane };
   }
 
   /** Rename a workspace (in Herdr, so the Herdr TUI shows the new name too). */

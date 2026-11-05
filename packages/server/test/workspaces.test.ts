@@ -572,11 +572,16 @@ describe("workspaces: adding and removing machines and workspaces", () => {
     await w.start(60_000);
     const lw = await w.newWorkspace("", home);
     expect(w.model.workspaces.find((x) => x.id === lw.workspaceId)!.label).toBe(home.split("/").at(-1)!);
+    // it opens on its folder: a viewer pane of the directory next to the shell, in the same tab
+    expect(lw.folderPane).toBeDefined();
+    expect(w.views[lw.folderPane!]?.target).toBe(home);
+    expect(w.model.panes.find((p) => p.id === lw.folderPane)!.tabId).toBe(lw.tabId);
     await expect(w.newWorkspace("x", join(home, "missing"))).rejects.toThrow(/does not exist/);
 
     await w.connect("ds03");
     const rw = await w.newWorkspace("paper", "~/paper", "ds03");
     expect(rw.workspaceId).toStartWith("ds03~");
+    expect(rw.folderPane).toBeUndefined(); // viewer panes are local only
     expect(execs.at(-1)).toContain("'/home/u/paper'"); // ~ expanded to the remote home, checked there
     await expect(w.newWorkspace("x", "/nope", "ds03")).rejects.toThrow(/does not exist on ds03/);
 

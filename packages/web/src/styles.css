@@ -900,3 +900,5 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .c-doc-note { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 .c-doc-btns { margin-left: auto; display: inline-flex; gap: 4px; flex: none; }
 .c-doc-btns .btn { padding: 2px 9px; font-size: 11.5px; }
+.dir-pick { margin-top: 8px; padding: 8px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-1); }
+.dir-pick .fb-list { max-height: 260px; }

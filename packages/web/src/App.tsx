@@ -12,6 +12,7 @@ interface PlaybookInfo {
 import { api, useStore, watch, failed } from "./store";
 import { Terminal } from "./Terminal";
 import { TeamPanel } from "./TeamPanel";
+import { FileBrowser } from "./Files";
 import { type Need, Sidebar } from "./Sidebar";
 import { LayoutView, type PaneCtx } from "./Layout";
 import { kindColor } from "./view";
@@ -311,6 +312,8 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
   const [label, setLabel] = useState("");
   const [kind, setKind] = useState<AgentKind>("claude");
   const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [pickDir, setPickDir] = useState("");
   const [playbooks, setPlaybooks] = useState<PlaybookInfo[]>([]);
   const [playbook, setPlaybook] = useState("humanize-loop");
   const [goal, setGoal] = useState("");
@@ -345,11 +348,31 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
         <p>
           {mode === "team"
             ? "A router agent starts in its own workspace and runs the team by the playbook: it opens tickets for members and passes their results on. To hand out quick tasks yourself, just ask any session to (it uses af task)."
-            : "A plain Herdr workspace with a shell. Split it into terminals, agents and files."}
+            : "A Herdr workspace in that directory: a shell, and the folder next to it. Split it into terminals, agents and files."}
         </p>
         <div className="field">
           <label>Directory</label>
-          <input className="text" required={mode === "team"} placeholder={mode === "team" ? "/path/to/project" : "~ (home) if empty; ~/x works on remote machines"} value={cwd} onChange={(e) => setCwd(e.target.value)} />
+          <div style={{ display: "flex", gap: 6 }}>
+            <input className="text" style={{ flex: 1 }} required={mode === "team"} placeholder={mode === "team" ? "/path/to/project" : "~ (home) if empty; ~/x works on remote machines"} value={cwd} onChange={(e) => setCwd(e.target.value)} />
+            {machine === "local" && (
+              <button type="button" className="btn" onClick={() => setPicking(true)} title="Pick the folder">
+                Browse…
+              </button>
+            )}
+          </div>
+          {picking && (
+            <div className="dir-pick">
+              <FileBrowser start={cwd || "~"} onOpenFile={(f) => (setCwd(f.replace(/\/[^/]+$/, "")), setPicking(false))} onCancel={() => setPicking(false)} onDirChange={setPickDir} />
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <button type="button" className="btn primary" onClick={() => (setCwd(pickDir), setPicking(false))} title={pickDir}>
+                  Use this folder
+                </button>
+                <button type="button" className="btn" onClick={() => setPicking(false)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         {mode === "workspace" && machines.length > 1 && (
           <div className="field">
