@@ -18,6 +18,7 @@ import { type TranscriptAccess, makeTranscriptAccess } from "./access.ts";
 import { commandsFor } from "./commands.ts";
 import { prepareFork } from "./fork.ts";
 import { rewindTo, takeBack } from "./rewind.ts";
+import { Sleeper } from "./sleep.ts";
 import { type Remote, fileKind, installedApps, openWith } from "./open-with.ts";
 import { changedDocuments, docLabel } from "./doc-watch.ts";
 import { enrichFromTranscript } from "./menu.ts";
@@ -31,7 +32,11 @@ const repoRootOf = (cwd: string) => {
 };
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
-export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w)) {
+export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w), sleeper?: Sleeper) {
+  const needSleeper = () => {
+    if (!sleeper) throw new AfError("unavailable", "process management is not running", 503);
+    return sleeper;
+  };
   const commandCache = new Map<string, { at: number; items: unknown[] }>();
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -194,6 +199,15 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json({ ok: true, ...(await w.steer(String(body.pane ?? ""), String(body.id ?? ""))) });
         case "POST /queue/remove":
           return json({ ok: true, item: w.unqueue(String(body.pane ?? ""), String(body.id ?? "")) });
+        // process management: agents stopped for being idle and started again on a message (sleep.ts)
+        case "GET /processes":
+          return json({ rows: await needSleeper().list(), settings: needSleeper().settings });
+        case "POST /pane/sleep":
+          return json({ ok: true, record: await needSleeper().sleepPane(String(body.pane ?? "")) });
+        case "POST /pane/wake":
+          return json({ ok: true, woke: await w.wake(String(body.pane ?? "")) });
+        case "POST /process-settings":
+          return json({ settings: needSleeper().setSettings(body ?? {}) });
         case "GET /pane/commands": {
           const pane = String(body.pane ?? "");
           const p = w.model.panes.find((x) => x.id === pane);
@@ -503,12 +517,8 @@ interface WsData {
   cutsUnsub?: () => void;
 }
 
-export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices; access?: TranscriptAccess; watchDocs?: boolean }) {
+export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: number; token: string; home: string; backend: TerminalBackend; webDir: string; notices: Notices; access?: TranscriptAccess; watchDocs?: boolean; sleep?: boolean }) {
   const access = opts.access ?? makeTranscriptAccess(o, w);
-  const handler = makeHandler(o, w, opts.backend, access);
-  if (opts.watchDocs !== false) watchDocuments(w, access);
-  watchTakeBacks(w, access);
-  const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   // ids of teams and of the runs before them: their agents' Herdr names start with "<id>-" (see ServerPush herdr)
   const dispatchers = () => {
     const ids = new Set(o.list().map((t) => t.id));
@@ -518,6 +528,13 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
       } catch {}
     return [...ids];
   };
+  // the stop/resume buttons always; stopping idle agents by itself only in the main server (sleep: false for a second)
+  const sleeper = new Sleeper(w, access, o, opts.home, dispatchers);
+  if (opts.sleep !== false) sleeper.start();
+  const handler = makeHandler(o, w, opts.backend, access, sleeper);
+  if (opts.watchDocs !== false) watchDocuments(w, access);
+  watchTakeBacks(w, access);
+  const clients = new Set<import("bun").ServerWebSocket<WsData>>();
   const herdrPush = () => JSON.stringify({ type: "herdr", model: w.model, views: w.views, queue: w.queue, dispatchers: dispatchers() } satisfies ServerPush);
   w.onChange(() => {
     const msg = herdrPush();

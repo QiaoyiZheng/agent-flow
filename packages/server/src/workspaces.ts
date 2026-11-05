@@ -8,7 +8,7 @@
 
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { type HLayout, type HMachine, type HPane, type HTab, type HWorkspace, type HerdrModel, type LayoutNode, type QueuedMessage, type ShowRequest, type SplitDirection, type ViewRec, MACHINE_SEP, splitId } from "@af/core";
+import { type AgentKind, type HLayout, type HMachine, type HPane, type HTab, type HWorkspace, type HerdrModel, type LayoutNode, type QueuedMessage, type ShowRequest, type SplitDirection, type ViewRec, MACHINE_SEP, splitId } from "@af/core";
 import type { TerminalBackend } from "./herdr.ts";
 import { AfError } from "./errors.ts";
 import { composePrompt, saveLocal, stamp } from "./attachments.ts";
@@ -16,6 +16,7 @@ import { type RemoteMachine, machineKey, sq } from "./remote.ts";
 import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from "./menu.ts";
 import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from "./controls.ts";
 import { claudeSession, parseRemoteCounts, remoteCheckScript, runningTasks, taskDir } from "./background.ts";
+import { type SleepRecord, resumeArgs } from "./sleep.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive" | "forwardRemoteSocket">>;
@@ -116,6 +117,14 @@ export class Workspaces {
   private promptedAt = new Map<string, number>();
   /** Sessions by pane: given at launch (claude --session-id) or reported by claude's SessionStart hook. */
   sessions: Record<string, { id: string; path?: string }> = {};
+  /**
+   * Agents stopped for being idle (sleep.ts), by pane: their pane stays and shows them as they were; a prompt starts
+   * them again on their conversation (wake). Saved across restarts.
+   */
+  private asleep: Record<string, SleepRecord & { stopping?: boolean }> = {};
+  private asleepFile: string;
+  private sleepOps = new Map<string, Promise<void>>();
+  private wakeOps = new Map<string, Promise<void>>();
   private machines = new Map<string, Machine>();
   private listeners = new Set<() => void>();
   private refreshing?: Promise<void>;
@@ -135,6 +144,11 @@ export class Workspaces {
     try {
       if (existsSync(this.statusFile)) this.savedStatus = JSON.parse(readFileSync(this.statusFile, "utf8"));
     } catch {}
+    this.asleepFile = join(opts.home, "asleep.json");
+    try {
+      if (existsSync(this.asleepFile)) this.asleep = JSON.parse(readFileSync(this.asleepFile, "utf8"));
+    } catch {}
+    for (const r of Object.values(this.asleep)) delete r.stopping; // a stop cut short by a restart: checked at the next look
     this.queueFile = join(opts.home, "queue.json");
     try {
       if (existsSync(this.queueFile)) this.queue = JSON.parse(readFileSync(this.queueFile, "utf8"));
@@ -454,7 +468,7 @@ export class Workspaces {
       const next = new Map<string, string>();
       const overlays = new Set<string>();
       for (const p of m.panes) {
-        if (!p.agent || p.agentStatus === "blocked" || p.scrolled) continue;
+        if (!p.agent || p.agentStatus === "blocked" || p.scrolled || p.asleep) continue;
         const st = await this.screenState(p.id).catch(() => ({}) as { menu?: Menu; overlay?: Overlay });
         if (!st.menu && st.overlay && (p.agentStatus === "done" || p.agentStatus === "idle")) {
           // a notice that waits for a key (claude's auto mode billing notice: "Enter to continue"): the turn has not
@@ -511,6 +525,7 @@ export class Workspaces {
       for (const id of Object.keys(m.sigs)) if (!snap.tabs.some((t) => t.id === id)) delete m.sigs[id];
       m.workspaces = snap.workspaces.map((w) => ({ ...w, machine: key, id: p(w.id), activeTabId: w.activeTabId ? p(w.activeTabId) : undefined }));
       m.tabs = snap.tabs.map((t) => ({ ...t, id: p(t.id), workspaceId: p(t.workspaceId) }));
+      snap.panes = this.overlayAsleep(key, snap.panes, p);
       // background work claude still waits on after its turn ended (local only: see background.ts)
       const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : m.remote ? this.checkBackgroundRemote(m, snap.panes) : new Map<string, number>();
       const bgPending = m.bgPending ?? new Set<string>();
@@ -713,7 +728,7 @@ export class Workspaces {
   }
 
   async prompt(pane: string, text: string) {
-    this.pane(pane);
+    if (this.pane(pane).asleep) await this.wake(pane);
     const r = this.route(pane);
     // typed text + Enter would answer a question, approval or notice on screen (Herdr does not always see them)
     const st = await this.screenState(pane);
@@ -805,11 +820,13 @@ export class Workspaces {
     if (!text) throw new AfError("empty", "nothing to send");
     const busy = this.busy(p) || (this.queue[pane]?.length ?? 0) > 0;
     if (mode === "steer" && this.busy(p)) return { sent: text, ...(await this.steerNow(pane, text)) };
-    if (mode === "queue" || (mode === "auto" && busy)) {
+    // stopped for being idle: it waits in the queue while the agent starts again (that takes seconds), then goes out
+    if (mode === "queue" || (mode === "auto" && busy) || p.asleep) {
       const item: QueuedMessage = { id: Math.random().toString(36).slice(2, 10), body: body.trim(), files, at: this.now() };
       (this.queue[pane] ??= []).push(item);
       this.saveQueue();
-      return { queued: item };
+      if (p.asleep) void this.drainQueues();
+      return { queued: item, ...(p.asleep ? { waking: true } : {}) };
     }
     await this.prompt(pane, text);
     return { sent: text };
@@ -894,6 +911,7 @@ export class Workspaces {
   /** Clear what is typed in the agent's own input box (its clear keys, only when there is text: see controls.ts). */
   async clearBox(pane: string) {
     const p = this.pane(pane);
+    if (p.asleep) return false;
     const r = this.route(pane);
     let text: string | undefined = inputText(p.agent, await r.backend.readScreen(r.raw, true));
     if (!text) return false;
@@ -914,8 +932,19 @@ export class Workspaces {
 
   /** Stop, rewind, clear or exit an agent, with the keys its own terminal uses for that (see controls.ts). */
   async control(pane: string, action: string) {
-    const p = this.pane(pane);
+    let p = this.pane(pane);
     const steps = controlSteps(p.agent, action);
+    if (p.asleep) {
+      // stopped for being idle: exiting forgets it (the pane is a shell again); a rewind starts it again first;
+      // nothing runs to stop or clear
+      if (action === "exit") {
+        await this.forgetAsleep(pane);
+        return { action, agent: p.agent, hint: undefined };
+      }
+      if (action !== "rewind") return { action, agent: p.agent, hint: undefined };
+      await this.wake(pane);
+      p = this.pane(pane);
+    }
     const r = this.route(pane);
     for (const st of steps) {
       if ("wait" in st) await Bun.sleep(st.wait);
@@ -979,7 +1008,7 @@ export class Workspaces {
   async screenState(pane: string): Promise<{ menu?: Menu; overlay?: Overlay }> {
     // the visible screen: "recent-unwrapped" joins full-width rows, and dialog rows are padded to full width
     const p = this.pane(pane);
-    if (p.scrolled) return {}; // the viewport shows history
+    if (p.scrolled || p.asleep) return {}; // the viewport shows history, or a shell where the agent was
     const r = this.route(pane);
     const screen = await r.backend.readScreen(r.raw);
     const menu = parseMenu(screen, p.agent);
@@ -1028,6 +1057,169 @@ export class Workspaces {
   terminalArgv(pane: string, mode: "control" | "observe", cols: number, rows: number) {
     const r = this.route(pane);
     return r.backend.terminalSessionArgv(r.raw, mode, cols, rows);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // agents stopped for being idle (sleep.ts decides which; here they are stopped, shown, and started again)
+
+  asleepRecord(pane: string): SleepRecord | undefined {
+    return this.asleep[pane];
+  }
+
+  private saveAsleep() {
+    writeFileSync(this.asleepFile, JSON.stringify(this.asleep, null, 2));
+  }
+
+  /**
+   * A stopped agent's pane shows it as it was: the same agent, name and status (so teams, Needs you and the chat
+   * view see no change), and `asleep`. Forgotten when its pane is gone or another agent runs in it.
+   */
+  private overlayAsleep(machine: string, panes: HPane[], p: (id: string) => string): HPane[] {
+    const here = Object.values(this.asleep).filter((r) => splitId(r.pane).machine === machine);
+    if (!here.length) return panes;
+    let dropped = false;
+    const out = panes.map((x) => {
+      const rec = this.asleep[p(x.id)];
+      if (!rec) return x;
+      // an agent runs there again: started by hand (or by wake). Herdr goes on reporting the agent for a few seconds
+      // after it exits, so the same one right after the stop is that, not a new start.
+      const lag = x.agent === rec.agent && Date.now() - Date.parse(rec.since) < 30_000;
+      if (x.agent && !rec.stopping && !lag) {
+        if (this.wakeOps.has(rec.pane)) return x; // being started again
+        delete this.asleep[rec.pane];
+        dropped = true;
+        return x;
+      }
+      return { ...x, agent: rec.agent, agentName: rec.name ?? x.agentName, agentStatus: rec.status, cwd: rec.cwd, session: rec.herdrSession ?? x.session, asleep: rec.since };
+    });
+    for (const r of here)
+      if (!panes.some((x) => p(x.id) === r.pane)) {
+        delete this.asleep[r.pane];
+        dropped = true;
+      }
+    if (dropped) this.saveAsleep();
+    return out;
+  }
+
+  private async forgetAsleep(pane: string) {
+    if (!this.asleep[pane]) return;
+    delete this.asleep[pane];
+    this.saveAsleep();
+    this.changed(splitId(pane).machine);
+    await this.refresh();
+  }
+
+  /** Run a shell command on a machine (this Mac, or a connected remote one): its output. */
+  async machineExec(machine: string, cmd: string): Promise<string> {
+    const m = this.machines.get(machine);
+    if (!m) throw new AfError("unknown_machine", `no machine ${machine}`, 404);
+    if (m.meta.local) {
+      const proc = Bun.spawn(["sh", "-c", cmd], { stdout: "pipe", stderr: "ignore" });
+      return await new Response(proc.stdout).text();
+    }
+    if (!m.remote) throw new AfError("machine_offline", `${m.meta.label} is not connected`, 503);
+    return (await m.remote.exec(cmd)).out.toString();
+  }
+
+  private async alive(machine: string, pid: number) {
+    if (machine === "local") {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    }
+    return (await this.machineExec(machine, `kill -0 ${pid} 2>/dev/null && echo alive`).catch(() => "alive")).includes("alive");
+  }
+
+  private async gone(machine: string, pid: number, ms: number) {
+    for (const end = Date.now() + ms; Date.now() < end; ) {
+      if (!(await this.alive(machine, pid))) return true;
+      await Bun.sleep(200);
+    }
+    return !(await this.alive(machine, pid));
+  }
+
+  /**
+   * Stop the agent (process `pid`) in rec.pane and remember how to start it again. Its own way out first (the keys
+   * of "exit": its box is empty), then SIGTERM if it is still there. The pane shows it as before from the start, so
+   * nothing sees it exit.
+   */
+  async putToSleep(rec: SleepRecord, pid: number) {
+    const pane = rec.pane;
+    if (this.sleepOps.has(pane) || this.wakeOps.has(pane)) throw new AfError("busy", "this agent is being stopped or started", 409);
+    const machine = splitId(pane).machine;
+    const op = (async () => {
+      const r = this.route(pane);
+      this.asleep[pane] = { ...rec, stopping: true };
+      this.saveAsleep();
+      try {
+        for (const st of controlSteps(rec.agent, "exit")) {
+          if ("wait" in st) await Bun.sleep(st.wait);
+          else if ("keys" in st) await r.backend.sendKeys(r.raw, st.keys);
+        }
+        if (!(await this.gone(machine, pid, 8000))) {
+          await this.machineExec(machine, `kill -TERM ${pid}`).catch(() => {});
+          if (!(await this.gone(machine, pid, 5000))) throw new AfError("stop_failed", `${rec.agent} did not exit`);
+        }
+      } catch (e) {
+        delete this.asleep[pane];
+        this.saveAsleep();
+        throw e;
+      }
+      delete this.asleep[pane]!.stopping;
+      this.saveAsleep();
+      this.changed(machine);
+    })();
+    this.sleepOps.set(pane, op);
+    try {
+      await op;
+    } finally {
+      this.sleepOps.delete(pane);
+    }
+    await this.refresh();
+  }
+
+  /**
+   * Start a stopped agent again on its conversation, in its pane, with the flags it had; waits until its input box
+   * is up (or it asks something, like a folder-trust question: the user answers that). False if it was not stopped.
+   */
+  async wake(pane: string): Promise<boolean> {
+    await this.sleepOps.get(pane)?.catch(() => {});
+    const rec = this.asleep[pane];
+    if (!rec) return false;
+    let op = this.wakeOps.get(pane);
+    if (!op) {
+      op = (async () => {
+        const r = this.route(pane);
+        const args = resumeArgs(rec.agent, rec.args, rec.session);
+        if (!args) throw new AfError("cannot_resume", `cannot tell how to resume ${rec.agent}`);
+        if (rec.name) {
+          // a named agent (a team member) comes back under its name, as Herdr started it
+          let res = await r.backend.startAgent(rec.name, rec.agent as AgentKind, r.raw, args);
+          for (let i = 0; i < 12 && !res.ok && /busy/.test(res.code); i++) {
+            await Bun.sleep(500);
+            res = await r.backend.startAgent(rec.name, rec.agent as AgentKind, r.raw, args);
+          }
+          if (!res.ok && res.code !== "agent_not_ready") throw new AfError("resume_failed", `${rec.agent} did not start again (${res.code}: ${res.message})`);
+        } else {
+          await r.backend.runInPane(r.raw, `cd ${sq(rec.cwd)} && ${[rec.bin, ...args].map(sq).join(" ")}`);
+          await Bun.sleep(1500);
+          for (const end = Date.now() + 90_000; Date.now() < end; await Bun.sleep(300)) {
+            const screen = await r.backend.readScreen(r.raw, true).catch(() => "");
+            if (inputText(rec.agent, screen) !== undefined || parseMenu(screen, rec.agent) || screenOverlay(screen, rec.agent)?.hint) break;
+          }
+        }
+        delete this.asleep[pane];
+        this.saveAsleep();
+        this.changed(r.m.meta.id);
+      })().finally(() => this.wakeOps.delete(pane));
+      this.wakeOps.set(pane, op);
+    }
+    await op;
+    await this.refresh();
+    return true;
   }
 
   processes(pane: string) {

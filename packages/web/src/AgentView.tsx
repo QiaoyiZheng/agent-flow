@@ -147,7 +147,7 @@ function segments(entries: ChatEntry[]): Segment[] {
   return out;
 }
 
-export function AgentView({ paneId, agent, status, background, focused, onForked }: { paneId: string; agent: string; status?: string; background?: number; focused: boolean; onForked?: (paneId: string) => void }) {
+export function AgentView({ paneId, agent, status, background, asleep, focused, onForked }: { paneId: string; agent: string; status?: string; background?: number; asleep?: string; focused: boolean; onForked?: (paneId: string) => void }) {
   const [source, setSource] = useState<ChatSource | null | undefined>(undefined);
   const [reason, setReason] = useState<string>();
   const log = useRef(new Log());
@@ -174,6 +174,10 @@ export function AgentView({ paneId, agent, status, background, focused, onForked
   }, [version]);
   const [height, setHeight] = useState(0);
   const [showTerm, setShowTerm] = useState(false);
+  // stopped for being idle (the server's sleep.ts): its terminal is a shell now; opening it starts the agent again
+  useEffect(() => {
+    if (showTerm && asleep) api("POST", "/pane/wake", { pane: paneId }).catch(failed("Could not resume it"));
+  }, [showTerm, asleep, paneId]);
   const [hl, setHl] = useState(0);
   useEffect(() => onHighlighterReady(() => setHl(1)), []);
   const out = outbox.use(paneId);

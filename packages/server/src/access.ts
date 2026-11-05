@@ -28,6 +28,9 @@ export function makeTranscriptAccess(o: Teams, w: Workspaces) {
     const panes = w.model.panes;
     const pane = panes.find((p: HPane) => p.id === paneId);
     if (!pane) return { reason: "pane is gone" } as const;
+    // stopped for being idle (sleep.ts): no process to look at; its conversation was found before it was stopped
+    const asleep = w.asleepRecord(paneId);
+    if (asleep?.source) return { source: asleep.source };
     const k = known(paneId);
     return resolveTranscript(fsFor(paneId).fs, {
       pane,

@@ -17,6 +17,7 @@ import { type Need, Sidebar } from "./Sidebar";
 import { LayoutView, type PaneCtx } from "./Layout";
 import { kindColor } from "./view";
 import { NoticesButton, Toasts } from "./Notices";
+import { ProcessesButton } from "./Processes";
 
 const params = new URLSearchParams(location.search);
 
@@ -284,6 +285,7 @@ export function App() {
             </span>
           )}
           <span className="spacer" />
+          <ProcessesButton onGoTo={(id) => goToPane(id)} />
           <NoticesButton />
           <span className={`conn ${connected ? "" : "off"}`} title={connected ? "connected to the agent-flow server" : "reconnecting to the agent-flow server"}>
             <i /> {connected ? "connected" : "reconnecting…"}

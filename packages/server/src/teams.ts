@@ -939,6 +939,31 @@ export class Teams {
     return { ticket: k.id, seq: q.seq };
   }
 
+  /**
+   * Whether the agent in `pane` may be stopped for being idle (sleep.ts), as far as teams go; undefined when no
+   * running team has it. A router or a member that stands for a team: never. A member while a ticket of its is open
+   * or in progress, a message waits for it, or something it sent is not dealt with yet: not now. Otherwise it is a
+   * worker with nothing to do (stopped sooner than other agents); a message to it starts it again.
+   */
+  sleepInfo(pane: string): { worker: boolean; ok: boolean; why?: string } | undefined {
+    for (const t of this.teams.values()) {
+      if (t.state.stopped) continue;
+      for (const m of Object.values(t.state.members)) {
+        if (m.paneId !== pane || m.status === "exited") continue;
+        if (m.team) return { worker: false, ok: false, why: "stands for a team" };
+        if (m.protocol === "router") return { worker: false, ok: false, why: "routes a team" };
+        if (t.starting.has(m.name)) return { worker: true, ok: false, why: "starting" };
+        const k = currentTicket(t.state, m.name);
+        if (k) return { worker: true, ok: false, why: `${k.id} is ${k.status === "submitted" ? "waiting for its manager" : "in progress"}` };
+        if (waitingTickets(t.state, m.name).length) return { worker: true, ok: false, why: "has a ticket waiting" };
+        if (pendingMessages(t.state, m.name).length) return { worker: true, ok: false, why: "has a message waiting" };
+        if (t.state.queue.some((q) => q.from === m.name && q.state !== "handled")) return { worker: true, ok: false, why: "its manager has not dealt with its last report" };
+        return { worker: true, ok: true };
+      }
+    }
+    return undefined;
+  }
+
   // -------------------------------------------------------------------------------------------
   // the manager's queue
 

@@ -81,7 +81,7 @@ export async function main(argv: string[]) {
   // AF_SECOND_SERVER=1: a server next to the main one (tests, trying a branch): it does not rewrite the skills in the
   // user's skill folders, and does not hand over documents agents change (the main server does both)
   const second = process.env.AF_SECOND_SERVER === "1";
-  const api = serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access, watchDocs: !second });
+  const api = serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access, watchDocs: !second, sleep: !second });
   // af on connected SSH machines (remote-af.ts); not from a second server, which would take over their af.sock
   const remoteAf = second ? undefined : new RemoteAf({ home, w, teams: o, handler: api.handler, cliMain: join(repoRoot, "packages/cli/src/main.ts"), skillText, log: (m) => console.log(m) });
   remoteAf?.start();

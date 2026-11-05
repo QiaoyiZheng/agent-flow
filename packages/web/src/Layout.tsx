@@ -195,7 +195,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         {view ? (
           isUrl(view.target) ? <WebView url={view.target} /> : <FileView path={view.target} paneId={paneId} />
         ) : renderable && !raw ? (
-          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} background={p?.background} focused={focused} onForked={(id) => ctx.onFocus(id)} />
+          <AgentView paneId={paneId} agent={title} status={p?.agentStatus} background={p?.background} asleep={p?.asleep} focused={focused} onForked={(id) => ctx.onFocus(id)} />
         ) : (
           <Terminal paneId={paneId} autoFocus={focused} />
         )}

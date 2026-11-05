@@ -161,6 +161,11 @@ export interface HPane {
    * while there are any, "done" is not finished. Absent: none (or not known: only claude on this Mac).
    */
   background?: number;
+  /**
+   * agent-flow stopped this agent for being idle, at this time (see the server's sleep.ts): its process is gone, its
+   * pane shows it as it was, and a message starts it again on its conversation.
+   */
+  asleep?: string;
 }
 
 export interface HLayout {

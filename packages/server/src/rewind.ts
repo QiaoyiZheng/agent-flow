@@ -307,6 +307,7 @@ export async function rewindTo(w: Workspaces, access: TranscriptAccess, req: Rew
   if (locks.has(req.pane)) throw new AfError("busy", "a rewind is already going on in this pane", 409);
   locks.add(req.pane);
   try {
+    await w.wake(req.pane); // stopped for being idle: started again first
     const st = await w.screenState(req.pane);
     if (st.menu || st.overlay) throw new AfError("agent_asking", `${p.agent} is showing a question or a notice; answer it first`, 409);
     // a working agent stops first (Esc), as in its own terminal
