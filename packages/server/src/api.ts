@@ -128,8 +128,12 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           const req = body as ShowRequest;
           return json(await w.show(req, who.kind === "member" || who.kind === "router" ? who.member : "user"));
         }
-        case "GET /view":
-          return json(w.view(body.pane) ?? null);
+        case "GET /view": {
+          const v = w.view(body.pane);
+          // format=text: just the target, for the viewer script (viewer.sh) in the pane
+          if (body.format === "text") return new Response(v?.target ?? "", { headers: { "content-type": "text/plain; charset=utf-8" } });
+          return json(v ?? null);
+        }
         // browsing local files (the Open dialog, folder panes, previews that reload when the file changes)
         case "GET /fs/list":
           return json(listDir(String(body.path || process.env.HOME || "/"), fileRoots(o, o.opts.home), body.hidden === "1" || body.hidden === true));

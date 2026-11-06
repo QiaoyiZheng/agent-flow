@@ -263,11 +263,27 @@ export function childWork(procs: Map<number, Proc>, agentPid: number): string[] 
     .map((p) => basename(p.comm));
 }
 
-/** Memory the agent and everything it started use, MB. */
-export function memoryMb(procs: Map<number, Proc>, agentPid: number) {
+/**
+ * Memory the agent and everything it started use, MB. `footprint` (pid → MB, from top on a Mac) counts what macOS
+ * compressed or swapped out too; ps's resident size leaves that out, so a Mac short of memory shows tiny numbers.
+ */
+export function memoryMb(procs: Map<number, Proc>, agentPid: number, footprint?: Map<number, number>) {
   const me = procs.get(agentPid);
   if (!me) return 0;
-  return Math.round((me.rss + descendants(procs, agentPid).reduce((s, p) => s + p.rss, 0)) / 1024);
+  const of = (p: Proc) => footprint?.get(p.pid) ?? p.rss / 1024;
+  return Math.round(of(me) + descendants(procs, agentPid).reduce((s, p) => s + of(p), 0));
+}
+
+/** macOS top's memory column for every process (`top -l 1 -stats pid,mem`): "929M", "12K", "1.2G", "8M+". */
+export const TOP_CMD = "top -l 1 -n 5000 -stats pid,mem";
+export function parseTopMem(out: string): Map<number, number> {
+  const unit: Record<string, number> = { B: 1 / 1048576, K: 1 / 1024, M: 1, G: 1024 };
+  const m = new Map<number, number>();
+  for (const l of out.split("\n")) {
+    const r = l.trim().match(/^(\d+)\s+([\d.]+)([BKMG])[+-]?$/);
+    if (r) m.set(Number(r[1]), Number(r[2]) * unit[r[3]!]!);
+  }
+  return m;
 }
 
 /** The lines of a claude transcript that name its schedule tools (a grep's output). */
@@ -461,10 +477,26 @@ export class Sleeper {
     return stopped;
   }
 
+  private footprintNow?: Map<number, number>;
+  private footprintAt = 0;
+  /** This Mac's per-process memory as top counts it (about a second to read: kept 30 s). */
+  private async footprint() {
+    if (process.platform !== "darwin") return undefined;
+    if (!this.footprintNow || this.now() - this.footprintAt > 30_000) {
+      const m = parseTopMem(await this.w.machineExec("local", TOP_CMD).catch(() => ""));
+      if (m.size) {
+        this.footprintNow = m;
+        this.footprintAt = this.now();
+      }
+    }
+    return this.footprintNow;
+  }
+
   /** Every agent pane, running or stopped, with why it is kept running. `full`: check the slow things too. */
   async list(full = false): Promise<ProcessRow[]> {
     const rows: ProcessRow[] = [];
     const ps = new Map<string, Map<number, Proc>>();
+    await this.footprint();
     const procsOf = async (machine: string) => {
       if (!ps.has(machine)) ps.set(machine, parsePs(await this.w.machineExec(machine, PS_CMD).catch(() => "")));
       return ps.get(machine)!;
@@ -489,7 +521,7 @@ export class Sleeper {
   private async whyKeep(p: HPane, row: ProcessRow, procsOf: (machine: string) => Promise<Map<number, Proc>>, full: boolean): Promise<string | undefined> {
     const procs = await procsOf(p.machine);
     const me = agentProcess(p.agent!, await this.w.processes(p.id).catch(() => []));
-    if (me) row.memoryMb = memoryMb(procs, me.pid);
+    if (me) row.memoryMb = memoryMb(procs, me.pid, p.machine === "local" ? this.footprintNow : undefined);
     if (p.agentStatus === "working") return "working";
     if (p.agentStatus === "blocked" || p.asking) return "waiting for an answer";
     if (p.background) return `${p.background} background task${p.background > 1 ? "s" : ""} running`;

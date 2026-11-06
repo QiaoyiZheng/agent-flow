@@ -25,7 +25,12 @@ function installShim(home: string) {
   mkdirSync(bin, { recursive: true });
   const shim = join(bin, "af");
   // the server's socket is the default, so sessions started outside agent-flow (af here) reach this server
-  writeFileSync(shim, `#!/bin/sh\nexport AF_SELF="$0"\nexport AF_SOCK="\${AF_SOCK:-${join(home, "server.sock")}}"\nexec "${process.execPath}" "${join(repoRoot, "packages/cli/src/main.ts")}" "$@"\n`);
+  // `af viewer` (the process in a viewer pane) is a bash script: a dozen viewer panes would be a dozen bun processes
+  const viewer = join(repoRoot, "packages/cli/src/viewer.sh");
+  writeFileSync(
+    shim,
+    `#!/bin/sh\nexport AF_SELF="$0"\nexport AF_SOCK="\${AF_SOCK:-${join(home, "server.sock")}}"\n[ "$1" = viewer ] && [ -x /bin/bash ] && exec /bin/bash "${viewer}"\nexec "${process.execPath}" "${join(repoRoot, "packages/cli/src/main.ts")}" "$@"\n`,
+  );
   chmodSync(shim, 0o755);
   return bin;
 }

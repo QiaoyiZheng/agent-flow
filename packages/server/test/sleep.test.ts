@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG, launchArgs, plainArgs } from "../src/agents.ts";
-import { Sleeper, agentArgs, dropMissingFiles, agentProcess, childWork, etimeSeconds, keptOptions, memoryMb, parsePs, resumeArgs, scheduledWork, sessionOf } from "../src/sleep.ts";
+import { Sleeper, agentArgs, dropMissingFiles, parseTopMem, agentProcess, childWork, etimeSeconds, keptOptions, memoryMb, parsePs, resumeArgs, scheduledWork, sessionOf } from "../src/sleep.ts";
 import { LocalFS } from "../src/transcripts/index.ts";
 import { Workspaces } from "../src/workspaces.ts";
 import { FakeBackend } from "./fake.ts";
@@ -84,6 +84,10 @@ describe("work an idle agent still has running", () => {
     );
     expect(childWork(ps, 100)).toEqual(["zsh", "python3"]);
     expect(memoryMb(ps, 100)).toBe(Math.round((20480 + 4096 + 1024 + 8192 + 65536) / 1024));
+    // with top's figures (compressed and swapped memory counted): those where known, ps's for the rest
+    const top = parseTopMem("Processes: 700 total\nPID    MEM\n100    929M\n101    12K\n104    1.5G+\n999    3M-\n");
+    expect([top.get(100), top.get(101), top.get(104), top.get(999)]).toEqual([929, 12 / 1024, 1536, 3]);
+    expect(memoryMb(ps, 100, top)).toBe(Math.round(929 + 12 / 1024 + 1 + 8 + 1536));
     ps.delete(104);
     ps.delete(103);
     expect(childWork(ps, 100)).toEqual([]);
