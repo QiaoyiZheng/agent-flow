@@ -177,7 +177,8 @@ export async function api<T = any>(method: "GET" | "POST", path: string, body: R
   return data as T;
 }
 
-export const fileUrl = (path: string) => `/api/file?token=${TOKEN}&path=${encodeURIComponent(path)}`;
+/** A file's bytes: this Mac's, or (machine) a remote machine's, read over SSH. */
+export const fileUrl = (path: string, machine?: string) => `/api/file?token=${TOKEN}&path=${encodeURIComponent(path)}${machine && machine !== "local" ? `&machine=${encodeURIComponent(machine)}` : ""}`;
 
 connect();
 

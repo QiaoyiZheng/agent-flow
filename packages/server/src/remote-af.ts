@@ -60,10 +60,13 @@ const ALLOWED = new Set([
   "POST /team/submit",
   "POST /team/progress",
   "POST /team/ask",
+  // a document handed over from there (its path is on that machine), and a viewer pane there following its target
+  "POST /deliver",
+  "GET /view",
 ]);
 
 /** af subcommands that only make sense on the Mac itself (they would act there, not on the caller's machine). */
-const MAC_ONLY = new Set(["server", "viewer", "hook", "open", "deliver", "split", "close", "connect", "disconnect", "workspace", "ls"]);
+const MAC_ONLY = new Set(["server", "viewer", "hook", "open", "split", "close", "connect", "disconnect", "workspace", "ls"]);
 
 /** The /cli body: NUL-separated cwd, AF_TEAM, AF_AGENT, HERDR_PANE_ID, then the arguments. */
 export function parseCliBody(body: Uint8Array) {
@@ -86,6 +89,8 @@ export interface RemoteAfOptions {
   cliMain: string;
   /** Write the agent-flow skill on each machine (the main server does; a second server does not). */
   skillText?: (af: string) => string;
+  /** The deliver-document skill's text for that machine's af (agents there hand over documents with af deliver). */
+  deliverText?: (af: string) => string;
   log?: (msg: string) => void;
 }
 
@@ -142,11 +147,14 @@ export class RemoteAf {
         if (!(await healthy())) throw new Error(`${there} does not answer after forwarding it (does this sshd allow AllowStreamLocalForwarding?)`);
       }
       if (this.opts.skillText && !this.skilled.has(machine)) {
-        const text = this.opts.skillText(`${remote.home}/.agent-flow/bin/af`);
-        const r = await remote.exec(
-          `t=$(mktemp) && cat > "$t" && for d in .claude .codex .gemini; do if [ -d "$HOME/$d" ]; then mkdir -p "$HOME/$d/skills/agent-flow" && cp "$t" "$HOME/$d/skills/agent-flow/SKILL.md" && echo "$d"; fi; done; rm -f "$t"`,
-          { stdin: new TextEncoder().encode(text) },
-        );
+        const af = `${remote.home}/.agent-flow/bin/af`;
+        const put = (skill: string, text: string) =>
+          remote.exec(
+            `t=$(mktemp) && cat > "$t" && for d in .claude .codex .gemini; do if [ -d "$HOME/$d" ]; then mkdir -p "$HOME/$d/skills/${skill}" && cp "$t" "$HOME/$d/skills/${skill}/SKILL.md" && echo "$d"; fi; done; rm -f "$t"`,
+            { stdin: new TextEncoder().encode(text) },
+          );
+        const r = await put("agent-flow", this.opts.skillText(af));
+        if (this.opts.deliverText) await put("deliver-document", this.opts.deliverText(af));
         if (r.code === 0) {
           this.skilled.add(machine);
           this.opts.log?.(`  skill on ${machine}: ${r.out.toString().trim().split("\n").filter(Boolean).join(", ") || "(no agent folders)"}`);
@@ -188,6 +196,9 @@ export class RemoteAf {
       if (key === "POST /cli") return await this.cli(machine, new Uint8Array(await req.arrayBuffer()));
       const body: Record<string, any> = req.method === "POST" ? await req.json().catch(() => ({})) : Object.fromEntries(url.searchParams);
       if (body.callerPane && !String(body.callerPane).includes(MACHINE_SEP)) body.callerPane = `${machine}${MACHINE_SEP}${body.callerPane}`;
+      // panes named by the caller are its machine's; a file it hands over is there
+      if ((key === "POST /deliver" || key === "GET /view") && body.pane && !String(body.pane).includes(MACHINE_SEP)) body.pane = `${machine}${MACHINE_SEP}${body.pane}`;
+      if (key === "POST /deliver") body.machine = machine;
       // a member or router speaks for itself only: it must be one that runs on this machine
       if (body.team && body.agent) {
         let m;

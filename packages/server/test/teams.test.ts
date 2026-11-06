@@ -777,6 +777,24 @@ describe("members on another machine", () => {
     raf.stop();
   });
 
+  test("af deliver there: the file is checked there, recorded for that machine and the caller's pane; GET /view for its viewer", async () => {
+    const { home, rhome, o, w, h } = await setupRemote();
+    const raf = new RemoteAf({ home, w, teams: o, handler: h, cliMain: join(import.meta.dir, "../../cli/src/main.ts") });
+    writeFileSync(join(rhome, "proj", "report.md"), "# Report\n");
+    const post = (path: string, body: object) => raf.serve("gpu", new Request(`http://af${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+    // machine "local" in the body is ignored: the caller is on gpu
+    const r = await post("/deliver", { path: join(rhome, "proj", "report.md"), pane: "w1:p2", title: "Report", machine: "local" });
+    expect(r.status).toBe(200);
+    const d = ((await r.json()) as any).delivery;
+    expect(d).toMatchObject({ path: join(rhome, "proj", "report.md"), machine: "gpu", pane: "gpu~w1:p2", title: "Report" });
+    expect((await post("/deliver", { path: join(rhome, "proj", "nope.md"), pane: "w1:p2" })).status).toBe(404);
+    // a viewer pane there asks what it shows, by its own pane id
+    w.register("gpu~w1:p9", join(rhome, "proj", "report.md"), "user", "gpu");
+    const v = await raf.serve("gpu", new Request(`http://af/view?pane=w1:p9&format=text`));
+    expect(await v.text()).toBe(join(rhome, "proj", "report.md"));
+    raf.stop();
+  });
+
   test("the af script: sends the command, prints the answer, and exits with its code", async () => {
     const dir = tmp("af-shim-");
     mkdirSync(join(dir, ".agent-flow", "bin"), { recursive: true });

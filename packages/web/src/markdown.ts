@@ -213,13 +213,16 @@ docMarked.use({
     },
     image({ href, title, text }) {
       const t = docTarget(href);
-      const src = t.url ?? (t.path ? `/api/file?path=${encodeURIComponent(t.path)}&token=${encodeURIComponent(docToken)}` : "");
+      const src = t.url ?? (t.path ? docFile(t.path) : "");
       return `<img src="${esc(src)}" alt="${esc(text)}"${title ? ` title="${esc(title)}"` : ""}>`;
     },
   },
 });
 
 let docToken = "";
+/** The machine the document is on (absent: this Mac): its pictures are read from there too. */
+let docMachine: string | undefined;
+const docFile = (path: string) => `/api/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(docToken)}${docMachine ? `&machine=${encodeURIComponent(docMachine)}` : ""}`;
 
 /** YAML-ish front matter ("---\nkey: value\n---") as rows, and the text after it. */
 function frontMatter(src: string): { rows: [string, string][]; body: string } {
@@ -249,7 +252,7 @@ function sanitize(html: string) {
     const src = img.getAttribute("src")!;
     if (!isRemote(src) && !src.startsWith("/api/file") && !src.startsWith("data:")) {
       const p = src.startsWith("/") ? src : resolvePath(base, src.replace(/[?#].*$/, ""));
-      img.setAttribute("src", `/api/file?path=${encodeURIComponent(p)}&token=${encodeURIComponent(docToken)}`);
+      img.setAttribute("src", docFile(p));
     }
   }
   for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
@@ -264,9 +267,10 @@ function sanitize(html: string) {
 }
 
 /** A Markdown file as HTML, with its outline. `token` is the UI's API token, for local images. */
-export function renderDoc(src: string, path: string, token: string): { html: string; headings: DocHeading[]; mermaid: boolean } {
+export function renderDoc(src: string, path: string, token: string, machine?: string): { html: string; headings: DocHeading[]; mermaid: boolean } {
   docBase = dirOf(path);
   docToken = token;
+  docMachine = machine && machine !== "local" ? machine : undefined;
   docHeadings = [];
   docSlugs = new Map();
   const { rows, body } = frontMatter(src);

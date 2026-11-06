@@ -211,6 +211,8 @@ export interface ViewRec {
   target: string;
   by: string;
   at: string;
+  /** The machine the target is on (absent: this Mac): the UI reads it over SSH. */
+  machine?: string;
 }
 
 export interface ShowRequest extends Caller {
@@ -226,6 +228,8 @@ export interface ShowRequest extends Caller {
   tabIn?: string;
   /** The caller's Herdr pane, from $HERDR_PANE_ID. */
   pane?: string;
+  /** The machine the target is on (default: the pane's). */
+  machine?: string;
 }
 
 // ---------------------------------------------------------------------------------------------

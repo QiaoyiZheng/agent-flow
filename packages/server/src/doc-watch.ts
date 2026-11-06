@@ -12,7 +12,7 @@ import { extname, join, relative } from "node:path";
 
 export const DOC_EXT = new Set([".md", ".markdown", ".mdx", ".tex", ".txt", ".rst", ".org", ".html", ".pptx", ".ppt", ".key", ".docx", ".doc", ".pages", ".xlsx", ".xls", ".numbers", ".pdf", ".odt", ".odp", ".ods", ".rtf", ".epub", ".ipynb"]);
 /** Folders whose files are not documents for the user. */
-const SKIP_DIR = new Set(["node_modules", ".git", ".hg", ".svn", "dist", "build", "out", "target", ".next", ".cache", "cache", "__pycache__", ".venv", "venv", ".tox", ".turbo", ".agent-flow", ".claude", ".codex", ".omp", "logs", "log", "tmp", ".tmp", "coverage", ".pytest_cache", ".mypy_cache", "site-packages"]);
+export const SKIP_DIR = new Set(["node_modules", ".git", ".hg", ".svn", "dist", "build", "out", "target", ".next", ".cache", "cache", "__pycache__", ".venv", "venv", ".tox", ".turbo", ".agent-flow", ".claude", ".codex", ".omp", "logs", "log", "tmp", ".tmp", "coverage", ".pytest_cache", ".mypy_cache", "site-packages"]);
 /** File names that are not documents for the user (agents' instruction and memory files, changelogs written by tools). */
 const SKIP_NAME = /^(AGENTS|CLAUDE|GEMINI|MEMORY|CHANGELOG|LICENSE|COPYING)(\.[a-z]+)?$|^\.|~$|\.(bak|orig|tmp)$/i;
 /** LaTeX's own outputs next to the source: the PDF is the document, these are not. */

@@ -342,14 +342,17 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
     return () => window.removeEventListener("keydown", onKey);
   }, [focused, status, paneId]);
 
-  // links to local files in agent output (codex writes [x.ts](/Users/…/x.ts:12)) open next to this pane
+  // links to files in agent output (codex writes [x.ts](/Users/…/x.ts:12)) open next to this pane: in a preview on
+  // the agent's machine (a remote agent's file is read over SSH; its preview has the VS Code button)
   const openLink = (e: React.MouseEvent) => {
     const a = (e.target as HTMLElement).closest("a[data-path]") as HTMLAnchorElement | null;
     if (!a) return;
     e.preventDefault();
-    // a remote agent's file: VS Code over Remote-SSH (preview panes are local only)
-    if (paneId.includes("~")) return void openIn("vscode", a.dataset.path!, { pane: paneId });
-    api("POST", "/show", { target: a.dataset.path, of: paneId }).catch(failed("Could not open the file"));
+    api("POST", "/show", { target: a.dataset.path, of: paneId }).catch((err) => {
+      // a remote machine that cannot be read right now: VS Code over Remote-SSH still can
+      if (paneId.includes("~")) return void openIn("vscode", a.dataset.path!, { pane: paneId });
+      failed("Could not open the file")(err);
+    });
   };
 
   // keep the newest output in view unless the user scrolled up
@@ -837,15 +840,13 @@ function DeliveredFiles({ docs, paneId }: { docs: Delivery[]; paneId: string }) 
           {(d.title || d.note) && <span className="c-doc-note">{[d.found ? "" : d.title, d.note].filter(Boolean).join(" — ")}</span>}
           <span className="c-doc-btns">
             <OpenButtons path={d.path} remote={remote} pane={paneId} delivery={d.id} />
-            {!remote && (
-              <button
-                className="btn subtle"
-                title="Preview it in a pane next to this one"
-                onClick={() => api("POST", "/show", { target: d.path, of: paneId, run: undefined }).catch(failed("Could not show it"))}
-              >
-                Preview
-              </button>
-            )}
+            <button
+              className="btn subtle"
+              title={remote ? "Preview it in a pane next to this one (read over SSH; it updates when the file changes)" : "Preview it in a pane next to this one (it updates when the file changes)"}
+              onClick={() => api("POST", "/show", { target: d.path, of: paneId, run: undefined }).catch(failed("Could not show it"))}
+            >
+              Preview
+            </button>
           </span>
         </div>
       ))}

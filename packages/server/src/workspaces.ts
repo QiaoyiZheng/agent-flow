@@ -17,6 +17,7 @@ import { type Menu, type Overlay, keysToChoose, parseMenu, screenOverlay } from 
 import { REWIND_HINT, STEER_NOW, clearBoxKeys, controlSteps, inputText } from "./controls.ts";
 import { claudeSession, parseRemoteCounts, remoteCheckScript, runningTasks, taskDir } from "./background.ts";
 import { type SleepRecord, dropMissingFiles, resumeArgs } from "./sleep.ts";
+import { type Exec, remoteStat } from "./remote-files.ts";
 
 /** What Workspaces needs from a remote connection (RemoteMachine, or a fake in tests). */
 export type RemoteLike = Pick<RemoteMachine, "state" | "error" | "home" | "connect" | "close" | "exec"> & Partial<Pick<RemoteMachine, "verify" | "masterAlive" | "forwardRemoteSocket">>;
@@ -592,12 +593,12 @@ export class Workspaces {
       m.layouts = layouts;
       if (m.meta.local && m.failedPolls > 0) this.opts.notify?.("info", "herdr", "Herdr is responding again");
       m.failedPolls = 0;
-      if (m.meta.local) {
-        // forget viewers whose pane is gone
+      {
+        // forget this machine's viewers whose pane is gone (a remote file's viewer is a pane on its machine)
         const live = new Set(m.panes.map((x) => x.id));
         let dropped = false;
         for (const id of Object.keys(this.views))
-          if (!live.has(id)) {
+          if (splitId(id).machine === key && !live.has(id)) {
             delete this.views[id];
             dropped = true;
           }
@@ -1348,9 +1349,14 @@ export class Workspaces {
 
   /** Show a file, directory, or URL: in an existing viewer pane, in a new split, or in a new tab. Local only. */
   async show(req: ShowRequest, by: string): Promise<ViewRec> {
+    // the target's machine: the pane it opens in, next to, or the workspace's (a remote agent's file shows in a pane
+    // on that machine: the web UI reads it over SSH, and the pane's plain view in the Herdr TUI reads it there)
+    const refs = [req.in, req.of ?? req.pane, req.tabIn].filter((x): x is string => !!x);
+    const machine = req.machine ?? (refs[0] ? splitId(refs[0]).machine : "local");
+    for (const ref of refs)
+      if (splitId(ref).machine !== machine) throw new AfError("other_machine", `${ref} is not on ${machine}: a file shows in a pane on its own machine`);
+    if (machine !== "local") return this.showRemote(req, machine, by);
     const target = req.target;
-    for (const ref of [req.in, req.of, req.tabIn])
-      if (ref && splitId(ref).machine !== "local") throw new AfError("remote_viewer", "showing files in panes on remote machines is not supported yet");
     if (!isUrl(target) && !existsSync(target)) throw new AfError("not_found", `${target} does not exist`);
     if (req.in) {
       this.pane(req.in);
@@ -1372,8 +1378,56 @@ export class Workspaces {
     return rec;
   }
 
-  register(paneId: string, target: string, by: string): ViewRec {
-    const rec = { paneId, target, by, at: this.now() };
+  /** A file or folder on a remote machine, in a viewer pane there (see show). */
+  private async showRemote(req: ShowRequest, machine: string, by: string): Promise<ViewRec> {
+    const fs = this.remoteFiles(machine);
+    const st = await remoteStat(fs.exec, req.target, fs.home);
+    if (req.in) {
+      this.pane(req.in);
+      if (!this.views[req.in]) throw new AfError("not_a_viewer", `pane ${req.in} is not a viewer pane; use --split to open a new one next to it`);
+      return this.register(req.in, st.path, by, machine);
+    }
+    const cwd = st.dir ? st.path : dirname(st.path);
+    let paneId: string;
+    if (req.tabIn) paneId = (await this.newTab(req.tabIn, cwd)).paneId;
+    else {
+      const base = req.of ?? req.pane;
+      if (!base) throw new AfError("no_pane", "say where to show it: in a viewer pane, next to a pane, or in a new tab");
+      paneId = (await this.split(base, req.split ?? "right", { cwd })).paneId;
+    }
+    const rec = this.register(paneId, st.path, by, machine);
+    const r = this.route(paneId);
+    // its plain view for the Herdr TUI, drawn there (bash; without it the pane stays a shell)
+    await this.remoteViewer(machine).catch(() => {});
+    await r.backend.runInPane(r.raw, `command -v bash >/dev/null 2>&1 && AF_SOCK="$HOME/.agent-flow/af.sock" exec bash "$HOME/.agent-flow/bin/af-viewer" ${sq(st.path)}`);
+    await r.backend.renamePane(r.raw, `≡ ${basename(st.path)}`).catch(() => {});
+    await this.changed(machine);
+    return rec;
+  }
+
+  private viewerOn = new Set<string>();
+  /** The viewer script (packages/cli/src/viewer.sh) at ~/.agent-flow/bin/af-viewer on a remote machine, once per run. */
+  private async remoteViewer(machine: string) {
+    if (this.viewerOn.has(machine)) return;
+    const fs = this.remoteFiles(machine);
+    const script = readFileSync(join(import.meta.dir, "../../cli/src/viewer.sh"));
+    const r = await fs.exec(`mkdir -p "$HOME/.agent-flow/bin" && cat > "$HOME/.agent-flow/bin/af-viewer" && chmod 755 "$HOME/.agent-flow/bin/af-viewer"`, { stdin: new Uint8Array(script) });
+    if (r.code !== 0) throw new Error(r.err);
+    this.viewerOn.add(machine);
+  }
+
+  /** A connected remote machine's files: run a command there, and its home folder. */
+  remoteFiles(machine: string): { exec: Exec; home?: string; label: string } {
+    const m = this.machines.get(machine);
+    if (!m) throw new AfError("unknown_machine", `no machine ${machine}`, 404);
+    if (m.meta.local) throw new AfError("local", `${machine} is this Mac`);
+    if (!m.remote || m.meta.state !== "online") throw new AfError("machine_offline", `${m.meta.label} is not connected`, 503);
+    const remote = m.remote;
+    return { exec: (cmd, opts) => remote.exec(cmd, opts), home: remote.home, label: m.meta.label };
+  }
+
+  register(paneId: string, target: string, by: string, machine?: string): ViewRec {
+    const rec: ViewRec = { paneId, target, by, at: this.now(), ...(machine && machine !== "local" ? { machine } : {}) };
     this.views[paneId] = rec;
     this.saveViews();
     this.publish(true);

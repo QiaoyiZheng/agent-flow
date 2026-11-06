@@ -3,6 +3,8 @@
 # bun about 16 MB, and a session can have a dozen viewer panes). The web UI draws a rich file/web view for the pane;
 # this draws a plain one for the Herdr TUI, and follows the pane's target as agents change it with `af open --in`.
 # Never exits by itself: while the server restarts, the last view stays. q or Ctrl+C closes the pane.
+# On a remote machine it is ~/.agent-flow/bin/af-viewer, started with the target ($1): it shows that, and follows
+# later targets through ~/.agent-flow/af.sock when agent-flow has forwarded it there.
 
 sock="${AF_SOCK:-$HOME/.agent-flow/server.sock}"
 pane="${HERDR_PANE_ID:-}"
@@ -47,11 +49,17 @@ render() {
 }
 
 shown=""
+first=${1:-}
 while :; do
-  t=$(curl -s -m 3 --unix-socket "$sock" "http://af/view?pane=$pane&format=text" 2>/dev/null)
+  t=""
+  [ -S "$sock" ] && t=$(curl -s -m 3 --unix-socket "$sock" "http://af/view?pane=$pane&format=text" 2>/dev/null)
+  # an error (JSON) from a server that does not know this pane: keep the target it was started with
+  case "$t" in "{"*) t="" ;; esac
+  [ -z "$t" ] && t=$first
   if [ -n "$t" ]; then
     stamp=$t
-    if [ -e "$t" ]; then stamp="$t@$(stat -f %m "$t" 2>/dev/null || stat -c %Y "$t" 2>/dev/null)"; fi
+    # GNU stat first: BSD stat takes -c as an error, GNU stat takes -f as "file system"
+    if [ -e "$t" ]; then stamp="$t@$(stat -c %Y "$t" 2>/dev/null || stat -f %m "$t" 2>/dev/null)"; fi
     if [ "$stamp" != "$shown" ]; then
       shown=$stamp
       render "$t"

@@ -21,6 +21,7 @@ import { rewindTo, takeBack } from "./rewind.ts";
 import { Sleeper } from "./sleep.ts";
 import { type Remote, fileKind, installedApps, openWith } from "./open-with.ts";
 import { changedDocuments, docLabel } from "./doc-watch.ts";
+import { contentType, remoteChangedDocuments, remoteFind, remoteList, remoteRead, remoteStat } from "./remote-files.ts";
 import { enrichFromTranscript } from "./menu.ts";
 import type { Notices } from "./notices.ts";
 import { checkReadable, findFiles, listDir, readableRoots, statPath } from "./files.ts";
@@ -38,6 +39,8 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
     return sleeper;
   };
   const commandCache = new Map<string, { at: number; items: unknown[] }>();
+  // a remote machine's files (machine=<id> in a request), undefined for this Mac
+  const remoteOf = (machine: unknown) => (machine && machine !== "local" ? w.remoteFiles(String(machine)) : undefined);
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/api/, "");
@@ -138,12 +141,23 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(v ?? null);
         }
         // browsing local files (the Open dialog, folder panes, previews that reload when the file changes)
-        case "GET /fs/list":
-          return json(listDir(String(body.path || process.env.HOME || "/"), fileRoots(o, o.opts.home), body.hidden === "1" || body.hidden === true));
-        case "GET /fs/find":
+        // machine=<id>: a remote machine's files, over SSH (remote-files.ts)
+        case "GET /fs/list": {
+          const hidden = body.hidden === "1" || body.hidden === true;
+          const rf = remoteOf(body.machine);
+          if (rf) return json(await remoteList(rf.exec, String(body.path || rf.home || "/"), rf.home, hidden));
+          return json(listDir(String(body.path || process.env.HOME || "/"), fileRoots(o, o.opts.home), hidden));
+        }
+        case "GET /fs/find": {
+          const rf = remoteOf(body.machine);
+          if (rf) return json(await remoteFind(rf.exec, String(body.root || rf.home || "/"), String(body.q ?? ""), rf.home));
           return json(findFiles(String(body.root || process.env.HOME || "/"), String(body.q ?? ""), fileRoots(o, o.opts.home)));
-        case "GET /fs/stat":
+        }
+        case "GET /fs/stat": {
+          const rf = remoteOf(body.machine);
+          if (rf) return json(await remoteStat(rf.exec, String(body.path ?? ""), rf.home));
           return json(statPath(String(body.path ?? ""), fileRoots(o, o.opts.home)));
+        }
         case "GET /ls":
           return json({ model: w.model, views: w.views, teams: o.workspaceTeams(), shellWorkspace: shellWorkspace(o.opts.home) });
         case "POST /pane/read": {
@@ -266,10 +280,17 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
         // documents handed over by agents, and opening files in VS Code / Obsidian / their app
         case "POST /deliver": {
           const pane = String(body.pane ?? body.callerPane ?? "") || undefined;
-          const file = String(body.path ?? "");
+          let file = String(body.path ?? "");
           if (!file.startsWith("/")) throw new AfError("bad_path", "give the file's absolute path");
-          if (!existsSync(file) || statSync(file).isDirectory()) throw new AfError("not_found", `${file} is not a file`, 404);
-          const rec = await handOver(w, access, { path: file, pane, agent: who.kind === "member" || who.kind === "router" ? who.member : undefined, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined });
+          // from a remote machine (remote-af.ts sets machine): the file is there
+          const machine = body.machine && body.machine !== "local" ? String(body.machine) : "local";
+          if (machine !== "local") {
+            const rf = w.remoteFiles(machine);
+            const st = await remoteStat(rf.exec, file, rf.home);
+            if (st.dir) throw new AfError("not_found", `${file} is a folder, not a file`, 404);
+            file = st.path;
+          } else if (!existsSync(file) || statSync(file).isDirectory()) throw new AfError("not_found", `${file} is not a file`, 404);
+          const rec = await handOver(w, access, { path: file, pane, machine, agent: who.kind === "member" || who.kind === "router" ? who.member : undefined, title: body.title ? String(body.title) : undefined, note: body.note ? String(body.note) : undefined });
           return json({ delivery: rec, kind: fileKind(file), app: access.deliveries.appFor(file) });
         }
         case "POST /deliver/done":
@@ -445,20 +466,28 @@ const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javasc
 /** Serve a file the UI asked to preview. Only paths inside a run's directories or ~/.agent-flow are allowed. */
 /**
  * When an agent's turn ends, the documents it changed in its folder during the turn are handed over (see
- * doc-watch.ts), unless it handed them over itself. Local agents only: a remote folder would need a walk over SSH.
+ * doc-watch.ts), unless it handed them over itself. On a remote machine, one find over SSH (remote-files.ts).
  */
 export function watchDocuments(w: Workspaces, access: TranscriptAccess) {
   return w.onTurnEnd((t) => {
-    if (t.machine !== "local" || !t.cwd || t.cwd === "/" || t.cwd === (process.env.HOME ?? "")) return;
+    const local = t.machine === "local";
+    let rf: ReturnType<Workspaces["remoteFiles"]> | undefined;
+    try {
+      rf = local ? undefined : w.remoteFiles(t.machine);
+    } catch {
+      return; // gone offline
+    }
+    const home = local ? (process.env.HOME ?? "") : (rf?.home ?? "");
+    if (!t.cwd || t.cwd === "/" || t.cwd === home) return;
     // the turn's start (when Herdr saw it), a little early for safety; at most an hour back
     const since = Math.max((t.started ?? t.ended - 3600_000) - 2000, t.ended - 3600_000);
     setTimeout(async () => {
       try {
-        const found = changedDocuments(t.cwd, since);
+        const found = rf ? await remoteChangedDocuments(rf.exec, t.cwd, since) : changedDocuments(t.cwd, since);
         const recent = access.deliveries.list.filter((d) => d.pane === t.pane && Date.parse(d.at) >= since);
         for (const path of found.reverse()) {
           if (recent.some((d) => d.path === path)) continue; // handed over by the agent during this turn
-          await handOver(w, access, { path, pane: t.pane, title: `${t.agent} changed ${docLabel(t.cwd, path)}`, found: true });
+          await handOver(w, access, { path, pane: t.pane, machine: t.machine, title: `${t.agent} changed ${docLabel(t.cwd, path)}`, found: true });
         }
       } catch {}
     }, 1500); // the agent's last writes may land just after Herdr shows it done
@@ -482,13 +511,15 @@ export function watchTakeBacks(w: Workspaces, access: TranscriptAccess) {
  * nothing goes to "Needs you": with many agents at once, a viewer pane per document made everything slow. Only
  * the user's setting "open right away" opens the app at once.
  */
-export async function handOver(w: Workspaces, access: TranscriptAccess, d: { path: string; pane?: string; agent?: string; title?: string; note?: string; found?: boolean }) {
+export async function handOver(w: Workspaces, access: TranscriptAccess, d: { path: string; pane?: string; machine?: string; agent?: string; title?: string; note?: string; found?: boolean }) {
   const p = d.pane ? w.model.panes.find((x) => x.id === d.pane) : undefined;
+  const machine = d.machine ?? p?.machine ?? "local";
   const list = access.deliveries;
-  const opened = list.settings.auto ? (await openWith(list.appFor(d.path), d.path).catch(() => undefined))?.app : undefined;
+  // "open right away" is for this Mac's apps (a remote file opens with a click: VS Code over Remote-SSH, or the preview)
+  const opened = list.settings.auto && machine === "local" ? (await openWith(list.appFor(d.path), d.path).catch(() => undefined))?.app : undefined;
   return list.add({
     path: d.path,
-    machine: p?.machine ?? "local",
+    machine,
     pane: d.pane,
     workspace: p?.workspaceId,
     agent: d.agent,
@@ -505,7 +536,19 @@ function fileRoots(o: Teams, home: string) {
   return readableRoots([home, ...o.folders()]);
 }
 
-function serveFile(o: Teams, home: string, url: URL): Response {
+async function serveFile(o: Teams, w: Workspaces, home: string, url: URL): Promise<Response> {
+  const machine = url.searchParams.get("machine");
+  if (machine && machine !== "local") {
+    // a remote machine's file, read over SSH
+    try {
+      const rf = w.remoteFiles(machine);
+      const path = url.searchParams.get("path") ?? "";
+      const data = await remoteRead(rf.exec, path, rf.home);
+      return new Response(new Uint8Array(data), { headers: { "content-type": contentType(path), "cache-control": "no-store" } });
+    } catch (e) {
+      return fail((e as AfError).code ?? "unreadable", (e as Error).message, (e as AfError).status ?? 403);
+    }
+  }
   let path: string;
   try {
     path = checkReadable(url.searchParams.get("path") ?? "", fileRoots(o, home));
@@ -574,7 +617,7 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
       }
       if (url.pathname.startsWith("/api/")) {
         if (!sameOrigin || !authed) return fail("forbidden", "bad origin or token", 403);
-        if (url.pathname === "/api/file") return serveFile(o, opts.home, url);
+        if (url.pathname === "/api/file") return await serveFile(o, w, opts.home, url);
         if (url.pathname === "/api/chat-image") {
           const img = await chatImage(url.searchParams.get("id") ?? "");
           if (!img) return fail("not_found", "that image is gone (the conversation was reopened)", 404);

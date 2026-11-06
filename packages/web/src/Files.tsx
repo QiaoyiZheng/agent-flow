@@ -56,12 +56,15 @@ function crumbs(path: string, home: string) {
 
 export function FileBrowser({
   start,
+  machine,
   onOpenFile,
   onCancel,
   onDirChange,
   autoFocus = true,
 }: {
   start: string;
+  /** A remote machine's files (over SSH); absent: this Mac. */
+  machine?: string;
   onOpenFile: (path: string) => void;
   onCancel?: () => void;
   onDirChange?: (dir: string) => void;
@@ -80,7 +83,7 @@ export function FileBrowser({
   useEffect(() => {
     let alive = true;
     setError(undefined);
-    api<Listing>("GET", "/fs/list", { path: dir, hidden: hidden ? "1" : undefined, run: undefined })
+    api<Listing>("GET", "/fs/list", { path: dir, hidden: hidden ? "1" : undefined, run: undefined, machine })
       .then((l) => {
         if (!alive) return;
         setListing(l);
@@ -104,7 +107,7 @@ export function FileBrowser({
     const q = query.trim();
     if (q.length < 2 || typedPath) return setFound(undefined);
     const t = setTimeout(() => {
-      api<{ results: FsEntry[]; truncated: boolean }>("GET", "/fs/find", { root: dir, q, run: undefined })
+      api<{ results: FsEntry[]; truncated: boolean }>("GET", "/fs/find", { root: dir, q, run: undefined, machine })
         .then((r) => setFound({ q, results: r.results, truncated: r.truncated }))
         .catch(() => {});
     }, 180);
@@ -131,7 +134,7 @@ export function FileBrowser({
   const goTyped = () => {
     const raw = query.trim();
     const p = raw === "~" || raw.startsWith("~/") ? `${listing?.home ?? ""}${raw.slice(1)}` : raw;
-    api<{ dir: boolean; path: string }>("GET", "/fs/stat", { path: p, run: undefined })
+    api<{ dir: boolean; path: string }>("GET", "/fs/stat", { path: p, run: undefined, machine })
       .then((s) => (s.dir ? setDir(s.path) : onOpenFile(s.path)))
       .catch(failed("Cannot open that path"));
   };

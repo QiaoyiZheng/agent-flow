@@ -399,6 +399,9 @@ describe("workspaces: remote machines", () => {
           },
           async exec(cmd: string) {
             execs.push(cmd);
+            // a file there, for previews (remote-files.ts asks with stat)
+            if (cmd.includes("/home/u/proj/report.md") && cmd.includes("stat -c")) return { code: 0, out: Buffer.from("f 12 1793850000\n"), err: "" };
+            if (cmd.includes("stat -c")) return { code: 0, out: Buffer.from("none\n"), err: "" };
             return { code: 0, out: Buffer.from("/home/u/.agent-flow/attachments/x-shot.png\n"), err: "" };
           },
         };
@@ -433,7 +436,18 @@ describe("workspaces: remote machines", () => {
     const att = await w.saveAttachment(pane.id, new Uint8Array([1, 2, 3]), "shot.png");
     expect(att).toMatchObject({ path: "/home/u/.agent-flow/attachments/x-shot.png", remote: true });
     expect(execs.at(-1)).toContain("cat > ");
-    await expect(w.show({ target: "/etc/hosts", of: pane.id }, "u")).rejects.toThrow(/not supported yet/);
+    // a file there previews in a pane next to it, on that machine; the pane runs the viewer script there
+    await expect(w.show({ target: "/home/u/nope.md", of: pane.id }, "u")).rejects.toThrow(/does not exist/);
+    const v = await w.show({ target: "~/proj/report.md", of: pane.id }, "u");
+    expect(v).toMatchObject({ target: "/home/u/proj/report.md", machine: "ds03" });
+    expect(v.paneId).toStartWith("ds03~");
+    expect(execs.some((c) => c.includes("/.agent-flow/bin/af-viewer"))).toBe(true); // the script written there
+    const typed = remoteBackend.panes.get(v.paneId.slice(5))!.typed.at(-1)!;
+    expect(typed).toContain(`exec bash "$HOME/.agent-flow/bin/af-viewer" '/home/u/proj/report.md'`);
+    await w.refresh();
+    expect(w.views[v.paneId]?.machine).toBe("ds03"); // kept: its pane is on ds03, not this Mac
+    // a local file does not open next to a remote pane
+    await expect(w.show({ target: "/etc/hosts", of: pane.id, machine: "local" }, "u")).rejects.toThrow(/not on local/);
 
     // a machine that cannot connect reports why, and its ids are refused with that reason
     expect(await w.connect("build-box")).toMatchObject({ state: "error", error: "cannot reach me@build" });

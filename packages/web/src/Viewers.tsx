@@ -17,11 +17,14 @@ const getHighlighter = () =>
 /** A path for the bar: the home folder as ~, and when it does not fit, the start is cut, not the file name. */
 const tidy = (p: string) => p.replace(/^\/(Users|home)\/[^/]+(?=\/|$)/, "~");
 
-function Bar({ path, children }: { path: string; children?: React.ReactNode }) {
+function Bar({ path, machine, children }: { path: string; machine?: string; children?: React.ReactNode }) {
+  const { herdr } = useStore();
+  const on = machine && machine !== "local" ? (herdr?.machines.find((m) => m.id === machine)?.label ?? machine) : undefined;
   return (
     <div className="bar">
+      {on && <span className="machine-tag" title={`A file on ${on}, read over SSH`}>{on}</span>}
       <span className="path" title={path}>
-        <bdi>{/^[a-z]+:\/\//i.test(path) ? path : tidy(path)}</bdi>
+        <bdi>{/^[a-z]+:\/\//i.test(path) ? path : on ? path : tidy(path)}</bdi>
       </span>
       <span className="spacer" />
       {children}
@@ -32,21 +35,24 @@ function Bar({ path, children }: { path: string; children?: React.ReactNode }) {
 const show = (paneId: string | undefined, target: string) => paneId && api("POST", "/show", { target, in: paneId, run: undefined }).catch(failed("Could not open it"));
 const parentOf = (p: string) => p.replace(/\/[^/]+\/?$/, "") || "/";
 
-/** A file or folder in a viewer pane. Files reload by themselves when they change on disk. */
-export function FileView({ path, paneId }: { path: string; paneId?: string }) {
+/**
+ * A file or folder in a viewer pane: this Mac's, or (machine) a remote machine's, read over SSH. Files reload by
+ * themselves when they change.
+ */
+export function FileView({ path, paneId, machine }: { path: string; paneId?: string; machine?: string }) {
   const [kind, setKind] = useState<"dir" | "file">();
   const [err, setErr] = useState<string>();
   useEffect(() => {
     setKind(undefined);
     setErr(undefined);
-    api<{ dir: boolean }>("GET", "/fs/stat", { path, run: undefined })
+    api<{ dir: boolean }>("GET", "/fs/stat", { path, run: undefined, machine })
       .then((s) => setKind(s.dir ? "dir" : "file"))
       .catch((e) => setErr(e.message));
-  }, [path]);
+  }, [path, machine]);
   if (err)
     return (
       <div className="viewer">
-        <Bar path={path} />
+        <Bar path={path} machine={machine} />
         <div className="empty" style={{ padding: 16 }}>
           {err}
         </div>
@@ -55,14 +61,15 @@ export function FileView({ path, paneId }: { path: string; paneId?: string }) {
   if (kind === "dir")
     return (
       <div className="viewer folder-view">
-        <FileBrowser key={path} start={path} autoFocus={false} onOpenFile={(f) => show(paneId, f)} />
+        <FileBrowser key={`${machine ?? ""}:${path}`} start={path} machine={machine} autoFocus={false} onOpenFile={(f) => show(paneId, f)} />
       </div>
     );
-  if (kind === "file") return <FileContent path={path} paneId={paneId} />;
+  if (kind === "file") return <FileContent path={path} paneId={paneId} machine={machine} />;
   return <div className="viewer" />;
 }
 
-function FileContent({ path, paneId }: { path: string; paneId?: string }) {
+function FileContent({ path, paneId, machine }: { path: string; paneId?: string; machine?: string }) {
+  const remote = !!machine && machine !== "local";
   const ext = path.split(".").at(-1)?.toLowerCase() ?? "";
   const [html, setHtml] = useState<string>();
   const [headings, setHeadings] = useState<DocHeading[]>([]);
@@ -81,30 +88,31 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
   const isOffice = /^(pptx?|key|docx?|pages|xlsx?|numbers|od[tps]|rtf|epub|zip|mp4|mov|mp3|wav)$/.test(ext);
   useEffect(() => (isMd ? onHighlighterReady(() => setHl((n) => n + 1)) : undefined), [isMd]);
 
-  // the file's change time, every 2 s: a change reloads the view (keeping the scroll position)
+  // the file's change time, every 2 s (a remote file: every 4 s, over SSH): a change reloads the view (keeping the
+  // scroll position)
   useEffect(() => {
     let alive = true;
     const check = () =>
-      api<{ mtime: number }>("GET", "/fs/stat", { path, run: undefined })
+      api<{ mtime: number }>("GET", "/fs/stat", { path, run: undefined, machine })
         .then((s) => alive && setStamp((old) => (old !== s.mtime ? s.mtime : old)))
         .catch(() => {});
     void check();
-    const t = setInterval(check, 2000);
+    const t = setInterval(check, remote ? 4000 : 2000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, [path]);
+  }, [path, machine]);
 
   useEffect(() => {
     if (isImage || isPdf || isOffice || stamp === undefined) return;
     let alive = true;
     const scroll = box.current?.scrollTop ?? 0;
-    fetch(fileUrl(path))
+    fetch(fileUrl(path, machine))
       .then(async (r) => (r.ok ? r.text() : Promise.reject(new Error((await r.json()).error?.message ?? r.statusText))))
       .then(async (text) => {
         if (isMd) {
-          const d = renderDoc(text, path, TOKEN);
+          const d = renderDoc(text, path, TOKEN, machine);
           if (alive) setHeadings(d.headings);
           return `<div class="md doc">${d.html}</div>`;
         }
@@ -131,7 +139,7 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
     return () => {
       alive = false;
     };
-  }, [path, stamp, hl]);
+  }, [path, stamp, hl, machine]);
 
   // diagrams, after the HTML is in place
   useEffect(() => {
@@ -154,7 +162,7 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
 
   return (
     <div className="viewer" ref={box}>
-      <Bar path={path}>
+      <Bar path={path} machine={machine}>
         {changed && <span className="reloaded">updated</span>}
         {isMd && headings.length >= 3 && (
           <button
@@ -173,21 +181,21 @@ function FileContent({ path, paneId }: { path: string; paneId?: string }) {
             ↑ Folder
           </button>
         )}
-        <OpenButtons path={path} />
+        <OpenButtons path={path} remote={remote} pane={paneId} />
       </Bar>
       {err && <div className="empty" style={{ padding: 16 }}>{err}</div>}
       {isImage && (
         <div className="img-wrap">
-          <img src={`${fileUrl(path)}&v=${stamp ?? 0}`} alt={path} />
+          <img src={`${fileUrl(path, machine)}&v=${stamp ?? 0}`} alt={path} />
         </div>
       )}
-      {isPdf && <iframe className="web" src={fileUrl(path)} title={path} />}
+      {isPdf && <iframe className="web" src={`${fileUrl(path, machine)}&v=${stamp ?? 0}`} title={path} />}
       {isOffice && (
         <div className="no-preview">
           <div className="np-icon">{/^pptx?|key$/.test(ext) ? "▤" : /^xlsx?|numbers$/.test(ext) ? "▦" : "▣"}</div>
           <div className="np-name">{path.split("/").at(-1)}</div>
           <div className="np-hint">There is no preview for .{ext} files here. Open it in its app:</div>
-          <OpenButtons path={path} big />
+          <OpenButtons path={path} remote={remote} pane={paneId} big />
         </div>
       )}
       {html && (
