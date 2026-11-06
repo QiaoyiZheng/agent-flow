@@ -56,6 +56,7 @@ import * as git from "./git.ts";
 import { AfError } from "./errors.ts";
 import type { TerminalBackend } from "./herdr.ts";
 import type { Workspaces } from "./workspaces.ts";
+import type { Menu, Overlay } from "./menu.ts";
 import { type AgentConfig, type Role, launchArgs, plainArgs } from "./agents.ts";
 import { sq } from "./remote.ts";
 import type { PlaybookLibrary } from "./playbooks.ts";
@@ -92,6 +93,12 @@ export interface TeamsOptions {
 }
 
 /** Who is calling, once known: a member or router of a team, a session by its pane (mode 1), or the user. */
+/** The keys a notice on screen takes, as options to answer it with (Enter goes on; Esc dismisses). */
+export function noticeOptions(o: Overlay | undefined): { label: string; key: string }[] {
+  if (!o) return [];
+  return [...(o.enter ? [{ label: "Continue (Enter)", key: "enter" }] : []), ...(o.esc ? [{ label: "Dismiss (Esc)", key: "esc" }] : [])];
+}
+
 export type Who = { kind: "member" | "router"; team: string; member: string; pane?: string } | { kind: "pane"; pane: string } | { kind: "user" };
 
 interface Team {
@@ -223,6 +230,14 @@ export class Teams {
           memberPanes: Object.values(s.members)
             .filter((x) => x.paneId && x.protocol !== "router" && !x.team)
             .map((x) => x.paneId!),
+          delegate: !!m.delegate,
+          // members whose prompt the manager has in its queue (delegate): not the user's yet, for half an hour
+          answering: m.delegate
+            ? s.queue
+                .filter((q) => q.kind === "approval" && q.state !== "handled" && q.options?.length && q.from && this.clock() - Date.parse(q.at) < 30 * 60_000)
+                .map((q) => s.members[q.from!]?.paneId)
+                .filter((x): x is string => !!x)
+            : undefined,
           stages,
         };
       })
@@ -348,7 +363,9 @@ export class Teams {
     const p = this.pane(pane);
     const ws = this.opts.w.model.workspaces.find((w) => w.id === p.workspaceId);
     const parent = this.parentOfPane(pane);
-    return this.create({ name: ws?.label || p.agent || "session", mode: "direct", cwd: p.cwd, manager: { pane }, workspace: p.workspaceId, machine: p.machine, parent });
+    // a session that works for a team whose manager answers prompts for the user does so for its own sessions too
+    const delegate = parent ? !!this.teams.get(parent.team)?.state.meta?.delegate : undefined;
+    return this.create({ name: ws?.label || p.agent || "session", mode: "direct", cwd: p.cwd, manager: { pane }, workspace: p.workspaceId, machine: p.machine, parent, ...(delegate ? { delegate } : {}) });
   }
 
   /** A session that is itself a member of another team: its own team hangs under that member's ticket. */
@@ -647,6 +664,7 @@ export class Teams {
     if (!text) throw new AfError("empty", "the task is empty");
     const t = this.directTeam(pane);
     if (t.state.stopped) throw new AfError("team_stopped", `team ${t.id} is stopped`);
+    if (req.delegate !== undefined && req.delegate !== !!t.state.meta!.delegate) this.emit(t, { type: "team.delegate", at: this.now(), on: req.delegate });
     let member: Member;
     let spawn: Parameters<Teams["spawn"]>[1] | undefined;
     if (req.to) {
@@ -705,7 +723,8 @@ export class Teams {
       this.emit(parent, { type: "ticket.delivered", at: this.now(), id: k.id });
       parentRef = { team: parent.id, ticket: k.id };
     }
-    const t = this.create({ name, mode: "router", cwd, manager: { member: "router" }, workspace: ws.workspaceId, machine, parent: parentRef, playbook: pb?.id, playbookPath: pb?.path, goal }, id);
+    const delegate = req.delegate ?? !!parent?.state.meta?.delegate;
+    const t = this.create({ name, mode: "router", cwd, manager: { member: "router" }, workspace: ws.workspaceId, machine, parent: parentRef, playbook: pb?.id, playbookPath: pb?.path, goal, ...(delegate ? { delegate } : {}) }, id);
     await host.backend.renameTab(raw.tabId, "router").catch(() => {});
     // a router on another machine reads its playbook there
     let playbookThere = pb?.path;
@@ -831,16 +850,33 @@ export class Teams {
     return k;
   }
 
-  /** Answer the question on a member's screen (not a permission prompt: those are the user's). */
+  /**
+   * Answer the question on a member's screen. A permission or trust prompt, or a notice, only when the user lets the
+   * manager answer those (setDelegate); otherwise they are the user's.
+   */
   async answer(who: Who, ref: string, option: number, text?: string) {
     const t = this.managed(who);
     const k = this.ticketFor(t, ref);
     const m = t.state.members[k.assignee]!;
     if (!m.paneId || m.team) throw new AfError("no_pane", `${m.name} has no pane to answer in`);
-    const menu = await this.opts.w.menu(m.paneId);
+    const delegate = !!t.state.meta!.delegate;
+    const st = await this.opts.w.screenState(m.paneId);
+    const menu = st.menu;
+    if (!menu && st.overlay && noticeOptions(st.overlay).length) {
+      const head = firstLine(st.overlay.lines.filter((l) => l.trim()).join(" "));
+      if (!delegate) throw new AfError("approval", `${m.name} shows a notice ("${head}"); that is the user's to answer`, 403);
+      const opts = noticeOptions(st.overlay);
+      const opt = opts[option - 1];
+      if (!opt) throw new AfError("bad_option", `pick an option from 1 to ${opts.length}`);
+      await this.opts.w.press(m.paneId, [opt.key]);
+      t.asked.delete(m.name);
+      this.handleFor(t, k.id);
+      return { ticket: k.id, member: m.name, option: opt.label };
+    }
     if (!menu) throw new AfError("no_menu", `${m.name} is not showing a question now`, 409);
     const question = [...menu.question, ...(menu.code ?? [])].join(" ");
-    if (isApproval(question) || isApproval(menu.options.map((o) => o.label).join(" "))) throw new AfError("approval", `${m.name} is asking for permission ("${firstLine(question)}"); that is the user's to answer`, 403);
+    if (!delegate && (isApproval(question) || isApproval(menu.options.map((o) => o.label).join(" "))))
+      throw new AfError("approval", `${m.name} is asking for permission ("${firstLine(question)}"); that is the user's to answer`, 403);
     const opt = menu.options[option - 1];
     if (!opt) throw new AfError("bad_option", `pick an option from 1 to ${menu.options.length}`);
     const r = await this.opts.w.choose(m.paneId, option - 1, opt.label, text);
@@ -1016,7 +1052,8 @@ export class Teams {
     const out: string[] = [];
     for (const q of items) {
       const k = q.ticket ? t.state.tickets[q.ticket] : undefined;
-      const head = [`#${q.seq}`, q.ticket, q.from ? `${q.from} ${verb[q.kind]}${again(q)}` : verb[q.kind], k && k.round > 1 ? `(round ${k.round} of thread ${k.thread})` : "", q.to ? `→ suggests ${q.to}` : ""].filter(Boolean).join(" ");
+      const v = q.kind === "approval" && q.options?.length ? "has a prompt for you to answer" : verb[q.kind];
+      const head = [`#${q.seq}`, q.ticket, q.from ? `${q.from} ${v}${again(q)}` : v, k && k.round > 1 ? `(round ${k.round} of thread ${k.thread})` : "", q.to ? `→ suggests ${q.to}` : ""].filter(Boolean).join(" ");
       out.push(head);
       out.push(...q.text.split("\n").map((l) => `  ${l}`));
       if (q.options?.length) out.push(...q.options.map((o, i) => `  ${i + 1}. ${o}`), `  answer: af answer ${q.ticket ?? q.from} <number>`);
@@ -1056,6 +1093,23 @@ export class Teams {
     const peek = m.paneId && !m.team ? await this.opts.peek?.(m.paneId).catch(() => undefined) : undefined;
     const screen = m.paneId && !m.team ? await this.opts.w.read(m.paneId, 15).catch(() => "") : "";
     return { member: m.name, kind: m.kind, status: p?.agentStatus ?? m.status, asking: p?.asking, ticket: k ? { id: k.id, status: k.status, stage: ticketStage(k, m, lookOf(p)) } : undefined, lastReply: peek?.reply?.slice(-1500), screen: screen.trimEnd() };
+  }
+
+  /**
+   * Let a team's manager answer its members' prompts for the user (folder trust, permission prompts, notices), or
+   * stop that: the user (the UI) for any team; a session or router for its own team (it does so when the user says it
+   * may). Teams opened under it later get the same; those open already keep theirs.
+   */
+  setDelegate(who: Who, id: string | undefined, on: boolean) {
+    let t: Team;
+    if (who.kind === "user") {
+      if (!id) throw new AfError("no_team", "which team?");
+      t = this.require(id);
+    } else if (who.kind === "router") t = this.active(who.team);
+    else t = this.directTeam(who.pane!);
+    if (who.kind !== "user" && id && id !== t.id) throw new AfError("forbidden", `team ${id} is not yours`, 403);
+    if (!!t.state.meta!.delegate !== on) this.emit(t, { type: "team.delegate", at: this.now(), on });
+    return { team: t.id, delegate: on };
   }
 
   stopTeam(who: Who, id?: string) {
@@ -1140,8 +1194,10 @@ export class Teams {
 
     // a question on screen: a task question goes to the manager; a permission prompt is the user's (Needs you)
     if (p.asking || p.agentStatus === "blocked") {
-      const menu = await w.menu(m.paneId!).catch(() => undefined);
-      const question = menu ? [...menu.question, ...(menu.code ?? [])].join(" ").replace(/\s+/g, " ").trim() : (p.asking ?? "");
+      const screen = await w.screenState(m.paneId!).catch(() => ({}) as { menu?: Menu; overlay?: Overlay });
+      const menu = screen.menu;
+      const notice = (screen.overlay?.lines ?? []).filter((l) => l.trim()).join(" ");
+      const question = (menu ? [...menu.question, ...(menu.code ?? [])].join(" ") : (p.asking ?? notice)).replace(/\s+/g, " ").trim();
       const approval = !menu || isApproval(question) || isApproval(menu.options.map((o) => o.label).join(" "));
       const about = k ?? waitingTickets(t.state, m.name)[0];
       // once per question, also across restarts: an item about the same question since it appeared (the pane's status
@@ -1151,8 +1207,8 @@ export class Teams {
       if (about && question && t.asked.get(m.name) !== question && !known) {
         t.asked.set(m.name, question);
         if (!approval && k) this.enqueue(t, { kind: "asking", ticket: k.id, from: m.name, text: question, options: menu!.options.map((o) => o.label) });
-        // a permission or trust prompt is the user's: the manager only hears that it waits (so it can say so)
-        else this.enqueue(t, { kind: "approval", ticket: about.id, from: m.name, text: `Waiting for the user to answer a prompt on its screen: "${firstLine(question, 200)}". Only the user can answer it (it is in their Needs you); do not answer it yourself.` });
+        // a permission or trust prompt, or a notice: the user's, unless they let the manager answer those
+        else this.promptItem(t, m, about.id, question, screen);
       }
       return;
     }
@@ -1257,14 +1313,34 @@ export class Teams {
     t.asked.set(m.name, text);
     const approval = !st.menu || isApproval(text) || isApproval(st.menu.options.map((o) => o.label).join(" "));
     if (!approval) this.enqueue(t, { kind: "asking", ticket: k.id, from: m.name, text, options: st.menu!.options.map((o) => o.label) });
+    else this.promptItem(t, m, k.id, text, st, true);
+    return true;
+  }
+
+  /**
+   * The queue item for a permission or trust prompt, or a notice, on a member's screen. They are the user's (Needs
+   * you shows them): the manager hears only that the member waits. When the user lets the manager answer them
+   * (delegate), the item has the options and how to answer.
+   */
+  private promptItem(t: Team, m: Member, ticket: string, text: string, st: { menu?: Menu; overlay?: Overlay }, unfinished = false) {
+    const head = firstLine(text, 200);
+    const what = st.menu ? "prompt" : "notice";
+    const options = st.menu ? st.menu.options.map((o) => o.label) : noticeOptions(st.overlay).map((o) => o.label);
+    if (t.state.meta!.delegate && options.length)
+      this.enqueue(t, {
+        kind: "approval",
+        ticket,
+        from: m.name,
+        text: `A ${what} on its screen: "${head}". The user lets you answer prompts like this for them (folder trust, permissions, notices): answer as they would. Allow what its task needs; anything destructive or outside the task, leave to them (af queue done <seq>: it stays in their Needs you).${unfinished ? " It has not finished its task." : ""}`,
+        options,
+      });
     else
       this.enqueue(t, {
         kind: "approval",
-        ticket: k.id,
+        ticket,
         from: m.name,
-        text: `Waiting for the user to answer a ${st.menu ? "prompt" : "notice"} on its screen: "${head}". Only the user can answer it (in agent-flow, on that session's pane); do not answer it yourself. It has not finished its task.`,
+        text: `Waiting for the user to answer a ${what} on its screen: "${head}". Only the user can answer it (in agent-flow, on that session's pane, or in their Needs you); do not answer it yourself.${unfinished ? " It has not finished its task." : ""}`,
       });
-    return true;
   }
 
   /** When the ticket's current turn of work began: a turn that ended after it is new. */
@@ -1425,7 +1501,9 @@ export class Teams {
   private shortItem(t: Team, q: QueueItem) {
     const who = q.from ?? "";
     const what: Record<QueueKind, string> = { user: "new request", ask: "asks a question", asking: "is asking", approval: "waits for the user's approval", stuck: "may be stuck", exited: "exited", error: "error", submit: "submitted", turn: t.state.meta!.mode === "direct" ? "finished" : "stopped without submitting", report: "reported" };
-    return `${q.ticket ? `${q.ticket} ` : ""}${who} ${what[q.kind]}`.replace(/\s+/g, " ").trim();
+    // a prompt the manager may answer for the user (delegate): its item has the options
+    const verb = q.kind === "approval" && q.options?.length ? "has a prompt for you to answer" : what[q.kind];
+    return `${q.ticket ? `${q.ticket} ` : ""}${who} ${verb}`.replace(/\s+/g, " ").trim();
   }
 }
 

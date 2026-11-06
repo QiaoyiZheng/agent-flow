@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { HPane, QueueItem, TeamState, TeamSummary, Ticket } from "@af/core";
 import { paneLook, ticketList, ticketStage } from "@af/core";
 import { renderDoc } from "./markdown";
-import { TOKEN, fileUrl } from "./store";
+import { TOKEN, api, failed, fileUrl } from "./store";
 import { Terminal } from "./Terminal";
 import { ago, basename, clock, kindColor, span, stageLook } from "./view";
 
@@ -66,6 +66,12 @@ export function TeamPanel(props: TeamPanelProps) {
         )}
       </div>
       {meta.mode === "router" && meta.goal && <div className="team-goal">{meta.goal}</div>}
+      {!s.stopped && (
+        <label className="team-delegate" title="Folder-trust prompts, permission prompts and 'Enter to continue' notices of the sessions this team starts go to its manager to answer for you, instead of Needs you. What it leaves to you (or does not answer in 30 min) still comes to you.">
+          <input type="checkbox" checked={!!meta.delegate} onChange={(e) => api("POST", "/team/delegate", { id: s.meta!.id, on: e.target.checked }).catch(failed("Could not change it"))} />
+          {meta.mode === "router" ? "The router" : "This session"} answers trust and permission prompts and notices for me
+        </label>
+      )}
       {waiting.length > 0 && <QueueStrip items={waiting} manager={meta.mode === "router" ? "the router" : "the session"} />}
       <div className="team-body">{meta.mode === "direct" ? <Timeline {...props} selected={selected} onSelect={setSelected} /> : <Lanes {...props} selected={selected} onSelect={setSelected} />}</div>
       {selected && s.tickets[selected] && <TicketDetail key={selected} {...props} ticket={s.tickets[selected]!} onClose={() => setSelected(undefined)} />}

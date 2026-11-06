@@ -184,6 +184,50 @@ describe("mode 1: a session hands out tasks", () => {
     expect((await call("/task", { callerPane: lead, kind: "claude", task: "x", name: "plan" })).body.error.code).toBe("duplicate_member");
   });
 
+  test("when the user lets the session answer them, permission prompts and notices reach it with options, and af answer answers", async () => {
+    const { o, backend, call, step, lead } = await setup();
+    const r = await call("/task", { callerPane: lead, kind: "claude", task: "write the report", name: "writer", delegate: true });
+    await step();
+    const team = r.body.team;
+    expect(o.get(team).meta!.delegate).toBe(true);
+    const m = o.get(team).members.writer!;
+    const herdr = herdrMemberName(team, "writer");
+    backend.screens.set(m.paneId!, PERMISSION);
+    backend.set(herdr, "blocked");
+    await step();
+    const q = o.get(team).queue.find((x) => x.kind === "approval")!;
+    expect(q).toMatchObject({ ticket: "T1", from: "writer", options: ["Yes", "No"] });
+    expect(q.text).toContain("The user lets you answer prompts like this");
+    // Needs you leaves it to the session meanwhile
+    expect(o.list().find((x) => x.id === team)).toMatchObject({ delegate: true, answering: [m.paneId] });
+    const take = await call("/team/take", { callerPane: lead });
+    expect(take.body.text).toContain("writer has a prompt for you to answer");
+    expect(take.body.text).toContain("af answer T1 <number>");
+    expect((await call("/team/answer", { callerPane: lead, ref: "T1", option: 1 })).body).toMatchObject({ member: "writer", option: "Yes" });
+    expect(backend.keys.at(-1)).toEqual({ target: m.paneId!, keys: ["enter"] });
+
+    // a notice that waits for Enter: answered with Enter
+    const rule = "─".repeat(40);
+    backend.screens.set(m.paneId!, ["⏺ Running the first command", "", rule, " Auto mode now uses your extra usage when your plan's limit is reached.", " You can change this in /config.", "", " Enter to continue"].join("\n"));
+    await step();
+    const n = o.get(team).queue.filter((x) => x.kind === "approval").at(-1)!;
+    expect(n.options).toEqual(["Continue (Enter)"]);
+    expect(n.text).toContain("Auto mode now uses your extra usage");
+    expect((await call("/team/answer", { callerPane: lead, ref: "writer", option: 1 })).body.option).toBe("Continue (Enter)");
+    expect(backend.keys.at(-1)).toEqual({ target: m.paneId!, keys: ["enter"] });
+
+    // the sessions it hands work to get the same: a member that hands out work itself
+    const nested = await call("/task", { callerPane: m.paneId, kind: "gemini", task: "check the numbers" });
+    expect(o.get(nested.body.team).meta!.delegate).toBe(true);
+
+    // turned off: the user's again
+    expect((await call("/team/delegate", { callerPane: lead, on: false })).body).toMatchObject({ team, delegate: false });
+    expect((await call("/team/answer", { callerPane: lead, ref: "writer", option: 1 })).body.error.code).toBe("approval");
+    // the user turns it on from the UI, for any team; a session only for its own
+    expect((await call("/team/delegate", { id: team, on: true })).body.delegate).toBe(true);
+    expect((await call("/team/delegate", { callerPane: lead, id: nested.body.team, on: true })).status).toBe(403);
+  });
+
   test("a question about the task goes to the queue and is answered with af answer; a permission prompt is the user's", async () => {
     const { o, backend, w, call, step, typed, lead } = await setup();
     const r = await call("/task", { callerPane: lead, kind: "claude", task: "write the report", name: "writer" });

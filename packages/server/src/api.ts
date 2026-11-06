@@ -60,10 +60,13 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(o.get(str(body.team) ?? (who.kind === "router" || who.kind === "member" ? who.team : who.kind === "pane" ? o.directTeamOf(who.pane)?.id : undefined)));
         case "POST /task":
           return json(
-            await o.task(who, { kind: body.kind, task: String(body.task ?? ""), title: str(body.title), name: str(body.name), to: str(body.to), worktree: bool(body.worktree), machine: str(body.machine), cwd: str(body.cwd), prepare: str(body.prepare) }),
+            await o.task(who, { kind: body.kind, task: String(body.task ?? ""), title: str(body.title), name: str(body.name), to: str(body.to), worktree: bool(body.worktree), machine: str(body.machine), cwd: str(body.cwd), prepare: str(body.prepare), delegate: bool(body.delegate) }),
           );
         case "POST /team/new":
-          return json(await o.newTeam(who, { goal: String(body.goal ?? ""), playbook: str(body.playbook), router: body.router, name: str(body.name), cwd: str(body.cwd), machine: str(body.machine) }, !!body.ui));
+          return json(await o.newTeam(who, { goal: String(body.goal ?? ""), playbook: str(body.playbook), router: body.router, name: str(body.name), cwd: str(body.cwd), machine: str(body.machine), delegate: bool(body.delegate) }, !!body.ui));
+        // the manager answers its members' trust prompts, permission prompts and notices for the user (or stops)
+        case "POST /team/delegate":
+          return json(o.setDelegate(who, str(body.id), bool(body.on) ?? true));
         case "POST /team/stop":
           return json(o.stopTeam(who, str(body.id)));
         case "GET /machines":

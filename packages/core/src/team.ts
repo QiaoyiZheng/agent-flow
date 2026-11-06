@@ -40,6 +40,11 @@ export interface TeamMeta {
   playbook?: string;
   playbookPath?: string;
   goal?: string;
+  /**
+   * The user lets the manager answer its members' prompts for them: folder trust, permission prompts, notices that
+   * wait for Enter. Off: those are the user's (Needs you). Teams opened under a team that has it get it too.
+   */
+  delegate?: boolean;
 }
 
 export interface Member {
@@ -173,6 +178,7 @@ export type TeamEvent = (
   | E<"team.created", { meta: TeamMeta }>
   | E<"team.stopped", {}>
   | E<"team.workspace", { machine: string; workspace: string }>
+  | E<"team.delegate", { on: boolean }>
   | E<"member.added", { member: Member }>
   | E<"member.placed", { name: string; paneId: string; tabId: string }>
   | E<"member.status", { name: string; status: AgentStatus }>
@@ -224,6 +230,9 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
       break;
     case "team.workspace":
       if (s.meta) s.meta.workspaces = { ...(s.meta.workspaces ?? {}), [ev.machine]: ev.workspace };
+      break;
+    case "team.delegate":
+      if (s.meta) s.meta.delegate = ev.on;
       break;
     case "member.added":
       s.members[ev.member.name] = { ...ev.member };

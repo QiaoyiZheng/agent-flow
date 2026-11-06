@@ -29,7 +29,8 @@ Then run `af queue take`. It hands you every waiting item at once. Deal with eac
 - submitted (blocked / failed / dropped): decide: a new ticket (maybe for another member), close it, or report to the user.
 - asks a question (af ask): af reply <seq> "<answer>"; if only the user can answer, af report the question.
 - is asking on screen (a question in the member's terminal): af answer <ticket> <option number> [--text "..."].
-- waits for the user (a permission or folder-trust prompt on its screen): only the user may answer it. If it holds up the goal, af report it (that deals with the item); else af queue done <seq>.
+- waits for the user (a permission or folder-trust prompt, or a notice, on its screen): only the user may answer it. If it holds up the goal, af report it (that deals with the item); else af queue done <seq>.
+- has a prompt for you to answer (the same, when the user lets this team answer them: the item lists the options): answer it as the user would with af answer <ticket> <option number>. Allow what the member's task needs (trusting the team's folders, running its commands, continuing past a notice); leave anything destructive or outside the task to the user: af queue done <seq>, and it stays in their Needs you.
 - finished a turn without af submit: af tell <ticket> "<what to do>", or close the ticket.
 - may be stuck / exited / error: af status <member> to look; then af tell, a new ticket for a new member, or close.
 - new request (from the user): open tickets for it, or answer with af report.

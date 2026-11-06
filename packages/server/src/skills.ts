@@ -48,6 +48,13 @@ a session asks a question on its screen (answer it with \`${af} answer T2 <optio
 permission prompts are the user's: when a session waits for one, tell the user), may be stuck, or exited
 (\`${af} status <name>\` shows what it is doing).
 
+If the user says you may answer those prompts for them (folder trust, permission prompts, "Enter to continue"
+notices of the sessions you start), run \`${af} delegate on\` (or add --delegate to af task / af team new). Never
+turn it on by yourself. Then such a prompt reaches your queue as "has a prompt for you to answer", with its options:
+answer it as the user would (\`${af} answer T2 <option number>\`). Allow what the task needs; leave anything
+destructive or outside the task to the user (\`${af} queue done <seq>\`: it stays in their Needs you).
+\`${af} delegate off\` gives them back to the user.
+
 ## Mode 2: an agent team with a router (loops, longer work)
 
     ${af} playbook list

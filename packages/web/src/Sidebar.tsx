@@ -397,10 +397,14 @@ function NeedsYou({
       });
     }
   }
+  // members whose trust or permission prompt (or notice) their manager answers for you: not yours meanwhile
+  const answering = new Set(teams.filter((r) => !r.stopped).flatMap((r) => r.answering ?? []));
   for (const p of blocked) {
     const q = p.asking || questions[qKey(p)];
-    // a member's question about its task goes to its manager; a permission prompt is always yours
+    // a member's question about its task goes to its manager; a permission prompt is yours, unless you let its
+    // manager answer those
     if (managed.has(p.id) && q && !isApproval(q)) continue;
+    if (answering.has(p.id)) continue;
     needs.push({ key: `b:${p.id}`, kind: "blocked", label: `waiting for an answer · ${p.agentName ?? p.agent}`, where: wsLabel(p.workspaceId), text: q || p.title || "Open it to answer.", at: p.statusAt ?? "", paneId: p.id, workspace: p.workspaceId });
   }
   for (const p of herdr?.panes ?? []) {

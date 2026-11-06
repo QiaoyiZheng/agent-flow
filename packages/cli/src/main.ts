@@ -11,7 +11,7 @@ const HOME = process.env.AF_HOME ?? join(homedir(), ".agent-flow");
 const SOCK = process.env.AF_SOCK ?? join(HOME, "server.sock");
 const AGENT = process.env.AF_AGENT || undefined;
 
-const BOOL = new Set(["json", "all", "help", "down", "right", "tab", "worktree", "no-worktree", "done", "failed", "dropped", "cancelled"]);
+const BOOL = new Set(["json", "all", "help", "down", "right", "tab", "worktree", "no-worktree", "done", "failed", "dropped", "cancelled", "delegate"]);
 /**
  * Set when this af runs on the Mac for a session on another machine (its af script sends the command here): paths are
  * on that machine, relative to its folder AF_CWD, and files it names are read there.
@@ -121,7 +121,10 @@ Mode 1 — hand out tasks from this session (it gets each session's final reply 
   af task --to <name> "<task>"              more work for a session you started (same context)
   af queue [--all]                          what waits in your queue    af queue take   take all of it
   af tell <ticket|name> "<text>"            add to a ticket (typed in when the session is free)
-  af answer <ticket|name> <n> [--text T]    answer the question on its screen (not permission prompts)
+  af answer <ticket|name> <n> [--text T]    answer the question on its screen (permission and trust prompts and
+                                            notices only after af delegate on)
+  af delegate on|off                        let this session answer its sessions' trust prompts, permission prompts
+                                            and notices for the user (only when the user said you may); or stop
   af status <name>                          its status, last reply and screen
   af tickets [--json]    af ticket show <T>
 
@@ -188,6 +191,7 @@ async function main() {
         machine: str(flags.on),
         cwd: cwdFlag(flags),
         prepare: str(flags.prepare),
+        ...(flags.delegate ? { delegate: true } : {}),
       });
       const where = r.machine && r.machine !== "local" ? ` on ${r.machine} in ${r.cwd}` : "";
       return out(flags, r, () =>
@@ -205,7 +209,7 @@ async function main() {
       if (sub === "new") {
         const goal = str(flags.goal) ?? pos.slice(1).join(" ");
         if (!goal.trim()) die('usage: af team new --goal "..." [--playbook P] [--router K] [--name N] [--cwd DIR]');
-        const r = await call("POST", "/team/new", { goal, playbook: str(flags.playbook), router: str(flags.router), name: str(flags.name), cwd: cwdFlag(flags), machine: str(flags.on) });
+        const r = await call("POST", "/team/new", { goal, playbook: str(flags.playbook), router: str(flags.router), name: str(flags.name), cwd: cwdFlag(flags), machine: str(flags.on), ...(flags.delegate ? { delegate: true } : {}) });
         return out(flags, r, () =>
           `team ${r.team} (${r.name}) is starting in its own workspace${r.machine && r.machine !== "local" ? ` on ${r.machine}` : ""}${r.playbook ? ` with playbook ${r.playbook}` : ""}${r.parent ? `; it is ${r.parent.ticket} in your tickets, and its reports come to your queue` : ""}.`,
         );
@@ -294,6 +298,16 @@ async function main() {
       if (pos.length < 2) die('usage: af tell <ticket|name> "<text>"');
       const r = await call("POST", "/team/tell", { ref: pos[0], text: pos.slice(1).join(" ") });
       return console.log(r.opened ? `${r.ticket} opened for ${r.to}` : `${r.to} gets it for ${r.ticket} when it is free`);
+    }
+    case "delegate": {
+      const on = pos[0] ?? "on";
+      if (on !== "on" && on !== "off") die("usage: af delegate on|off");
+      const r = await call("POST", "/team/delegate", { on: on === "on" });
+      return console.log(
+        r.delegate
+          ? `on: the trust prompts, permission prompts and notices of the sessions you hand work to come to your queue (team ${r.team}); answer them with af answer <ticket> <n>`
+          : `off: those prompts are the user's again (team ${r.team})`,
+      );
     }
     case "answer": {
       if (pos.length < 2) die('usage: af answer <ticket|name> <option number> [--text "..."]');

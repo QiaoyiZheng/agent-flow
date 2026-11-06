@@ -33,6 +33,8 @@ export interface TaskRequest {
   /** The machine to start it on (default: the manager's), and its folder there (default: the manager's, or home). */
   machine?: string;
   cwd?: string;
+  /** The user lets this session answer its sessions' trust prompts, permission prompts and notices (see TeamMeta). */
+  delegate?: boolean;
   /** A shell command run once in its folder before it starts (installs, links); off unless given. */
   prepare?: string;
 }
@@ -46,6 +48,8 @@ export interface NewTeamRequest {
   cwd?: string;
   /** The machine the router (and by default its members) runs on. */
   machine?: string;
+  /** The router answers its members' trust prompts, permission prompts and notices (default: the caller's team's). */
+  delegate?: boolean;
 }
 
 /** af ticket open (router). */
@@ -96,6 +100,10 @@ export interface TeamSummary {
   tickets: number;
   /** Panes of the members: their "finished" is the manager's business, not the user's. */
   memberPanes: string[];
+  /** The manager answers its members' trust prompts, permission prompts and notices for the user. */
+  delegate?: boolean;
+  /** Panes of members whose prompt the manager is to answer (delegate): Needs you leaves them out meanwhile. */
+  answering?: string[];
   /** How many tickets are at each stage (for a team's box on its parent's timeline). */
   stages: Partial<Record<StageKey, number>>;
 }
