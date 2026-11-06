@@ -151,6 +151,8 @@ describe("an idle agent stopped and started again in its pane", () => {
     const args = ["--settings", settings, "--session-id", ID];
     await w.putToSleep({ pane: ws.paneId, agent: "claude", bin: "claude", args, cwd: home, status: "done", session: { id: ID }, since: new Date().toISOString(), reason: "idle 8 h" }, child.pid);
     await child.exited;
+    // only Ctrl+C: a Ctrl+D that reached the shell after the agent quit would end the shell and close the pane
+    expect(backend.keys.flatMap((k) => k.keys)).toEqual(["ctrl+c", "ctrl+c"]);
     // Herdr still reports claude for a few seconds after it exits: not taken for a new start
     backend.panes.get(ws.paneId)!.agent = { name: "", kind: "claude", args: [], status: "idle" };
     await w.refresh();

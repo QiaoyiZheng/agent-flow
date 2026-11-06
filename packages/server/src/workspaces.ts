@@ -1242,9 +1242,11 @@ export class Workspaces {
   }
 
   /**
-   * Stop the agent (process `pid`) in rec.pane and remember how to start it again. Its own way out first (the keys
-   * of "exit": its box is empty), then SIGTERM if it is still there. The pane shows it as before from the start, so
-   * nothing sees it exit.
+   * Stop the agent (process `pid`) in rec.pane and remember how to start it again: Ctrl+C (twice, while it is still
+   * there: claude and gemini quit on the second, codex on one or two), then SIGTERM. Never Ctrl+D, which codex and
+   * omp quit on: when the agent has quit already, a key goes to the pane's shell, and Ctrl+D ends the shell, which
+   * closes the pane (seen live with two codex panes). Ctrl+C there does nothing. The pane shows the agent as before
+   * from the start, so nothing sees it exit.
    */
   async putToSleep(rec: SleepRecord, pid: number) {
     const pane = rec.pane;
@@ -1255,11 +1257,12 @@ export class Workspaces {
       this.asleep[pane] = { ...rec, stopping: true };
       this.saveAsleep();
       try {
-        for (const st of controlSteps(rec.agent, "exit")) {
-          if ("wait" in st) await Bun.sleep(st.wait);
-          else if ("keys" in st) await r.backend.sendKeys(r.raw, st.keys);
+        for (let i = 0; i < 2; i++) {
+          if (!(await this.alive(machine, pid))) break;
+          await r.backend.sendKeys(r.raw, ["ctrl+c"]);
+          if (await this.gone(machine, pid, i === 0 ? 500 : 4000)) break;
         }
-        if (!(await this.gone(machine, pid, 8000))) {
+        if (!(await this.gone(machine, pid, 200))) {
           await this.machineExec(machine, `kill -TERM ${pid}`).catch(() => {});
           if (!(await this.gone(machine, pid, 5000))) throw new AfError("stop_failed", `${rec.agent} did not exit`);
         }
