@@ -920,3 +920,4 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .proc-why { font-size: 11px; color: var(--text-3); font-family: var(--mono); margin-top: 2px; }
 .proc-mem { font: 11.5px var(--mono); color: var(--text-2); flex: none; min-width: 56px; text-align: right; }
 .proc-group { padding: 6px 12px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-3); background: var(--bg-1); }
+.proc-remote { display: block; }

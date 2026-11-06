@@ -197,7 +197,7 @@ export function agentProcess(agent: string, procs: { pid: number; argv: string[]
 // ---------------------------------------------------------------------------------------------
 // work still running
 
-export const PS_CMD = "ps -eo pid=,ppid=,etime=,rss=,comm=";
+export const PS_CMD = "ps -eo pid=,ppid=,etime=,rss=,args=";
 
 export interface Proc {
   pid: number;
@@ -206,7 +206,10 @@ export interface Proc {
   age: number;
   /** Resident memory, KB. */
   rss: number;
+  /** Its program (the command line's first word). */
   comm: string;
+  /** Its whole command line. */
+  args: string;
 }
 
 /** ps's elapsed time, [[dd-]hh:]mm:ss, in seconds. */
@@ -221,7 +224,10 @@ export function parsePs(out: string): Map<number, Proc> {
   const m = new Map<number, Proc>();
   for (const l of out.split("\n")) {
     const r = l.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(.+)$/);
-    if (r) m.set(Number(r[1]), { pid: Number(r[1]), ppid: Number(r[2]), age: etimeSeconds(r[3]!), rss: Number(r[4]), comm: r[5]!.trim() });
+    if (r) {
+      const args = r[5]!.trim();
+      m.set(Number(r[1]), { pid: Number(r[1]), ppid: Number(r[2]), age: etimeSeconds(r[3]!), rss: Number(r[4]), comm: args.split(/\s+/)[0]!, args });
+    }
   }
   return m;
 }
@@ -249,17 +255,22 @@ export function descendants(procs: Map<number, Proc>, pid: number): Proc[] {
 }
 
 /** Helpers agents keep running for themselves, not work. */
-const HELPERS = new Set(["caffeinate", "codex-code-mode-host"]);
+const HELPERS = new Set(["caffeinate", "codex-code-mode-host", "node_repl"]);
+/** Plugins and MCP servers (codex starts its computer-use plugin again now and then): not work either. */
+const HELPER_ARGS = /\/plugins\/|\bmcp\b|mcp-server|modelcontextprotocol|\/\.codex\/packages\//i;
+export const isHelper = (p: Proc) => HELPERS.has(basename(p.comm)) || HELPER_ARGS.test(p.args);
 
 /**
  * Processes the agent started during its turns that still run (an experiment, a server): its descendants that
- * started a minute or more after it did. What starts with it (MCP servers, helpers) does not count.
+ * started a minute or more after it did, other than its helpers, plugins and MCP servers (and theirs).
  */
 export function childWork(procs: Map<number, Proc>, agentPid: number): string[] {
   const me = procs.get(agentPid);
   if (!me) return [];
+  const helper = new Set<number>();
+  for (const p of descendants(procs, agentPid)) if (isHelper(p) || helper.has(p.ppid)) helper.add(p.pid);
   return descendants(procs, agentPid)
-    .filter((p) => p.age < me.age - 60 && !HELPERS.has(basename(p.comm)))
+    .filter((p) => p.age < me.age - 60 && !helper.has(p.pid))
     .map((p) => basename(p.comm));
 }
 
@@ -327,8 +338,10 @@ export interface ProcessSettings {
   idleHours: number;
   /** A dispatched worker with nothing more to do is stopped after this long. */
   workerMinutes: number;
+  /** Also on other machines (off: they may be shared, and it frees nothing on this Mac). */
+  remote: boolean;
 }
-export const DEFAULT_PROCESS_SETTINGS: ProcessSettings = { enabled: true, idleHours: 8, workerMinutes: 10 };
+export const DEFAULT_PROCESS_SETTINGS: ProcessSettings = { enabled: true, idleHours: 8, workerMinutes: 10, remote: false };
 
 /** What a team says about stopping the agent in a pane: undefined when no team has it. */
 export interface TeamSleepInfo {
@@ -447,6 +460,7 @@ export class Sleeper {
   setSettings(s: Partial<ProcessSettings>) {
     const next = { ...this.settings };
     if (typeof s.enabled === "boolean") next.enabled = s.enabled;
+    if (typeof s.remote === "boolean") next.remote = s.remote;
     if (Number.isFinite(s.idleHours) && s.idleHours! > 0) next.idleHours = Math.min(24 * 30, Number(s.idleHours));
     if (Number.isFinite(s.workerMinutes) && s.workerMinutes! > 0) next.workerMinutes = Math.min(24 * 60 * 30, Number(s.workerMinutes));
     this.settings = next;
@@ -469,7 +483,11 @@ export class Sleeper {
         try {
           await this.sleepPane(row.pane, row.worker ? `finished worker, idle ${dur(this.now() - Date.parse(row.idleSince ?? ""))}` : `idle ${dur(this.now() - Date.parse(row.idleSince ?? ""))}`);
           stopped.push(row.pane);
-        } catch {}
+          this.failed.delete(row.pane);
+        } catch (e) {
+          // shown in the list, and not tried again for half an hour
+          this.failed.set(row.pane, { why: (e as Error).message.replace(/^not stopped: /, ""), at: this.now() });
+        }
       }
     } finally {
       this.running = false;
@@ -518,7 +536,11 @@ export class Sleeper {
     return rows;
   }
 
+  /** Stops that failed at a check, and why: not tried again for half an hour. */
+  private failed = new Map<string, { why: string; at: number }>();
+
   private async whyKeep(p: HPane, row: ProcessRow, procsOf: (machine: string) => Promise<Map<number, Proc>>, full: boolean): Promise<string | undefined> {
+    if (p.machine !== "local" && !this.settings.remote) return "on another machine (stopping there is off)";
     const procs = await procsOf(p.machine);
     const me = agentProcess(p.agent!, await this.w.processes(p.id).catch(() => []));
     if (me) row.memoryMb = memoryMb(procs, me.pid, p.machine === "local" ? this.footprintNow : undefined);
@@ -526,6 +548,9 @@ export class Sleeper {
     if (p.agentStatus === "blocked" || p.asking) return "waiting for an answer";
     if (p.background) return `${p.background} background task${p.background > 1 ? "s" : ""} running`;
     if (p.agentStatus !== "done" && p.agentStatus !== "idle") return `status ${p.agentStatus}`;
+    if (p.scrolled) return "its terminal is scrolled up";
+    const fail = this.failed.get(p.id);
+    if (fail && this.now() - fail.at < 30 * 60_000) return `the last try to stop it failed: ${fail.why}`;
     const team = this.teams.sleepInfo(p.id);
     row.worker = team?.worker ?? (!!p.agentName && this.dispatchers().some((id) => p.agentName!.startsWith(`${id}-`)));
     if (team && !team.ok) return team.why ?? "its team has work for it";

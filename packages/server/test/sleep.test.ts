@@ -83,6 +83,17 @@ describe("work an idle agent still has running", () => {
       ].join("\n"),
     );
     expect(childWork(ps, 100)).toEqual(["zsh", "python3"]);
+    // a plugin or MCP server it started again later, and what that runs: helpers, not work
+    const withPlugin = parsePs(
+      [
+        "  100     1 2-00:00:00  20480 codex -c x",
+        "  110   100    1:00:00   1000 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node --import file:///u/.codex/plugins/cache/openai-bundled/unified-computer-use/x.js",
+        "  111   110    1:00:00   1000 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+        "  112   100    1:00:00   1000 npx -y @modelcontextprotocol/server-filesystem /tmp",
+      ].join("\n"),
+    );
+    expect(childWork(withPlugin, 100)).toEqual([]);
+    expect(withPlugin.get(110)?.comm).toBe("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node");
     expect(memoryMb(ps, 100)).toBe(Math.round((20480 + 4096 + 1024 + 8192 + 65536) / 1024));
     // with top's figures (compressed and swapped memory counted): those where known, ps's for the rest
     const top = parseTopMem("Processes: 700 total\nPID    MEM\n100    929M\n101    12K\n104    1.5G+\n999    3M-\n");
@@ -293,5 +304,18 @@ describe("after a Herdr restart (a reboot): pages stay, agents resume on a messa
     expect(backend.panes.get(ws.paneId)!.typed.at(-1)).toBe(`cd '${home}' && 'claude' '--permission-mode' 'auto' '--resume' '${ID}'`);
     expect(backend.prompts.map((x) => x.text)).toEqual(["go on"]);
     w2.stop();
+  });
+});
+
+describe("which machines", () => {
+  test("agents on other machines are left alone unless the user turns that on", async () => {
+    const pane = { id: "gpu~w1:p1", machine: "gpu", workspaceId: "gpu~w1", tabId: "gpu~w1:t1", agent: "claude", agentStatus: "done", cwd: "/h", statusAt: "2026-01-01T00:00:00Z" };
+    const w = { model: { panes: [pane], machines: [{ id: "gpu", state: "online" }], workspaces: [] }, asleepRecord: () => undefined, machineExec: async () => "", processes: async () => [] } as any;
+    const home = tmp();
+    const s = new Sleeper(w, {} as any, { sleepInfo: () => undefined }, home);
+    expect((await s.list())[0]!.keep).toBe("on another machine (stopping there is off)");
+    s.setSettings({ remote: true });
+    expect((await s.list())[0]!.keep).toBe("no agent process found");
+    expect(new Sleeper(w, {} as any, { sleepInfo: () => undefined }, home).settings.remote).toBe(true); // saved
   });
 });

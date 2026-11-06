@@ -25,6 +25,7 @@ interface Settings {
   enabled: boolean;
   idleHours: number;
   workerMinutes: number;
+  remote: boolean;
 }
 
 const KINDS = new Set(["claude", "codex", "omp", "gemini"]);
@@ -82,7 +83,8 @@ function ProcessesPanel({ onClose, onGoTo }: { onClose: () => void; onGoTo: (pan
   };
   const running = (rows ?? []).filter((r) => !r.asleep).sort((a, b) => (b.memoryMb ?? 0) - (a.memoryMb ?? 0));
   const asleep = (rows ?? []).filter((r) => r.asleep);
-  const total = running.reduce((s, r) => s + (r.memoryMb ?? 0), 0);
+  // what matters for this Mac's memory: its own agents (other machines' agents use theirs)
+  const total = running.filter((r) => r.machine === "local").reduce((s, r) => s + (r.memoryMb ?? 0), 0);
   const item = (r: Row) => (
     <div key={r.pane} className={`proc-row ${r.asleep ? "asleep" : ""}`}>
       <i className="proc-dot" style={{ background: kindColor(r.agent) }} />
@@ -123,7 +125,7 @@ function ProcessesPanel({ onClose, onGoTo }: { onClose: () => void; onGoTo: (pan
       <div className="notices-head">
         <b>Agents</b>
         <span className="proc-ws">
-          {running.length} running{total ? ` · ${gb(total)}` : ""}
+          {running.length} running{total ? ` · ${gb(total)} on this Mac` : ""}
           {asleep.length ? ` · ${asleep.length} asleep` : ""}
         </span>
         <span className="spacer" />
@@ -138,6 +140,9 @@ function ProcessesPanel({ onClose, onGoTo }: { onClose: () => void; onGoTo: (pan
           </label>
           <input type="number" min={1} value={settings.idleHours} onChange={(e) => setSettings({ ...settings, idleHours: Number(e.target.value) })} onBlur={() => save({ idleHours: settings.idleHours })} /> h; finished dispatched workers after
           <input type="number" min={1} value={settings.workerMinutes} onChange={(e) => setSettings({ ...settings, workerMinutes: Number(e.target.value) })} onBlur={() => save({ workerMinutes: settings.workerMinutes })} /> min.
+          <label className="proc-remote">
+            <input type="checkbox" checked={settings.remote} onChange={(e) => save({ remote: e.target.checked })} /> also on other machines
+          </label>
           <div className="proc-note">Never while it runs a background task, a Monitor, a schedule or a process it started. Its page stays; a message resumes it.</div>
         </div>
       )}
