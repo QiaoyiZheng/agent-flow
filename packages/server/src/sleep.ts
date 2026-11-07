@@ -511,39 +511,54 @@ export class Sleeper {
   }
 
   /** Every agent pane, running or stopped, with why it is kept running. `full`: check the slow things too. */
+  /**
+   * The list shown in the UI: quick (it answers within Bun's 10 s request limit with ~70 agents on 6 machines): one ps
+   * per machine, all machines at once, and the panes of a machine looked at side by side. The check that stops agents
+   * (full) also reads screens and transcripts, one pane after another.
+   */
   async list(full = false): Promise<ProcessRow[]> {
-    const rows: ProcessRow[] = [];
-    const ps = new Map<string, Map<number, Proc>>();
-    await this.footprint();
-    const procsOf = async (machine: string) => {
-      if (!ps.has(machine)) ps.set(machine, parsePs(await this.w.machineExec(machine, PS_CMD).catch(() => "")));
-      return ps.get(machine)!;
-    };
     const wsLabel = (id: string) => this.w.model.workspaces.find((x) => x.id === id)?.label ?? id;
-    for (const p of this.w.model.panes) {
-      if (!p.agent || !SLEEP_AGENTS.includes(p.agent as (typeof SLEEP_AGENTS)[number])) continue;
-      if (this.w.model.machines.find((m) => m.id === p.machine)?.state !== "online") continue;
+    const panes = this.w.model.panes.filter((p) => p.agent && SLEEP_AGENTS.includes(p.agent as (typeof SLEEP_AGENTS)[number]) && this.w.model.machines.find((m) => m.id === p.machine)?.state === "online");
+    const machines = [...new Set(panes.map((p) => p.machine))];
+    const [, ...tables] = await Promise.all([this.footprint(), ...machines.map((m) => this.w.machineExec(m, PS_CMD).then(parsePs, () => new Map<number, Proc>()))]);
+    const ps = new Map(machines.map((m, i) => [m, tables[i]!]));
+    const rows = panes.map((p): ProcessRow => ({ pane: p.id, machine: p.machine, workspace: wsLabel(p.workspaceId), agent: p.agent!, name: p.agentName, title: p.title, status: p.agentStatus, worker: false }));
+    const one = async (p: HPane, row: ProcessRow) => {
       const rec = this.w.asleepRecord(p.id);
-      const row: ProcessRow = { pane: p.id, machine: p.machine, workspace: wsLabel(p.workspaceId), agent: p.agent, name: p.agentName, title: p.title, status: p.agentStatus, worker: false };
-      rows.push(row);
       if (rec) {
         row.asleep = { since: rec.since, reason: rec.reason };
         row.idleSince = rec.statusAt;
-        continue;
+        return;
       }
-      row.keep = await this.whyKeep(p, row, procsOf, full).catch((e) => `could not check: ${(e as Error).message}`);
-    }
+      row.keep = await this.whyKeep(p, row, ps.get(p.machine)!, full).catch((e) => `could not check: ${(e as Error).message}`);
+    };
+    if (full) for (let i = 0; i < panes.length; i++) await one(panes[i]!, rows[i]!);
+    else
+      for (let i = 0; i < panes.length; i += 8) await Promise.all(panes.slice(i, i + 8).map((p, j) => one(p, rows[i + j]!)));
     return rows;
+  }
+
+  /**
+   * The agent's own process in a pane. Its pid is kept from the last look while ps still shows it with the same
+   * command: one Herdr call per pane is slow on remote machines, and the list looks at every pane.
+   */
+  private procCache = new Map<string, { pid: number; argv: string[] }>();
+  private async agentOf(p: HPane, procs: Map<number, Proc>) {
+    const was = this.procCache.get(p.id);
+    if (was && procs.get(was.pid)?.args.startsWith(was.argv[0] ?? "\0")) return was;
+    const me = agentProcess(p.agent!, await this.w.processes(p.id).catch(() => []));
+    if (me) this.procCache.set(p.id, me);
+    else this.procCache.delete(p.id);
+    return me;
   }
 
   /** Stops that failed at a check, and why: not tried again for half an hour. */
   private failed = new Map<string, { why: string; at: number }>();
 
-  private async whyKeep(p: HPane, row: ProcessRow, procsOf: (machine: string) => Promise<Map<number, Proc>>, full: boolean): Promise<string | undefined> {
-    if (p.machine !== "local" && !this.settings.remote) return "on an SSH machine (stopping there is off)";
-    const procs = await procsOf(p.machine);
-    const me = agentProcess(p.agent!, await this.w.processes(p.id).catch(() => []));
+  private async whyKeep(p: HPane, row: ProcessRow, procs: Map<number, Proc>, full: boolean): Promise<string | undefined> {
+    const me = await this.agentOf(p, procs);
     if (me) row.memoryMb = memoryMb(procs, me.pid, p.machine === "local" ? this.footprintNow : undefined);
+    if (p.machine !== "local" && !this.settings.remote) return "on an SSH machine (stopping there is off)";
     if (p.agentStatus === "working") return "working";
     if (p.agentStatus === "blocked" || p.asking) return "waiting for an answer";
     if (p.background) return `${p.background} background task${p.background > 1 ? "s" : ""} running`;

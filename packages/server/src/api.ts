@@ -606,6 +606,8 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   const tcp = Bun.serve<WsData>({
     hostname: "127.0.0.1",
     port: opts.port,
+    // the UI's requests that go over SSH (a remote machine's file, a search there) can take longer than Bun's 10 s
+    idleTimeout: 120,
     async fetch(req, server) {
       const url = new URL(req.url);
       const origin = req.headers.get("origin");
