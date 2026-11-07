@@ -56,7 +56,7 @@ button { font: inherit; color: inherit; }
 /* ---------- shell layout ---------- */
 .app {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr) var(--right-w, 380px);
+  grid-template-columns: var(--side-w, 232px) minmax(0, 1fr) var(--right-w, 380px);
   grid-template-rows: minmax(0, 1fr) auto;
   grid-template-areas: "side main right" "drawer drawer drawer";
   height: 100%;
@@ -924,3 +924,12 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .team-delegate { display: flex; align-items: center; gap: 6px; padding: 4px 12px 6px; font-size: 11.5px; color: var(--text-3); cursor: pointer; }
 .team-delegate input { margin: 0; }
 .viewer .bar .machine-tag { flex: none; font: 600 10.5px var(--mono); color: var(--accent); background: var(--accent-dim); padding: 1px 6px; border-radius: 4px; margin-right: 6px; }
+
+/* ---------- side columns folded to narrow strips ---------- */
+.fold-btn { border: 0; background: none; color: var(--text-3); cursor: pointer; font-size: 13px; line-height: 1; padding: 6px 0; width: 100%; border-radius: 5px; }
+.fold-btn:hover { color: var(--text); background: var(--bg-hover); }
+.fold-btn.inline { width: auto; padding: 2px 6px; }
+.side.folded, .right.folded { align-items: center; padding-top: 6px; gap: 8px; overflow: hidden; }
+.rail-count { border: 0; cursor: pointer; min-width: 18px; padding: 1px 5px; border-radius: 9px; font: 600 10.5px var(--mono); background: var(--s-submitted); color: var(--bg-0, #000); }
+.rail-label { writing-mode: vertical-rl; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); margin-top: 4px; user-select: none; }
+.side.folded .rail-label, .right.folded .rail-label { cursor: default; }

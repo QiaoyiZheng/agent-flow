@@ -23,6 +23,8 @@ export interface TeamPanelProps {
   onPickTeam: (id: string) => void;
   onGoTo: (paneId: string) => void;
   onOpen: (path: string) => void;
+  /** Fold the panel to a narrow strip. */
+  onFold?: () => void;
 }
 
 const look = (s: TeamState, k: Ticket, panes: Map<string, HPane>) => {
@@ -62,6 +64,11 @@ export function TeamPanel(props: TeamPanelProps) {
         {parent && (
           <button className="c-more" title={`This team is ticket ${meta.parent!.ticket} of ${parent.name}`} onClick={() => onPickTeam(parent.id)}>
             ↑ {parent.name}
+          </button>
+        )}
+        {props.onFold && (
+          <button className="fold-btn inline" title="Fold this panel to a narrow strip" onClick={props.onFold}>
+            »
           </button>
         )}
       </div>

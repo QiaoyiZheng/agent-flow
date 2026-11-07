@@ -31,10 +31,15 @@ export function Sidebar({
   onNeed,
   seen,
   onSeen,
+  folded,
+  onFold,
 }: {
   herdr?: HerdrModel;
   teams: TeamSummary[];
   team?: TeamState;
+  /** Folded to a narrow strip: Needs you still runs (its count shows there, its notifications still come). */
+  folded?: boolean;
+  onFold?: (folded: boolean) => void;
   hidden: Set<string>;
   selectedWs?: string;
   onSelectWs: (id: string) => void;
@@ -57,9 +62,27 @@ export function Sidebar({
   const pastTeams = teams.filter((r) => (!r.workspace || !liveWs.has(r.workspace)) && r.tickets > 0);
   const toggle = (id: string, def: boolean) => setCollapsed((c) => ({ ...c, [id]: !(c[id] ?? def) }));
 
+  const [needCount, setNeedCount] = useState(0);
+  const needsYou = <NeedsYou herdr={herdr} teams={teams} hidden={hidden} seen={seen} onSeen={onSeen} onNeed={onNeed} onCount={setNeedCount} onFold={onFold && (() => onFold(true))} />;
+  if (folded)
+    return (
+      <aside className="side folded">
+        <button className="fold-btn" title="Show the machines and Needs you" onClick={() => onFold?.(false)}>
+          »
+        </button>
+        {needCount > 0 && (
+          <button className="rail-count" title={`${needCount} need${needCount === 1 ? "s" : ""} you: show them`} onClick={() => onFold?.(false)}>
+            {needCount}
+          </button>
+        )}
+        <span className="rail-label">Machines</span>
+        <div style={{ display: "none" }}>{needsYou}</div>
+      </aside>
+    );
+
   return (
     <aside className="side">
-      <NeedsYou herdr={herdr} teams={teams} hidden={hidden} seen={seen} onSeen={onSeen} onNeed={onNeed} />
+      {needsYou}
 
       <div className="tree">
         <div className="section-title" style={{ padding: "10px 14px 6px" }}>
@@ -330,6 +353,8 @@ function NeedsYou({
   seen,
   onSeen,
   onNeed,
+  onCount,
+  onFold,
 }: {
   herdr?: HerdrModel;
   teams: TeamSummary[];
@@ -337,6 +362,8 @@ function NeedsYou({
   seen: Record<string, string>;
   onSeen: (paneId: string, at: string) => void;
   onNeed: (n: Need) => void;
+  onCount?: (n: number) => void;
+  onFold?: () => void;
 }) {
   const [questions, setQuestions] = useState<Record<string, string>>({});
   const { dispatchers } = useStore();
@@ -426,6 +453,7 @@ function NeedsYou({
   const needKey = (n: Need) => `${n.key}@${n.statusAt ?? n.at}`;
   useEffect(() => {
     document.title = needs.length ? `(${needs.length}) agent-flow` : "agent-flow";
+    onCount?.(needs.length);
     const keys = needs.map(needKey);
     if (!notified.current) {
       notified.current = new Set(keys); // what is waiting when the page opens is not news
@@ -469,6 +497,11 @@ function NeedsYou({
             {notify ? "🔔" : "🔕"}
           </button>
           <span className={`count ${needs.length ? "" : "zero"}`}>{needs.length}</span>
+          {onFold && (
+            <button className="fold-btn inline" title="Fold this column to a narrow strip" onClick={onFold}>
+              «
+            </button>
+          )}
         </span>
       </div>
       {!needs.length && <div className="empty">Nothing waiting on you.</div>}

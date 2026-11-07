@@ -87,6 +87,12 @@ export function App() {
     return live.length ? live : here.slice(0, 1);
   }, [teams, selectedWs]);
 
+  // the two side columns fold to narrow strips (the machines and Needs you; a session's tickets), remembered
+  const [sideFolded, setSideFolded] = useState(() => localStorage.getItem("af.fold.side") === "1");
+  const [rightFolded, setRightFolded] = useState(() => localStorage.getItem("af.fold.right") === "1");
+  const foldSide = (v: boolean) => (localStorage.setItem("af.fold.side", v ? "1" : "0"), setSideFolded(v));
+  const foldRight = (v: boolean) => (localStorage.setItem("af.fold.right", v ? "1" : "0"), setRightFolded(v));
+
   // ctrl+` toggles the persistent shell
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -188,8 +194,10 @@ export function App() {
   const showRight = !!team?.meta && !creating;
 
   return (
-    <div className="app" style={{ "--right-w": showRight ? "420px" : "0px" } as React.CSSProperties}>
+    <div className="app" style={{ "--side-w": sideFolded ? "30px" : "232px", "--right-w": showRight ? (rightFolded ? "30px" : "420px") : "0px" } as React.CSSProperties}>
       <Sidebar
+        folded={sideFolded}
+        onFold={foldSide}
         herdr={herdr}
         teams={teams}
         team={team}
@@ -250,9 +258,23 @@ export function App() {
         </div>
       </main>
 
-      <section className="right">
-        {showRight && team?.meta && (
+      <section className={`right ${showRight && rightFolded ? "folded" : ""}`}>
+        {showRight && rightFolded && (
+          <>
+            <button className="fold-btn" title="Show the tickets this session handed out" onClick={() => foldRight(false)}>
+              «
+            </button>
+            {(team?.queue.filter((q) => q.state !== "handled").length ?? 0) > 0 && (
+              <button className="rail-count" title="Results waiting for the session: show them" onClick={() => foldRight(false)}>
+                {team!.queue.filter((q) => q.state !== "handled").length}
+              </button>
+            )}
+            <span className="rail-label">{team?.meta?.mode === "router" ? team.meta.name : "Handed out"}</span>
+          </>
+        )}
+        {showRight && !rightFolded && team?.meta && (
           <TeamPanel
+            onFold={() => foldRight(true)}
             team={team}
             teams={teams}
             siblings={wsTeams.some((x) => x.id === team.meta!.id) ? wsTeams : [teams.find((x) => x.id === team.meta!.id)!].filter(Boolean)}
