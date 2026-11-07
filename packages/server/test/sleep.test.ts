@@ -93,6 +93,9 @@ describe("work an idle agent still has running", () => {
       ].join("\n"),
     );
     expect(childWork(withPlugin, 100)).toEqual([]);
+    // a language server claude started when it read a Python file (seen on joy: pyright, hours after claude)
+    const withLsp = parsePs(["  100     1 2-00:00:00  20480 claude", "  120   100    4:00:00   9000 node /home/joy/.local/bin/pyright-langserver --stdio"].join("\n"));
+    expect(childWork(withLsp, 100)).toEqual([]);
     expect(withPlugin.get(110)?.comm).toBe("/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node");
     expect(memoryMb(ps, 100)).toBe(Math.round((20480 + 4096 + 1024 + 8192 + 65536) / 1024));
     // with top's figures (compressed and swapped memory counted): those where known, ps's for the rest

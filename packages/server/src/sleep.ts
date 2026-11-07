@@ -256,8 +256,11 @@ export function descendants(procs: Map<number, Proc>, pid: number): Proc[] {
 
 /** Helpers agents keep running for themselves, not work. */
 const HELPERS = new Set(["caffeinate", "codex-code-mode-host", "node_repl"]);
-/** Plugins and MCP servers (codex starts its computer-use plugin again now and then): not work either. */
-const HELPER_ARGS = /\/plugins\/|\bmcp\b|mcp-server|modelcontextprotocol|\/\.codex\/packages\//i;
+/**
+ * Plugins, MCP servers and language servers: not work either. codex starts its computer-use plugin again now and
+ * then; claude starts a language server (pyright for Python, tsserver, gopls…) the first time it reads such a file.
+ */
+const HELPER_ARGS = /\/plugins\/|\bmcp\b|mcp-server|modelcontextprotocol|\/\.codex\/packages\/|langserver|language-server|languageserver|\btsserver\b|typescript-language|\b(gopls|rust-analyzer|clangd|jdtls|lua-language-server)\b|--stdio\b/i;
 export const isHelper = (p: Proc) => HELPERS.has(basename(p.comm)) || HELPER_ARGS.test(p.args);
 
 /**
@@ -552,6 +555,25 @@ export class Sleeper {
     return me;
   }
 
+  /** When the conversation of a pane last changed (its transcript's change time), kept per pane for 10 minutes. */
+  private activeCache = new Map<string, { at?: string; looked: number }>();
+  private async lastActive(p: HPane): Promise<string | undefined> {
+    const c = this.activeCache.get(p.id);
+    if (c && this.now() - c.looked < 10 * 60_000) return c.at;
+    let at: string | undefined;
+    try {
+      const r = await this.access.resolve(p.id);
+      const path = "source" in r && !r.source.pending ? r.source.path : undefined;
+      if (path) {
+        const out = await this.access.fsFor(p.id).fs.sh(`stat -c %Y ${sq(path)} 2>/dev/null || stat -f %m ${sq(path)}`);
+        const s = Number(out.trim());
+        if (s > 0) at = new Date(Math.min(s * 1000, this.now())).toISOString();
+      }
+    } catch {}
+    this.activeCache.set(p.id, { at, looked: this.now() });
+    return at;
+  }
+
   /** Stops that failed at a check, and why: not tried again for half an hour. */
   private failed = new Map<string, { why: string; at: number }>();
 
@@ -569,7 +591,8 @@ export class Sleeper {
     const team = this.teams.sleepInfo(p.id);
     row.worker = team?.worker ?? (!!p.agentName && this.dispatchers().some((id) => p.agentName!.startsWith(`${id}-`)));
     if (team && !team.ok) return team.why ?? "its team has work for it";
-    row.idleSince = p.statusAt ?? new Date(this.started).toISOString();
+    // a status found at server start has no time: the conversation's last change stands in (else the server's start)
+    row.idleSince = p.statusAt ?? (await this.lastActive(p)) ?? new Date(this.started).toISOString();
     const limit = row.worker ? this.settings.workerMinutes * 60_000 : this.settings.idleHours * 3600_000;
     const idle = this.now() - Date.parse(row.idleSince);
     if (idle < limit) {
