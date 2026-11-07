@@ -326,6 +326,8 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
     return () => clearTimeout(t);
   }, [mode, cwd]);
   const pb = playbooks.find((w) => w.id === playbook);
+  // the folders browsed are the new workspace's machine's (a team starts on this Mac), read over SSH for a remote one
+  const browseOn = mode === "team" ? "local" : machine;
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -356,15 +358,13 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
           <label>Directory</label>
           <div style={{ display: "flex", gap: 6 }}>
             <input className="text" style={{ flex: 1 }} required={mode === "team"} placeholder={mode === "team" ? "/path/to/project" : "~ (home) if empty; ~/x works on remote machines"} value={cwd} onChange={(e) => setCwd(e.target.value)} />
-            {machine === "local" && (
-              <button type="button" className="btn" onClick={() => setPicking(true)} title="Pick the folder">
-                Browse…
-              </button>
-            )}
+            <button type="button" className="btn" onClick={() => setPicking(true)} title={browseOn === "local" ? "Pick the folder" : `Pick the folder on ${machines.find((m) => m.id === browseOn)?.label ?? browseOn}`}>
+              Browse…
+            </button>
           </div>
           {picking && (
             <div className="dir-pick">
-              <FileBrowser start={cwd || "~"} onOpenFile={(f) => (setCwd(f.replace(/\/[^/]+$/, "")), setPicking(false))} onCancel={() => setPicking(false)} onDirChange={setPickDir} />
+              <FileBrowser key={browseOn} start={cwd || "~"} machine={browseOn === "local" ? undefined : browseOn} onOpenFile={(f) => (setCwd(f.replace(/\/[^/]+$/, "")), setPicking(false))} onCancel={() => setPicking(false)} onDirChange={setPickDir} />
               <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                 <button type="button" className="btn primary" onClick={() => (setCwd(pickDir), setPicking(false))} title={pickDir}>
                   Use this folder
@@ -379,7 +379,15 @@ function NewDialog({ onDone, machines, start }: { onDone: (workspaceId?: string)
         {mode === "workspace" && machines.length > 1 && (
           <div className="field">
             <label>Machine (connected SSH machines are listed; expand one in the sidebar to connect it)</label>
-            <select value={machine} onChange={(e) => setMachine(e.target.value)}>
+            <select
+              value={machine}
+              onChange={(e) => {
+                // another machine: the folder typed or picked was this one's
+                setMachine(e.target.value);
+                setCwd("");
+                setPicking(false);
+              }}
+            >
               {machines.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.label}
