@@ -700,13 +700,11 @@ export class Workspaces {
     const r = await m.backend.createWorkspace(label.trim() || basename(dir) || "workspace", dir);
     await this.changed(machine);
     const p = (x: string) => (machine === "local" ? x : `${machine}${MACHINE_SEP}${x}`);
-    // the folder next to the shell, so the workspace opens on its files (viewer panes are local only)
+    // the folder next to the shell, so the workspace opens on its files (on an SSH machine: read over SSH)
     let folderPane: string | undefined;
-    if (m.meta.local) {
-      try {
-        folderPane = (await this.show({ target: dir, of: p(r.paneId), split: "right" }, "user")).paneId;
-      } catch {}
-    }
+    try {
+      folderPane = (await this.show({ target: dir, of: p(r.paneId), split: "right" }, "user")).paneId;
+    } catch {}
     return { workspaceId: p(r.workspaceId), tabId: p(r.tabId), paneId: p(r.paneId), folderPane };
   }
 
@@ -1299,12 +1297,17 @@ export class Workspaces {
         const r = this.route(pane);
         let args = resumeArgs(rec.agent, rec.args, rec.session);
         if (!args) throw new AfError("cannot_resume", `cannot tell how to resume ${rec.agent}`);
-        // files it was started with that are gone now (after a reboot: what was under /tmp) are left out
-        if (r.local) {
-          const d = dropMissingFiles(rec.agent, args, existsSync);
-          args = d.args;
-          if (d.dropped.length) this.opts.notify?.("warn", `wake:${pane}`, `${rec.agent} in ${pane} resumed without ${d.dropped.join(", ")} (gone)`);
+        // files it was started with that are gone now (after a reboot: what was under /tmp) are left out; on an SSH
+        // machine, looked for there
+        const named = dropMissingFiles(rec.agent, args, () => false).dropped;
+        let there = new Set<string>();
+        if (!r.local && named.length) {
+          const out = await this.machineExec(r.m.meta.id, named.map((f) => `[ -e ${sq(f)} ] && printf '%s\\n' ${sq(f)}`).join("; ") + "; true").catch(() => undefined);
+          there = out === undefined ? new Set(named) : new Set(out.split("\n").filter(Boolean));
         }
+        const d = dropMissingFiles(rec.agent, args, r.local ? existsSync : (f) => there.has(f));
+        args = d.args;
+        if (d.dropped.length) this.opts.notify?.("warn", `wake:${pane}`, `${rec.agent} in ${pane} resumed without ${d.dropped.join(", ")} (gone)`);
         if (rec.name) {
           // a named agent (a team member) comes back under its name, as Herdr started it
           let res = await r.backend.startAgent(rec.name, rec.agent as AgentKind, r.raw, args);
@@ -1347,7 +1350,7 @@ export class Workspaces {
     return machine === "local" ? undefined : this.machines.get(machine)?.remote;
   }
 
-  /** Show a file, directory, or URL: in an existing viewer pane, in a new split, or in a new tab. Local only. */
+  /** Show a file, directory, or URL: in an existing viewer pane, in a new split, or in a new tab, on the pane's machine. */
   async show(req: ShowRequest, by: string): Promise<ViewRec> {
     // the target's machine: the pane it opens in, next to, or the workspace's (a remote agent's file shows in a pane
     // on that machine: the web UI reads it over SSH, and the pane's plain view in the Herdr TUI reads it there)
@@ -1381,13 +1384,14 @@ export class Workspaces {
   /** A file or folder on a remote machine, in a viewer pane there (see show). */
   private async showRemote(req: ShowRequest, machine: string, by: string): Promise<ViewRec> {
     const fs = this.remoteFiles(machine);
-    const st = await remoteStat(fs.exec, req.target, fs.home);
+    // a web page: shown by the web UI; the pane there only says so
+    const st = isUrl(req.target) ? { path: req.target, dir: false } : await remoteStat(fs.exec, req.target, fs.home);
     if (req.in) {
       this.pane(req.in);
       if (!this.views[req.in]) throw new AfError("not_a_viewer", `pane ${req.in} is not a viewer pane; use --split to open a new one next to it`);
       return this.register(req.in, st.path, by, machine);
     }
-    const cwd = st.dir ? st.path : dirname(st.path);
+    const cwd = isUrl(st.path) ? undefined : st.dir ? st.path : dirname(st.path);
     let paneId: string;
     if (req.tabIn) paneId = (await this.newTab(req.tabIn, cwd)).paneId;
     else {
@@ -1400,7 +1404,7 @@ export class Workspaces {
     // its plain view for the Herdr TUI, drawn there (bash; without it the pane stays a shell)
     await this.remoteViewer(machine).catch(() => {});
     await r.backend.runInPane(r.raw, `command -v bash >/dev/null 2>&1 && AF_SOCK="$HOME/.agent-flow/af.sock" exec bash "$HOME/.agent-flow/bin/af-viewer" ${sq(st.path)}`);
-    await r.backend.renamePane(r.raw, `≡ ${basename(st.path)}`).catch(() => {});
+    await r.backend.renamePane(r.raw, `≡ ${isUrl(st.path) ? st.path.replace(/^https?:\/\//, "").slice(0, 40) : basename(st.path)}`).catch(() => {});
     await this.changed(machine);
     return rec;
   }

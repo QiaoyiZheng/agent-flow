@@ -310,14 +310,14 @@ describe("after a Herdr restart (a reboot): pages stay, agents resume on a messa
 });
 
 describe("which machines", () => {
-  test("agents on other machines are left alone unless the user turns that on", async () => {
+  test("agents on SSH machines are stopped too, unless the user turns that off", async () => {
     const pane = { id: "gpu~w1:p1", machine: "gpu", workspaceId: "gpu~w1", tabId: "gpu~w1:t1", agent: "claude", agentStatus: "done", cwd: "/h", statusAt: "2026-01-01T00:00:00Z" };
     const w = { model: { panes: [pane], machines: [{ id: "gpu", state: "online" }], workspaces: [] }, asleepRecord: () => undefined, machineExec: async () => "", processes: async () => [] } as any;
     const home = tmp();
     const s = new Sleeper(w, {} as any, { sleepInfo: () => undefined }, home);
-    expect((await s.list())[0]!.keep).toBe("on another machine (stopping there is off)");
-    s.setSettings({ remote: true });
-    expect((await s.list())[0]!.keep).toBe("no agent process found");
-    expect(new Sleeper(w, {} as any, { sleepInfo: () => undefined }, home).settings.remote).toBe(true); // saved
+    expect((await s.list())[0]!.keep).toBe("no agent process found"); // looked at like this Mac's
+    s.setSettings({ remote: false });
+    expect((await s.list())[0]!.keep).toBe("on an SSH machine (stopping there is off)");
+    expect(new Sleeper(w, {} as any, { sleepInfo: () => undefined }, home).settings.remote).toBe(false); // saved
   });
 });

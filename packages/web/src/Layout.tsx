@@ -118,6 +118,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         createPortal(
           <OpenDialog
             start={openStart}
+            machine={p && p.machine !== "local" ? p.machine : undefined}
             title={opening === "replace" ? "Show in this pane" : `Open next to ${title}`}
             onOpen={openTarget}
             onClose={() => setOpening(undefined)}
@@ -166,7 +167,7 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
                   <span style={{ color: kindColor(k) }}>●</span> {k} agent, right
                 </div>
               ))}
-              {p?.machine === "local" && (
+              {p && (
                 <div className="item" onClick={() => (setMenu(false), setOpening("split"))}>
                   ≡ open a file, folder or page, right…
                 </div>

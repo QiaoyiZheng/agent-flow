@@ -141,7 +141,7 @@ function ProcessesPanel({ onClose, onGoTo }: { onClose: () => void; onGoTo: (pan
           <input type="number" min={1} value={settings.idleHours} onChange={(e) => setSettings({ ...settings, idleHours: Number(e.target.value) })} onBlur={() => save({ idleHours: settings.idleHours })} /> h; finished dispatched workers after
           <input type="number" min={1} value={settings.workerMinutes} onChange={(e) => setSettings({ ...settings, workerMinutes: Number(e.target.value) })} onBlur={() => save({ workerMinutes: settings.workerMinutes })} /> min.
           <label className="proc-remote">
-            <input type="checkbox" checked={settings.remote} onChange={(e) => save({ remote: e.target.checked })} /> also on other machines
+            <input type="checkbox" checked={settings.remote} onChange={(e) => save({ remote: e.target.checked })} /> also on the SSH machines
           </label>
           <div className="proc-note">Never while it runs a background task, a Monitor, a schedule or a process it started. Its page stays; a message resumes it.</div>
         </div>

@@ -63,10 +63,14 @@ const ALLOWED = new Set([
   // a document handed over from there (its path is on that machine), and a viewer pane there following its target
   "POST /deliver",
   "GET /view",
+  // af delegate; af open (a preview pane next to the caller, on that machine). Not --app: that opens an app on the
+  // Mac, which a remote machine may not do
+  "POST /team/delegate",
+  "POST /show",
 ]);
 
 /** af subcommands that only make sense on the Mac itself (they would act there, not on the caller's machine). */
-const MAC_ONLY = new Set(["server", "viewer", "hook", "open", "split", "close", "connect", "disconnect", "workspace", "ls"]);
+const MAC_ONLY = new Set(["server", "viewer", "hook", "split", "close", "connect", "disconnect", "workspace", "ls"]);
 
 /** The /cli body: NUL-separated cwd, AF_TEAM, AF_AGENT, HERDR_PANE_ID, then the arguments. */
 export function parseCliBody(body: Uint8Array) {
@@ -196,9 +200,12 @@ export class RemoteAf {
       if (key === "POST /cli") return await this.cli(machine, new Uint8Array(await req.arrayBuffer()));
       const body: Record<string, any> = req.method === "POST" ? await req.json().catch(() => ({})) : Object.fromEntries(url.searchParams);
       if (body.callerPane && !String(body.callerPane).includes(MACHINE_SEP)) body.callerPane = `${machine}${MACHINE_SEP}${body.callerPane}`;
-      // panes named by the caller are its machine's; a file it hands over is there
-      if ((key === "POST /deliver" || key === "GET /view") && body.pane && !String(body.pane).includes(MACHINE_SEP)) body.pane = `${machine}${MACHINE_SEP}${body.pane}`;
-      if (key === "POST /deliver") body.machine = machine;
+      // panes named by the caller are its machine's; a file it hands over or opens is there
+      const files = key === "POST /deliver" || key === "GET /view" || key === "POST /show";
+      if (files)
+        for (const k of ["pane", "in", "of", "tabIn"]) if (body[k] && !String(body[k]).includes(MACHINE_SEP)) body[k] = `${machine}${MACHINE_SEP}${body[k]}`;
+      // its own machine's files only, in its own machine's panes (show refuses a pane on another machine)
+      if (key === "POST /deliver" || key === "POST /show") body.machine = machine;
       // a member or router speaks for itself only: it must be one that runs on this machine
       if (body.team && body.agent) {
         let m;

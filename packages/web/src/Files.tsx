@@ -1,4 +1,5 @@
-// Browsing local files: the Open dialog (a file, a folder, or a web page next to a pane) and folder panes.
+// Browsing files, this Mac's or (machine) an SSH machine's: the Open dialog (a file, a folder, or a web page next to a
+// pane) and folder panes.
 // Start where the pane is, click through folders, or type to filter this folder and search everything under it.
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -211,7 +212,7 @@ export function FileBrowser({
 const i18nNote = (truncated?: boolean) => (truncated ? <div className="fb-empty">Search stopped early in this big folder; go into a subfolder to search deeper.</div> : null);
 
 /** Open a file, folder or web page next to a pane (or in a viewer pane, replacing what it shows). */
-export function OpenDialog({ start, title, onOpen, onClose }: { start: string; title: string; onOpen: (target: string) => void; onClose: () => void }) {
+export function OpenDialog({ start, title, machine, onOpen, onClose }: { start: string; title: string; machine?: string; onOpen: (target: string) => void; onClose: () => void }) {
   const [dir, setDir] = useState(start);
   const [url, setUrl] = useState("");
   useEffect(() => {
@@ -224,7 +225,7 @@ export function OpenDialog({ start, title, onOpen, onClose }: { start: string; t
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal open-dialog">
         <div className="modal-title">{title}</div>
-        <FileBrowser start={start} onOpenFile={go} onCancel={onClose} onDirChange={setDir} />
+        <FileBrowser start={start} machine={machine} onOpenFile={go} onCancel={onClose} onDirChange={setDir} />
         <div className="open-foot">
           <form
             className="open-url"

@@ -338,10 +338,10 @@ export interface ProcessSettings {
   idleHours: number;
   /** A dispatched worker with nothing more to do is stopped after this long. */
   workerMinutes: number;
-  /** Also on other machines (off: they may be shared, and it frees nothing on this Mac). */
+  /** Also on the SSH machines (their agents are the user's own Herdr panes there; off: this Mac only). */
   remote: boolean;
 }
-export const DEFAULT_PROCESS_SETTINGS: ProcessSettings = { enabled: true, idleHours: 8, workerMinutes: 10, remote: false };
+export const DEFAULT_PROCESS_SETTINGS: ProcessSettings = { enabled: true, idleHours: 8, workerMinutes: 10, remote: true };
 
 /** What a team says about stopping the agent in a pane: undefined when no team has it. */
 export interface TeamSleepInfo {
@@ -540,7 +540,7 @@ export class Sleeper {
   private failed = new Map<string, { why: string; at: number }>();
 
   private async whyKeep(p: HPane, row: ProcessRow, procsOf: (machine: string) => Promise<Map<number, Proc>>, full: boolean): Promise<string | undefined> {
-    if (p.machine !== "local" && !this.settings.remote) return "on another machine (stopping there is off)";
+    if (p.machine !== "local" && !this.settings.remote) return "on an SSH machine (stopping there is off)";
     const procs = await procsOf(p.machine);
     const me = agentProcess(p.agent!, await this.w.processes(p.id).catch(() => []));
     if (me) row.memoryMb = memoryMb(procs, me.pid, p.machine === "local" ? this.footprintNow : undefined);

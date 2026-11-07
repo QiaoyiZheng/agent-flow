@@ -747,6 +747,16 @@ describe("members on another machine", () => {
     // not allowed from there
     expect((await post("/prompt", { pane: lead, text: "hi" })).status).toBe(403);
     expect((await post("/open-with", { path: "/etc/passwd" })).status).toBe(403);
+    // af open from there: a file of that machine, in a pane there; never one of the Mac's, or another machine's pane
+    writeFileSync(join(rhome, "proj", "notes.md"), "# Notes\n");
+    const shown = await post("/show", { target: join(rhome, "proj", "notes.md"), pane: rws.paneId });
+    expect(shown.status).toBe(200);
+    expect((await shown.json()) as any).toMatchObject({ machine: "gpu", target: join(rhome, "proj", "notes.md") });
+    // a pane it names is its machine's ("w1:p1" is gpu~w1:p1); a pane on another machine is refused
+    const other = await post("/show", { target: join(rhome, "proj", "notes.md"), of: `ds03~${rws.paneId}` });
+    expect(other.status).not.toBe(200);
+    expect((await other.json()) as any).toMatchObject({ error: { code: "other_machine" } });
+    expect((await post("/team/delegate", { callerPane: rws.paneId, on: true })).status).toBe(200);
     // a team member on the Mac cannot be spoken for from there
     const made = await call("/team/new", { callerPane: lead, goal: "g" });
     await step();
