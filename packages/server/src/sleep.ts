@@ -257,10 +257,10 @@ export function descendants(procs: Map<number, Proc>, pid: number): Proc[] {
 /** Helpers agents keep running for themselves, not work. */
 const HELPERS = new Set(["caffeinate", "codex-code-mode-host", "node_repl"]);
 /**
- * Plugins, MCP servers and language servers: not work either. codex starts its computer-use plugin again now and
+ * Plugins, MCP servers, language servers and omp's own workers (__omp_worker_daemon_broker): not work either. codex starts its computer-use plugin again now and
  * then; claude starts a language server (pyright for Python, tsserver, gopls…) the first time it reads such a file.
  */
-const HELPER_ARGS = /\/plugins\/|\bmcp\b|mcp-server|modelcontextprotocol|\/\.codex\/packages\/|langserver|language-server|languageserver|\btsserver\b|typescript-language|\b(gopls|rust-analyzer|clangd|jdtls|lua-language-server)\b|--stdio\b/i;
+const HELPER_ARGS = /__omp_worker|\/plugins\/|\bmcp\b|mcp-server|modelcontextprotocol|\/\.codex\/packages\/|langserver|language-server|languageserver|\btsserver\b|typescript-language|\b(gopls|rust-analyzer|clangd|jdtls|lua-language-server)\b|--stdio\b/i;
 export const isHelper = (p: Proc) => HELPERS.has(basename(p.comm)) || HELPER_ARGS.test(p.args);
 
 /**
