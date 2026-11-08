@@ -1,7 +1,6 @@
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/jetbrains-mono";
 @import "@xterm/xterm/css/xterm.css";
-@import "@xyflow/react/dist/style.css";
 
 /* Linear/Raycast direction: dark first, low saturation, hairline borders, one accent. */
 :root {
