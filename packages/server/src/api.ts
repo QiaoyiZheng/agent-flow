@@ -6,6 +6,7 @@ import { extname, join } from "node:path";
 import type { AgentKind, ClientPush, ServerPush, ShowRequest } from "@af/core";
 import { AGENT_KINDS } from "@af/core";
 import { AfError } from "./errors.ts";
+import { isLocalOrigin } from "./origin.ts";
 import type { Teams, Who } from "./teams.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
@@ -611,7 +612,7 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
     async fetch(req, server) {
       const url = new URL(req.url);
       const origin = req.headers.get("origin");
-      const sameOrigin = !origin || origin === `http://127.0.0.1:${opts.port}` || origin === `http://localhost:${opts.port}` || origin.startsWith("http://localhost:5173") || origin.startsWith("http://127.0.0.1:5173");
+      const sameOrigin = isLocalOrigin(origin);
       const authed = url.searchParams.get("token") === opts.token || req.headers.get("x-af-token") === opts.token;
       if (url.pathname === "/ws") {
         if (!sameOrigin || !authed) return fail("forbidden", "bad origin or token", 403);
