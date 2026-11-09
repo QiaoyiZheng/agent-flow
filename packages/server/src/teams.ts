@@ -885,6 +885,26 @@ export class Teams {
     return { ticket: k.id, member: m.name, option: r.option };
   }
 
+  /** The plain session (af task) running in `pane`, and the direct team it works for. */
+  private directChild(pane: string) {
+    for (const t of this.teams.values()) {
+      if (t.state.stopped || t.state.meta?.mode !== "direct") continue;
+      const m = Object.values(t.state.members).find((x) => x.paneId === pane && x.protocol === "none" && x.status !== "exited" && !x.team);
+      if (m) return { t, m };
+    }
+    return undefined;
+  }
+
+  private childReport(t: Team, m: Member, text: string) {
+    if (!text.trim()) throw new AfError("empty", "the report is empty");
+    const k = currentTicket(t.state, m.name) ?? ticketList(t.state).filter((x) => x.assignee === m.name).at(-1);
+    mkdirSync(join(t.dir, "out"), { recursive: true });
+    const file = join(t.dir, "out", `report-${m.name}-${Date.now()}.md`);
+    writeFileSync(file, `${text.trim()}\n`);
+    this.enqueue(t, { kind: "report", ticket: k?.id, from: m.name, text: text.trim(), path: file });
+    return { to: "the session that gave you your task (it gets it in its queue)", file };
+  }
+
   /** Answer a member's `af ask`. */
   reply(who: Who, seq: number, text: string) {
     const t = this.managed(who);
@@ -897,9 +917,15 @@ export class Teams {
     return { to: q.from };
   }
 
-  /** A router reports to whoever opened its team (its queue), or to the user (Needs you). --done finishes the team's ticket. */
+  /**
+   * A router reports to whoever opened its team (its queue), or to the user (Needs you). --done finishes the team's
+   * ticket. A session given a task with af task reports what its conversation with the user changed (to the queue of
+   * the session that gave it the task).
+   */
   report(who: Who, text: string, done = false) {
-    if (who.kind !== "router") throw new AfError("forbidden", "only a router reports (members submit with af submit)", 403);
+    const child = who.kind === "pane" ? this.directChild(who.pane) : undefined;
+    if (child) return this.childReport(child.t, child.m, text);
+    if (who.kind !== "router") throw new AfError("forbidden", "only a router, or a session given a task with af task, reports (members submit with af submit)", 403);
     const t = this.active(who.team);
     if (!text.trim()) throw new AfError("empty", "the report is empty");
     const file = join(t.dir, "out", `report-${Date.now()}.md`);
@@ -1349,6 +1375,40 @@ export class Teams {
     return Math.max(lastTurnMark(t.state, k), ...sent);
   }
 
+  /**
+   * Whether the turn that just ended was the user's: its ticket opened again by itself after its result was taken
+   * (ticket.resumed), and the last message in its conversation is one agent-flow did not type, written after that
+   * result was taken. (A background task that wakes it adds no message: its last one is then agent-flow's, or older.)
+   */
+  private userTalked(t: Team, m: Member, k: Ticket, pk: Peek | undefined) {
+    if (!k.resumed || pk?.lastUser === undefined || !pk.lastUser.trim()) return false;
+    const at = pk.lastUserAt ? Date.parse(pk.lastUserAt) : NaN;
+    if (k.resumedAfter && !Number.isNaN(at) && at < Date.parse(k.resumedAfter)) return false;
+    return !this.typedByUs(t, m, pk.lastUser);
+  }
+
+  /** Whether agent-flow typed this message to the member (a task, af tell, an answer, "continue"), not the user. */
+  private typedByUs(t: Team, m: Member, text: string) {
+    const n = (s: string) => s.replace(/\s+/g, " ").trim();
+    const got = n(text);
+    const ours = [
+      ...t.state.outbox.filter((o) => o.member === m.name).map((o) => o.text),
+      ...ticketList(t.state)
+        .filter((x) => x.assignee === m.name)
+        .map((x) => {
+          try {
+            return this.taskMessage(t, m, x);
+          } catch {
+            return ""; // its task.md is gone
+          }
+        }),
+    ];
+    return ours.some((o) => {
+      const head = n(o).slice(0, 80);
+      return !!head && (got.includes(head) || (got.length >= 12 && n(o).includes(got.slice(0, 80))));
+    });
+  }
+
   /** A member finished a turn on its ticket. Returns true when something was typed (or the turn was dealt with). */
   private async turnEnded(t: Team, m: Member, k: Ticket, changed: number): Promise<boolean> {
     const now = this.clock();
@@ -1374,6 +1434,12 @@ export class Teams {
     // no reply in its conversation (none found, or it stopped before writing one): the end of its screen instead
     const screen = pk?.reply ? "" : (await this.opts.w.read(m.paneId!, 25).catch(() => "")).trimEnd();
     const reply = pk?.reply ?? (screen ? `(no reply found in its conversation; its screen ends with:)\n${screen}` : "");
+    if (m.protocol === "none" && this.userTalked(t, m, k, pk)) {
+      // the user talked with it after its result was taken: that conversation is theirs, its manager does not hear
+      // each reply. What it changes for the work, the session reports itself (af report, as its task says).
+      this.emit(t, { type: "ticket.closed", at: this.now(), id: k.id, outcome: "done", note: "the user talked with it" });
+      return true;
+    }
     if (m.protocol === "none") {
       const file = join(this.ticketDir(t, k.id), "result.md");
       writeFileSync(file, `${reply || "(no reply found)"}\n`);
@@ -1428,7 +1494,8 @@ export class Teams {
     const there = (f: string) => (m.machine && m.machine !== "local" ? hostPathOf(this.host(m.machine), this.opts.home, f) : f);
     if (m.protocol === "none") {
       const body = task.length > 1500 ? `Your task is in ${join(dir, "task.md")}. Read it and do it.` : task;
-      return `${body}\n\n(agent-flow ticket ${k.id}${k.branch ? `, on branch ${k.branch}` : ""}: when you finish, end your reply with a short summary of the result.)`;
+      // the user may talk with it afterwards: those replies are not passed on (userTalked), so it reports what matters
+      return `${body}\n\n(agent-flow ticket ${k.id}${k.branch ? `, on branch ${k.branch}` : ""}: when you finish, end your reply with a short summary of the result. If the user then talks with you directly, just answer them: those answers are not passed on. When that conversation changes something the session that gave you this task must know (progress on the work, or a change to what was agreed: scope, framing, decisions, numbers), tell it in one shell command: ${this.afPathOn(m.machine)} report "<what changed>". Not for answers to questions.)`;
     }
     const parts = [
       `[agent-flow] Ticket ${k.id} for you${k.round > 1 ? ` (thread ${k.thread}, round ${k.round})` : ""}: ${k.title}.`,

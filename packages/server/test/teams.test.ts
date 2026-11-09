@@ -8,7 +8,7 @@ import { makeHandler } from "../src/api.ts";
 import { commitAll, git } from "../src/git.ts";
 import { PlaybookLibrary } from "../src/playbooks.ts";
 import { Teams, type TeamsOptions } from "../src/teams.ts";
-import { lastReply } from "../src/transcripts/peek.ts";
+import { type Peek, lastReply } from "../src/transcripts/peek.ts";
 import { Workspaces } from "../src/workspaces.ts";
 import { REMOTE_AF, RemoteAf, parseCliBody } from "../src/remote-af.ts";
 import { FakeBackend } from "./fake.ts";
@@ -45,7 +45,7 @@ async function setup(over: Partial<TeamsOptions> = {}, home = tmp("af-teams-home
   const cwd = tmp("af-teams-proj-");
   const w = new Workspaces({ home, backend, paneEnv: () => ({}) });
   await w.start(60_000);
-  const replies = new Map<string, { reply?: string; error?: string; size?: number }>();
+  const replies = new Map<string, Peek>();
   const o = new Teams({
     home,
     backend,
@@ -157,6 +157,51 @@ describe("mode 1: a session hands out tasks", () => {
     expect(readFileSync(join(o.opts.home, "teams", team, "tickets", "T1", "result.md"), "utf8")).toContain("42 tokens/s");
     expect(o.get(team).tickets.T1!.status).toBe("closed");
     expect(backend.prompts.filter((x) => x.name === m.paneId).length).toBe(1); // nothing was typed to it
+  });
+
+  test("the user talks with a session after its result was taken: its answers stay there; what changed comes by af report", async () => {
+    const { o, backend, call, step, turn, typed, replies, lead } = await setup();
+    const r = await call("/task", { callerPane: lead, kind: "omp", task: "Read the review of paper.tex, then wait for the user", name: "chat" });
+    await step();
+    const team = r.body.team;
+    const m = o.get(team).members.chat!;
+    const herdr = herdrMemberName(team, "chat");
+    // its task says how to report
+    expect(typed(m.paneId!)[0]).toContain('/af/bin/af report "<what changed>"');
+    replies.set(m.paneId!, { reply: "Read it; ready.", lastUser: typed(m.paneId!)[0] });
+    await turn(herdr);
+    await call("/team/take", { callerPane: lead });
+    await turn("lead"); // the session takes its queue in a turn of its own
+    const toLead = typed(lead).length;
+
+    // the user asks it something in its own pane: the answer is not passed on
+    await Bun.sleep(5);
+    const asked = new Date().toISOString();
+    replies.set(m.paneId!, { reply: "Section 3 says 4,559 rounds.", lastUser: "How many rounds does section 3 give?", lastUserAt: asked });
+    await turn(herdr);
+    expect(o.get(team).tickets.T1).toMatchObject({ status: "closed", closeNote: "the user talked with it", resumed: 1 });
+    expect(o.get(team).queue.filter((q) => q.state !== "handled")).toEqual([]);
+    expect(typed(lead).length).toBe(toLead);
+
+    // a background task wakes it later: no new message from the user, so its result does come
+    await Bun.sleep(5);
+    replies.set(m.paneId!, { reply: "The recount finished: 4,489 rounds have agent text.", lastUser: "How many rounds does section 3 give?", lastUserAt: asked });
+    await turn(herdr);
+    expect(o.get(team).tickets.T1).toMatchObject({ status: "submitted", resumed: 2 });
+    expect(typed(lead).at(-1)).toContain("1 new in your queue: T1 chat finished");
+    expect((await call("/team/take", { callerPane: lead })).body.text).toContain("4,489 rounds");
+    await turn("lead");
+
+    // the conversation changed what was agreed: the session says so itself
+    const rep = await call("/team/report", { callerPane: m.paneId, text: "The user decided: the headline is the two-year totals, not stage III." });
+    expect(rep.status).toBe(200);
+    expect(rep.body.to).toContain("the session that gave you your task");
+    await step();
+    expect(typed(lead).at(-1)).toContain("1 new in your queue: T1 chat reported");
+    const take = await call("/team/take", { callerPane: lead });
+    expect(take.body.text).toContain("the headline is the two-year totals");
+    // the session that hands out work cannot report as if it were one of its sessions
+    expect((await call("/team/report", { callerPane: lead, text: "x" })).status).toBe(403);
   });
 
   test("tasks wait for a busy member; --to gives a member more work; a member's session can lead its own team", async () => {
@@ -559,11 +604,11 @@ describe("mode 2: an agent team with a router", () => {
 });
 
 describe("reading what an agent said last", () => {
-  test("the reply after the last user message; an error only when nothing came after it", () => {
+  test("the reply after the last user message, and that message; an error only when nothing came after it", () => {
     const claude = (type: string, content: unknown) => JSON.stringify({ type, message: { role: type, content }, uuid: Math.random().toString(36), timestamp: "2026-11-04T10:00:00Z" });
     const lines = [claude("user", "first"), claude("assistant", [{ type: "text", text: "old answer" }]), claude("user", "count them"), claude("assistant", [{ type: "text", text: "There are 4." }]), claude("assistant", [{ type: "text", text: "Done." }])];
-    expect(lastReply("claude", lines)).toEqual({ reply: "There are 4.\n\nDone.", error: undefined });
-    expect(lastReply("claude", ["not json", ...lines.slice(0, 3)])).toEqual({ reply: undefined, error: undefined });
+    expect(lastReply("claude", lines)).toEqual({ reply: "There are 4.\n\nDone.", error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z" });
+    expect(lastReply("claude", ["not json", ...lines.slice(0, 3)])).toEqual({ reply: undefined, error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z" });
   });
 });
 
@@ -645,7 +690,7 @@ async function setupRemote() {
   });
   await w.start(60_000);
   await w.connect("gpu");
-  const replies = new Map<string, { reply?: string; error?: string; size?: number }>();
+  const replies = new Map<string, Peek>();
   const o = new Teams({ home, backend: local, w, sock: "/s", binDir: "/af/bin", protocolDir: SKILL, config: DEFAULT_CONFIG, playbooks: new PlaybookLibrary(join(SKILL, "playbooks"), join(home, "playbooks")), peek: async (pane) => replies.get(pane), settleMs: 0, noSubmitMs: 0 });
   o.load();
   const cwd = tmp("af-teams-rproj-local-");

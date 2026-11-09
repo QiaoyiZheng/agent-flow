@@ -126,6 +126,8 @@ Mode 1 — hand out tasks from this session (it gets each session's final reply 
   af delegate on|off                        let this session answer its sessions' trust prompts, permission prompts
                                             and notices for the user (only when the user said you may); or stop
   af status <name>                          its status, last reply and screen
+  af report "<text>"                        (in a session started with af task) tell the session that gave you the
+                                            task what your conversation with the user changed; answers are not passed on
   af tickets [--json]    af ticket show <T>
 
 Mode 2 — agent teams with a router:

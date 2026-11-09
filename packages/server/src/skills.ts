@@ -48,6 +48,10 @@ a session asks a question on its screen (answer it with \`${af} answer T2 <optio
 permission prompts are the user's: when a session waits for one, tell the user), may be stuck, or exited
 (\`${af} status <name>\` shows what it is doing).
 
+The user may talk with a session directly after you took its result. Its answers to them do not come to you; the
+session tells you itself when that changes something for the work (progress, or a change to what was agreed): it
+shows in your queue as "reported". Take that into account; you need not repeat it to the user, who was there.
+
 If the user says you may answer those prompts for them (folder trust, permission prompts, "Enter to continue"
 notices of the sessions you start), run \`${af} delegate on\` (or add --delegate to af task / af team new). Never
 turn it on by yourself. Then such a prompt reaches your queue as "has a prompt for you to answer", with its options:
@@ -121,17 +125,22 @@ reply. Do not retry, and do not open the file with other commands.
 `;
 }
 
-/** Install the skills where claude and codex look for user skills. Returns the files written. */
+/**
+ * Install the skills where claude, codex, gemini and omp look for user skills. Returns the files written. omp reads
+ * ~/.claude/skills too: its own folder gets them only where there is no ~/.claude (else omp would list them twice).
+ */
 export function installSkill(af: string, home = process.env.HOME ?? homedir()) {
   const written: string[] = [];
-  // gemini reads ~/.gemini/skills/<name>/SKILL.md in the same format
-  for (const root of [join(home, ".claude"), join(home, ".codex"), join(home, ".gemini")]) {
-    if (!existsSync(root)) continue; // that agent is not installed
+  // [the agent's folder, its skills folder]; gemini reads ~/.gemini/skills/<name>/SKILL.md in the same format
+  const roots: [string, string][] = [".claude", ".codex", ".gemini"].map((d) => [join(home, d), join(home, d, "skills")]);
+  if (!existsSync(join(home, ".claude"))) roots.push([join(home, ".omp"), join(home, ".omp", "agent", "skills")]);
+  for (const [agentDir, root] of roots) {
+    if (!existsSync(agentDir)) continue; // that agent is not installed
     for (const [name, text] of [
       ["agent-flow", skillText(af)],
       ["deliver-document", deliverSkillText(af)],
     ] as const) {
-      const dir = join(root, "skills", name);
+      const dir = join(root, name);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "SKILL.md"), text);
       written.push(join(dir, "SKILL.md"));

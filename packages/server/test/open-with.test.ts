@@ -97,6 +97,15 @@ import { deliverSkillText, installSkill, skillText } from "../src/skills.ts";
 import { readFileSync } from "node:fs";
 
 describe("skills written on server start", () => {
+  test("omp reads ~/.claude/skills; where there is no ~/.claude, its own folder gets them", () => {
+    const withClaude = tmp();
+    for (const d of [".claude", ".omp"]) mkdirSync(join(withClaude, d));
+    expect(installSkill("/af", withClaude).some((f) => f.includes(".omp"))).toBe(false);
+    const ompOnly = tmp();
+    for (const d of [".codex", ".omp"]) mkdirSync(join(ompOnly, d));
+    expect(installSkill("/af", ompOnly)).toEqual([".codex/skills", ".omp/agent/skills"].flatMap((d) => [join(ompOnly, d, "agent-flow/SKILL.md"), join(ompOnly, d, "deliver-document/SKILL.md")]));
+  });
+
   test("agent-flow and deliver-document, for each installed agent (claude, codex, gemini), with this server's af path", () => {
     const home = tmp();
     for (const d of [".claude", ".codex", ".gemini"]) mkdirSync(join(home, d));
@@ -108,6 +117,9 @@ describe("skills written on server start", () => {
     expect(deliver).toContain("/srv/af/bin/af deliver <file>");
     expect(deliver).toContain("a script"); // written by a script counts too
     for (const t of [skillText("X"), deliverSkillText("X")]) expect(t).not.toContain("undefined");
+    // asked to show a file: af open, not a preview of its own
+    expect(deliver).toContain("/srv/af/bin/af open <path|url>");
+    expect(deliver.split("\n")[2]).toContain("打开预览");
     // an agent that is not installed gets nothing
     const bare = tmp();
     mkdirSync(join(bare, ".claude"));

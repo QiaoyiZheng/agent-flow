@@ -154,7 +154,8 @@ export class RemoteAf {
         const af = `${remote.home}/.agent-flow/bin/af`;
         const put = (skill: string, text: string) =>
           remote.exec(
-            `t=$(mktemp) && cat > "$t" && for d in .claude .codex .gemini; do if [ -d "$HOME/$d" ]; then mkdir -p "$HOME/$d/skills/${skill}" && cp "$t" "$HOME/$d/skills/${skill}/SKILL.md" && echo "$d"; fi; done; rm -f "$t"`,
+            // omp reads ~/.claude/skills: its own folder only where there is no ~/.claude (as skills.ts installSkill)
+            `t=$(mktemp) && cat > "$t" && for d in .claude .codex .gemini; do if [ -d "$HOME/$d" ]; then mkdir -p "$HOME/$d/skills/${skill}" && cp "$t" "$HOME/$d/skills/${skill}/SKILL.md" && echo "$d"; fi; done; if [ -d "$HOME/.omp" ] && [ ! -d "$HOME/.claude" ]; then mkdir -p "$HOME/.omp/agent/skills/${skill}" && cp "$t" "$HOME/.omp/agent/skills/${skill}/SKILL.md" && echo .omp; fi; rm -f "$t"`,
             { stdin: new TextEncoder().encode(text) },
           );
         const r = await put("agent-flow", this.opts.skillText(af));

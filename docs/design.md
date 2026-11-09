@@ -116,6 +116,7 @@ af task gemini "根据 plan.md 写一份发布说明" --name write
 - `af task --to plan "…"` 把新工单交给已有的成员（同一个 session）；`af tell T1 "…"` 在同一张工单上追加要求。
 - 成员做完一轮（working → idle/done，6 秒后仍空闲且无后台任务、屏幕上也没有提示或提问，防止状态抖动），agent-flow 从它的对话记录里取这一轮最后的回复，写进 `result.md`，工单变 submitted，队列里进一条 `turn`。对话记录里找不到回复时，标明没有找到回复并附上屏幕最后 25 行。
 - 模式一里 `af queue take` 取走即算处理完；工单不需要显式关闭。
+- 模式一里结果取走后成员又干起活来（后台任务叫醒它，或用户直接跟它说话），工单重新打开（`ticket.resumed`）。这一轮结束时看它对话记录里最后一条用户消息：不是 agent-flow 打进去的（任务、`af tell`、"continue"），而且写在结果取走之后，就算用户自己的对话：不进队列，工单直接再关上。成员自己判断聊出了进展或口径变化时用 `af report "…"` 告诉主 agent（任务消息末尾写了这条规矩）。后台任务叫醒的那一轮没有新的用户消息，结果照常进队列。
 
 ### 4.4 模式二：agent team 和 router
 
@@ -252,6 +253,7 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 | `af reply <seq> "…"` | router | 回答成员的 `af ask` |
 | `af status <成员>` | 管理者 | 成员的状态、最后的回复、屏幕最后几行 |
 | `af report "…" [--done]` | router | 向调用者（或"需要你"）汇报 |
+| `af report "…"` | 模式一里 `af task` 开的 session | 用户直接跟它聊出了进展或口径变化时，告诉派活的 session（进它的队列） |
 | `af submit --status ready\|blocked\|failed\|dropped --note "…" [--to 成员] [--ticket T]` | 成员 | 交结果（result.md 写在工单文件夹里） |
 | `af progress "…"` · `af ask "…"` | 成员 | 进展（不进队列）· 提问（进队列） |
 | `af machines` | 所有人 | 列出 `--on` 能用的机器（本机和已连接的 SSH 机器，远程机器上也可调用） |

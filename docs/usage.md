@@ -28,6 +28,7 @@ af task claude "在 GPU 上跑 profile" --name profile --no-worktree --on allina
 - 新 session 是普通 session，不用学任何命令。它做完一轮后，agent-flow 从它的对话记录里取最后的回复，放进你那个 session 的**队列**，再往你的 session 里打一行：
   `[agent-flow] 1 new in your queue: T1 plan finished. Run: af queue take`
   你的 session 执行 `af queue take` 拿到结果，接着派下一步或向你汇报。
+- 结果交回以后，你可以直接去那个 session 跟它聊（问问题、讨论）。这些对话**不会**每轮都转给你的主 session；只有聊出了项目进展或口径（范围、表述、决定、数字）的变化，它才用 `af report "<变了什么>"` 告诉主 session（任务的第一条消息里写了这条规矩）。主 session 用 `af tell` 交给它的新活，结果照常回队列。
 - 队列里还会出现：某个 session 屏幕上在问和任务有关的问题（你的 session 用 `af answer T2 <选项号>` 回答）、可能卡住了、进程退出了、API 报错（agent-flow 已经自动让它"继续"过 3 次）。
 - **权限审批和"信任这个文件夹"永远只交给你**：出现在左栏"需要你"里，你的 session 碰不到。
 - **在 git 仓库里，每个新 session 都要选 `--worktree` 或 `--no-worktree`**，不选 af 会拒绝。`--worktree`：在自己的 git worktree 和分支（`af/<team>/<名字>`）上改，适合几个 session 同时改同一个仓库；agent-flow 不合并，分支名在工单里，要不要合由你决定。`--no-worktree`：直接在目录里干活（只读的活，或只有它在改）。

@@ -114,6 +114,8 @@ export interface Ticket {
   reopenedAt?: string;
   /** Times the member went on working by itself after the ticket was closed (its result was taken): reopened. */
   resumed?: number;
+  /** When the ticket had been closed, the last time it went on by itself (a message written before it is older). */
+  resumedAfter?: string;
   progress?: string;
   report?: TicketReport;
   outcome?: CloseOutcome;
@@ -291,7 +293,7 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
       // ticket is open again, so what it says next reaches the manager too
       const k = t(ev.id);
       if (k && k.status === "closed") {
-        Object.assign(k, { status: "working", reopenedAt: ev.at, updatedAt: ev.at, resumed: (k.resumed ?? 0) + 1 });
+        Object.assign(k, { status: "working", reopenedAt: ev.at, updatedAt: ev.at, resumed: (k.resumed ?? 0) + 1, resumedAfter: k.closedAt });
         k.turns++;
         delete k.outcome;
         delete k.closeNote;
