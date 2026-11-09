@@ -3,7 +3,7 @@
 // Start where the pane is, click through folders, or type to filter this folder and search everything under it.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, failed } from "./store";
+import { api, failed, notify } from "./store";
 
 interface FsEntry {
   name: string;
@@ -55,6 +55,61 @@ function crumbs(path: string, home: string) {
   return out;
 }
 
+/** `to` relative to the folder `from` (../ when it is outside): what an agent working in `from` understands. */
+export function relPath(from: string, to: string) {
+  const a = from.split("/").filter(Boolean);
+  const b = to.split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return [...Array<string>(a.length - i).fill(".."), ...b.slice(i)].join("/") || ".";
+}
+
+function copy(text: string) {
+  const done = () => notify("info", `Copied ${text}`);
+  if (navigator.clipboard?.writeText) return void navigator.clipboard.writeText(text).then(done, failed("Could not copy"));
+  // no clipboard API (a page that is not a secure context): the old way
+  const ta = Object.assign(document.createElement("textarea"), { value: text });
+  document.body.append(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  ok ? done() : notify("error", "Could not copy", text);
+}
+
+/** Right-click on a file or folder: copy its path, relative to the folder the browser started in, or in full. */
+function EntryMenu({ entry, root, x, y, onClose }: { entry: FsEntry; root: string; x: number; y: number; onClose: () => void }) {
+  useEffect(() => {
+    const close = () => onClose();
+    const key = (e: KeyboardEvent) => e.key === "Escape" && (e.stopPropagation(), onClose());
+    window.addEventListener("mousedown", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", key, true);
+    return () => (window.removeEventListener("mousedown", close), window.removeEventListener("blur", close), window.removeEventListener("keydown", key, true));
+  }, []);
+  const rel = relPath(root, entry.path);
+  const item = (label: string, value: string) => (
+    <div
+      className="item"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={() => (copy(value), onClose())}
+    >
+      <span>{label}</span>
+      <span className="fb-ctx-val" title={value}>
+        {value.length > 44 ? `…${value.slice(-43)}` : value}
+      </span>
+    </div>
+  );
+  // kept inside the window (the menu is 300 pixels wide, about 90 high)
+  const left = Math.max(4, Math.min(x, window.innerWidth - 304));
+  const top = Math.max(4, Math.min(y, window.innerHeight - 94));
+  return (
+    <div className="menu fb-ctx" style={{ left, top }} onContextMenu={(e) => e.preventDefault()}>
+      {item("Copy relative path", rel)}
+      {item("Copy path", entry.path)}
+    </div>
+  );
+}
+
 export function FileBrowser({
   start,
   machine,
@@ -78,6 +133,7 @@ export function FileBrowser({
   const [query, setQuery] = useState("");
   const [found, setFound] = useState<{ q: string; results: FsEntry[]; truncated: boolean }>();
   const [hi, setHi] = useState(0);
+  const [ctx, setCtx] = useState<{ entry: FsEntry; x: number; y: number }>();
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -186,7 +242,14 @@ export function FileBrowser({
         {!typedPath && listing && !rows.length && <div className="fb-empty">{query ? (found || query.trim().length < 2 ? "Nothing matches." : "Searching…") : "This folder is empty."}</div>}
         {!typedPath &&
           rows.map((e, i) => (
-            <div key={e.path} className={`fb-row ${i === hi ? "hi" : ""} ${e.dir ? "dir" : ""}`} onMouseEnter={() => setHi(i)} onClick={() => open(e)} title={e.path}>
+            <div
+              key={e.path}
+              className={`fb-row ${i === hi ? "hi" : ""} ${e.dir ? "dir" : ""}`}
+              onMouseEnter={() => setHi(i)}
+              onClick={() => open(e)}
+              onContextMenu={(ev) => (ev.preventDefault(), setHi(i), setCtx({ entry: e, x: ev.clientX, y: ev.clientY }))}
+              title={e.path}
+            >
               <span className="fb-ic">{iconOf(e)}</span>
               <span className="fb-name">
                 {e.rel && e.rel.includes("/") ? (
@@ -205,6 +268,7 @@ export function FileBrowser({
         {deeper.length > 0 && i18nNote(found?.truncated)}
         {listing && listing.more > 0 && !query && <div className="fb-empty">… and {listing.more} more; type to filter</div>}
       </div>
+      {ctx && <EntryMenu entry={ctx.entry} root={start} x={ctx.x} y={ctx.y} onClose={() => setCtx(undefined)} />}
     </div>
   );
 }

@@ -180,7 +180,8 @@ function PaneView({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
             </div>
           )}
         </span>
-        <button title="Close pane" onClick={() => confirm(`Close pane ${paneId}${p?.agent ? ` (${p.agent} is running in it)` : ""}?`) && api("POST", "/pane/close", { pane: paneId }).catch(failed("That did not work"))}>
+        {/* closes right away, without an "are you sure" (users asked for it gone) */}
+        <button title={p?.agent ? `Close pane (stops ${p.agent})` : "Close pane"} onClick={() => api("POST", "/pane/close", { pane: paneId }).catch(failed("That did not work"))}>
           ✕
         </button>
       </div>

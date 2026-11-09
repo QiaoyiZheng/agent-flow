@@ -346,6 +346,10 @@ export interface Need {
   statusAt?: string;
 }
 
+/** Desktop notifications: what comes within NOTE_GATHER is one notification; each closes by itself after NOTE_LIFE. */
+const NOTE_GATHER = 1500;
+const NOTE_LIFE = 60_000;
+
 function NeedsYou({
   herdr,
   teams,
@@ -447,14 +451,41 @@ function NeedsYou({
   const rank = (n: Need) => (n.kind === "finished" ? 1 : 0);
   needs.sort((a, b) => rank(a) - rank(b) || b.at.localeCompare(a.at));
 
-  // reminders: a desktop notification for each new item while you are elsewhere, and the count in the tab title
+  // reminders: a desktop notification for what is new while you are elsewhere, and the count in the tab title.
+  // What comes within NOTE_GATHER makes one notification that names each item: macOS shows notifications that come
+  // together as one stack, so two agents finishing at once looked like one. A notification closes when all its items
+  // are dealt with, or after NOTE_LIFE (Notification Center keeps them otherwise; Needs you and the title still count).
   const [notify, setNotify] = useState(() => (typeof Notification !== "undefined" && Notification.permission === "granted" ? localStorage.getItem("af-notify") !== "0" : false));
   const notified = useRef<Set<string> | undefined>(undefined);
+  const opened = useRef(Date.now());
+  const gathering = useRef<{ items: Need[]; timer?: ReturnType<typeof setTimeout> }>({ items: [] });
+  const shown = useRef<{ note: Notification; keys: string[] }[]>([]);
+  const live = useRef(new Set<string>());
   const needKey = (n: Need) => `${n.key}@${n.statusAt ?? n.at}`;
+  const post = () => {
+    const g = gathering.current;
+    const items = g.items.filter((n) => live.current.has(needKey(n)));
+    gathering.current = { items: [] };
+    if (!items.length || document.hasFocus() || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const who = (n: Need) => (n.kind === "finished" ? n.label.replace(/^finished · /, "") : n.label);
+    const one = items.length === 1 ? items[0]! : undefined;
+    const title = one ? (one.kind === "finished" ? `${who(one)} finished` : one.label) : items.every((n) => n.kind === "finished") ? `${items.length} agents finished` : `${items.length} things need you`;
+    const body = one ? [one.where, one.text].filter(Boolean).join(" — ").slice(0, 180) : items.map((n) => [who(n), n.where, n.text].filter(Boolean).join(" · ").slice(0, 90)).join("\n");
+    try {
+      const keys = items.map(needKey);
+      const note = new Notification(title, { body, tag: keys.join(","), silent: false });
+      note.onclick = () => (window.focus(), onNeed(items[0]!), note.close());
+      shown.current.push({ note, keys });
+      setTimeout(() => note.close(), NOTE_LIFE);
+    } catch {}
+  };
   useEffect(() => {
     document.title = needs.length ? `(${needs.length}) agent-flow` : "agent-flow";
     onCount?.(needs.length);
     const keys = needs.map(needKey);
+    live.current = new Set(keys);
+    // dealt with (opened, marked seen, answered): its notification goes too
+    shown.current = shown.current.filter((s) => s.keys.some((k) => live.current.has(k)) || (s.note.close(), false));
     if (!notified.current) {
       notified.current = new Set(keys); // what is waiting when the page opens is not news
       return;
@@ -463,11 +494,12 @@ function NeedsYou({
       const k = needKey(n);
       if (notified.current.has(k)) continue;
       notified.current.add(k);
-      if (!notify || typeof Notification === "undefined" || Notification.permission !== "granted" || document.hasFocus()) continue;
-      try {
-        const note = new Notification(n.kind === "finished" ? `${n.label.replace(/^finished · /, "")} finished` : n.label, { body: [n.where, n.text].filter(Boolean).join(" — ").slice(0, 180), tag: k, silent: false });
-        note.onclick = () => (window.focus(), onNeed(n), note.close());
-      } catch {}
+      // finished before this page opened: not news either (machines connect, and the list fills, after it opens)
+      if (n.kind === "finished" && Date.parse(n.at) < opened.current - 5000) continue;
+      if (!notify) continue;
+      const g = gathering.current;
+      g.items.push(n);
+      g.timer ??= setTimeout(post, NOTE_GATHER);
     }
   }, [needs.map(needKey).join(",")]);
   const bell = () => {

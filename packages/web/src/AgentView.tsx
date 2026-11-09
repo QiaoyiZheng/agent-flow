@@ -76,6 +76,45 @@ interface Outgoing {
 const outbox = paneStore<Outgoing[]>(() => []);
 let outSeq = 0;
 
+/** What the user sent from the message box, per pane, for ↑/↓ (slash commands too: the conversation has no user entry for those). */
+const sentLog = paneStore<{ text: string; at: number }[]>(
+  (pane) => {
+    try {
+      return JSON.parse(localStorage.getItem(`af-sent:${pane}`) ?? "[]");
+    } catch {
+      return [];
+    }
+  },
+  (pane, l) => localStorage.setItem(`af-sent:${pane}`, JSON.stringify(l.slice(-100))),
+);
+
+/**
+ * The user's earlier messages to this agent, oldest first, each once (its latest time): those in its conversation
+ * (typed in its terminal too, and its "!" shell commands) and those sent from the message box.
+ */
+function messageHistory(entries: ChatEntry[], sent: { text: string; at: number }[]) {
+  const all: { text: string; at: number }[] = [];
+  let last = 0; // an entry without a time keeps its place after the one before it
+  for (const e of entries) {
+    const b = e.block;
+    const text = b.kind === "user" ? (b.command ? `${b.command} ${b.text}` : b.text.replace(ATTACH_HEAD, "")) : b.kind === "tool" && b.name === "!" ? `!${b.input ?? b.summary}` : undefined;
+    const t = entryTime(e.at);
+    if (!Number.isNaN(t)) last = t;
+    if (text?.trim()) all.push({ text: text.trim(), at: last });
+  }
+  all.push(...sent);
+  all.sort((a, b) => a.at - b.at);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (let i = all.length - 1; i >= 0; i--) {
+    const k = all[i]!.text.replace(/\s+/g, " ");
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.unshift(all[i]!.text);
+  }
+  return out;
+}
+
 /** auto: now if the agent is free, else into agent-flow's queue for the end of its turn. steer: now, into the turn. */
 function sendOutgoing(pane: string, o: Outgoing, mode: "auto" | "steer" = o.steer ? "steer" : "auto") {
   outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sending", error: undefined } : x)));
@@ -565,7 +604,7 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
           </button>
         )}
       </div>
-      <Composer paneId={paneId} agent={agent} working={status === "working"} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => setShowTerm(true)} />
+      <Composer paneId={paneId} agent={agent} working={status === "working"} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => setShowTerm(true)} history={() => messageHistory(log.current.entries, sentLog.get(paneId))} />
     </div>
   );
 }
@@ -1025,6 +1064,7 @@ function Composer({
   disabledHint,
   onSlash,
   working,
+  history,
 }: {
   paneId: string;
   agent: string;
@@ -1033,10 +1073,31 @@ function Composer({
   disabledHint?: string;
   onSlash: () => void;
   working: boolean;
+  /** The user's earlier messages to this agent, oldest first (↑/↓ go through them). */
+  history: () => string[];
 }) {
   const draft = drafts.use(paneId);
   const { text, files } = draft;
+  // ↑/↓ through earlier messages, as in a shell: at = how far back (0 = the latest); what was typed comes back after
+  const nav = useRef<{ list: string[]; at: number; typed: string }>(undefined);
+  useEffect(() => void (nav.current = undefined), [paneId]);
   const setText = (t: string) => drafts.update(paneId, (d) => ({ ...d, text: t }));
+  const recall = (dir: -1 | 1) => {
+    const el = ta.current;
+    if (!el || el.selectionStart !== el.selectionEnd) return false;
+    // only from the first line (↑) or the last line (↓): elsewhere the arrows move in the text
+    if (dir === -1 ? el.selectionStart > 0 && text.lastIndexOf("\n", el.selectionStart - 1) !== -1 : text.indexOf("\n", el.selectionStart) !== -1) return false;
+    const n = nav.current ?? { list: history(), at: -1, typed: text };
+    const at = n.at - dir;
+    if (at >= n.list.length || (at < 0 && !nav.current)) return false;
+    nav.current = at < 0 ? undefined : { ...n, at };
+    const t = at < 0 ? n.typed : n.list[n.list.length - 1 - at]!;
+    setText(t);
+    // ↑ leaves the caret at the start, so the next ↑ goes further back; ↓ at the end
+    const pos = dir === -1 ? 0 : t.length;
+    requestAnimationFrame(() => ta.current?.setSelectionRange(pos, pos));
+    return true;
+  };
   const setFiles = (fn: (fs: PendingFile[]) => PendingFile[]) => drafts.update(paneId, (d) => ({ ...d, files: fn(d.files) }));
   const [drag, setDrag] = useState(false);
   const ta = useRef<HTMLTextAreaElement>(null);
@@ -1086,6 +1147,8 @@ function Composer({
     const body = text.trim();
     const o: Outgoing = { id: ++outSeq, body, files: ready.map((f) => f.path!), prompt: body, at: Date.now(), state: "sending", steer: steer && working };
     outbox.update(paneId, (l) => [...l, o]);
+    if (body) sentLog.update(paneId, (l) => [...l, { text: body, at: Date.now() }].slice(-100));
+    nav.current = undefined;
     drafts.update(paneId, () => ({ text: "", files: [] }));
     sendOutgoing(paneId, o);
     if (body.startsWith("/")) onSlash();
@@ -1146,7 +1209,7 @@ function Composer({
                 ? `${agent} is working — Enter queues for after this turn, ⌘/Ctrl+Enter steers it now`
                 : `Message ${agent} — Enter to send, Shift+Enter for a new line, paste or drop images and files`
           }
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => ((nav.current = undefined), setText(e.target.value))}
           onPaste={(e) => {
             const fl = e.clipboardData.files;
             if (fl.length) {
@@ -1155,6 +1218,10 @@ function Composer({
             }
           }}
           onKeyDown={(e) => {
+            // earlier messages: first while going through them, else when no "/" list is open
+            const arrow = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+            const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing && e.keyCode !== 229;
+            if (arrow && plain && (nav.current || !(cmd.open && cmd.items.length)) && recall(arrow)) return e.preventDefault();
             if (cmd.open && cmd.items.length) {
               if (e.key === "ArrowDown") return (e.preventDefault(), cmd.move(1));
               if (e.key === "ArrowUp") return (e.preventDefault(), cmd.move(-1));

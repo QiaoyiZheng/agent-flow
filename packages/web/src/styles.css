@@ -800,6 +800,10 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .folder-view { padding: 6px 12px 12px; display: flex; flex-direction: column; }
 .folder-view .fb { flex: 1; min-height: 0; }
 .folder-view .fb-list { flex: 1; }
+/* right-click on a file: copy its path */
+.menu.fb-ctx { position: fixed; right: auto; z-index: 120; width: 300px; min-width: 0; }
+.menu.fb-ctx .item { display: flex; flex-direction: column; gap: 1px; }
+.fb-ctx-val { font: 10.5px var(--mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; }
 .viewer .bar .btn.on { background: var(--bg-3); color: var(--text); }
 .viewer .bar .reloaded { color: var(--s-accepted); font-size: 11px; animation: pulse 1.5s ease-in-out; }
 .doc-wrap { display: flex; align-items: flex-start; gap: 8px; }
