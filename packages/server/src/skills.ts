@@ -68,21 +68,38 @@ until it passes) or a team that keeps taking requests.
 ## Other commands
 
     ${af} tickets           ${af} ticket show <T>         ${af} read <name>        ${af} team stop <team>
+    ${af} open <path|url>   show a file, folder or web page in a pane next to yours (when the user asks to see it)
 `;
 }
 
 /**
- * The "deliver-document" skill: when an agent has finished a document for the user (a report, a write-up, slides),
- * it hands it over with af deliver. The user gets buttons under the agent's reply to open it in Obsidian / VS Code / its
- * app with one click (or it opens by itself, per the user's settings).
+ * The "deliver-document" skill: when the user asks to see a file, folder or page, the agent shows it with af open (a
+ * viewer pane next to its own). When an agent has finished a document for the user (a report, a write-up, slides), it
+ * hands it over with af deliver. The user gets buttons under the agent's reply to open it in Obsidian / VS Code / its
+ * app with one click (or it opens by itself, per the user's settings). The description names the user's requests
+ * ("打开预览") because agents pick a skill by its description: without them they built their own previews.
  */
 export function deliverSkillText(af: string) {
   return `---
 name: deliver-document
-description: Hand a finished document to the user so they can open it in Obsidian, VS Code or its own app with one click. Use right after you finish writing (or substantially rewriting) a file meant for the user to read — a report, analysis, write-up, summary, plan, paper or paper section, notes they asked for, slides (.pptx), a Word/Excel/PDF file, an HTML page, a figure. Not for code, tests, configs, or your own scratch, memory or log files, and not for every small edit.
+description: Show the user a document, file, folder or web page in agent-flow. Use when the user asks to open, show or preview one (e.g. "打开预览", "预览一下", "在右边/右侧 pane 打开", "给我看看那个文件", "用 Obsidian/VS Code 打开", "open it next to me", "show me the PDF"), and right after you finish writing (or substantially rewriting) a file meant for the user to read — a report, analysis, write-up, summary, plan, paper or paper section, notes they asked for, slides (.pptx), a Word/Excel/PDF file, an HTML page, a figure. Not for code, tests, configs, or your own scratch, memory or log files, and not for every small edit.
 ---
 
-# Hand over a finished document
+# When the user asks to see something: af open
+
+When the user asks to open, show or preview a file, folder or web page, run (one shell command; use the full path):
+
+    ${af} open <path|url>
+
+- It opens a viewer pane to the right of yours in agent-flow. It shows Markdown (formatted), images, PDFs, Office
+  files, other text and code, folders, and web pages, and reloads when the file changes.
+- \`--down\` puts it below yours, \`--tab\` in a new tab, \`--in <viewer pane>\` replaces what an open viewer shows.
+- When the user names an app ("用 Obsidian 打开", "open it in VS Code"):
+  \`${af} open <path> --app obsidian|vscode|default|finder\`.
+- af open is the preview. Do not make one yourself: no pane split with less/glow/bat/cat, no \`open\`, no browser.
+- If it fails, tell the user the error and stop. Do not fall back to another way of opening the file.
+
+# When you finish a document: af deliver
 
 When a document for the user is done, run (one shell command; use the full path):
 
@@ -92,7 +109,7 @@ When a document for the user is done, run (one shell command; use the full path)
 - \`--note "<one line>"\` for something the user should know before opening it (e.g. "figures are placeholders").
 - It puts buttons under your reply in the agent-flow UI to open it in Obsidian (Markdown), VS Code (text, code,
   LaTeX) or its own app (PowerPoint, Word, PDF…), or to preview it next to you. Nothing opens by itself unless the user
-  chose that. You do not open apps yourself.
+  chose that. Do not open it as well, unless the user asks to see it now: then use af open (above).
 - Hand over a document once when it is ready, and again only after a revision the user should look at.
 - Then, in your reply, say what the document is and where it is (its path).
 
