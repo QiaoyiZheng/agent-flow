@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Deliveries } from "../src/deliveries.ts";
-import { fileKind, openArgv } from "../src/open-with.ts";
+import { deadRemotes, fileKind, openArgv } from "../src/open-with.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -38,6 +38,16 @@ describe("opening files in apps", () => {
     expect(() => openArgv("obsidian", "/home/zq/proj/report.md", remote)).toThrow(/only VS Code/);
     expect(() => openArgv("default", "/home/zq/deck.pptx", remote)).toThrow(/only VS Code/);
     expect(() => openArgv("vscode", "relative.md", remote)).toThrow(/absolute/);
+    // VS Code's window for that machine lost its connection: a new window
+    if (argv.length > 2) expect(openArgv("vscode", "~/proj/report.md", remote, [], true)).toEqual([argv[0]!, "--new-window", ...argv.slice(1)]);
+  });
+
+  test("the machines whose VS Code window lost its connection, from code --status", async () => {
+    // code --status with a window whose connection died (VS Code 1.145)
+    const status = ["window [3] (O8-01-xdelex-delref.md — scratch [SSH: joy])", "", "Connection to 'SSH: joy' could not be established  Canceled", "", "Connection to 'SSH: joy' could not be established  Canceled", "Remote: SSH: tea2", "CPU %\tMem MB\t   PID\tProcess"].join("\n");
+    expect([...(await deadRemotes("code", async () => status))]).toEqual(["joy"]);
+    expect([...(await deadRemotes("code", async () => "Warning: The --status argument can only be used if Code is already running."))]).toEqual([]);
+    expect([...(await deadRemotes("code", async () => Promise.reject(new Error("no code"))))]).toEqual([]);
   });
 });
 

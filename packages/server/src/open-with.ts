@@ -2,7 +2,8 @@
 // machine open only in VS Code, over its Remote-SSH extension (the original file: edits go to the remote machine).
 //
 //   VS Code    local: open -a "Visual Studio Code" <path>
-//              remote: its bundled CLI, code --file-uri vscode-remote://ssh-remote+<host><path>
+//              remote: its bundled CLI, code --file-uri vscode-remote://ssh-remote+<host><path>; in a new window
+//              when VS Code's window for that host lost its connection (code --status says so)
 //   Obsidian   a file inside one of its vaults: obsidian://open?path=<path> (opens it in that vault);
 //              any other file: open -a Obsidian <path> (Obsidian registers itself for Markdown)
 //   default    open <path> (PowerPoint for .pptx, Preview for .pdf, …)
@@ -78,10 +79,32 @@ export interface OpenResult {
   path: string;
   /** The command run, for the log. */
   how: string;
+  /** Something the user should know (shown as a note). */
+  note?: string;
+}
+
+/**
+ * The SSH hosts whose VS Code window lost its connection. VS Code gives a file on a host to its window for that host,
+ * and a window whose connection died (the Mac slept; after 10 tries it stops) drops the file without a word. code
+ * --status lists each such window as "Connection to 'SSH: <host>' could not be established". Empty when VS Code is not
+ * running, or does not answer in time.
+ */
+export async function deadRemotes(cli: string, status?: () => Promise<string>): Promise<Set<string>> {
+  const read =
+    status ??
+    (async () => {
+      const p = Bun.spawn([cli, "--status"], { stdout: "pipe", stderr: "ignore" });
+      const timer = setTimeout(() => p.kill(), 8000);
+      const out = await new Response(p.stdout).text();
+      clearTimeout(timer);
+      return out;
+    });
+  const out = await read().catch(() => "");
+  return new Set([...out.matchAll(/Connection to 'SSH: ([^']+)' could not be established/g)].map((m) => m[1]!));
 }
 
 /** How an app is started: the argv. Exposed for tests. */
-export function openArgv(app: OpenApp, path: string, remote?: Remote, vaults = obsidianVaults()): string[] {
+export function openArgv(app: OpenApp, path: string, remote?: Remote, vaults = obsidianVaults(), newWindow = false): string[] {
   const mac = process.platform === "darwin";
   if (remote) {
     if (app !== "vscode") throw new AfError("remote_file", `${path} is on ${remote.label}: only VS Code can open files on another machine (over Remote-SSH)`);
@@ -89,7 +112,7 @@ export function openArgv(app: OpenApp, path: string, remote?: Remote, vaults = o
     if (!abs.startsWith("/")) throw new AfError("bad_path", `not an absolute path: ${path}`);
     const uri = `vscode-remote://ssh-remote+${encodeURIComponent(remote.target)}${encodeURI(abs)}`;
     const cli = codeCli();
-    if (cli) return [cli, "--file-uri", uri];
+    if (cli) return [cli, ...(newWindow ? ["--new-window"] : []), "--file-uri", uri];
     return [mac ? "open" : "xdg-open", `vscode://vscode-remote/ssh-remote+${encodeURIComponent(remote.target)}${encodeURI(abs)}`];
   }
   switch (app) {
@@ -116,7 +139,11 @@ export async function openWith(app: string, path: string, remote?: Remote): Prom
   const have = installedApps();
   if (a === "vscode" && !have.vscode) throw new AfError("no_app", "VS Code is not installed");
   if (a === "obsidian" && !have.obsidian) throw new AfError("no_app", "Obsidian is not installed");
-  const argv = openArgv(a, path, remote);
+  // VS Code's window for that machine lost its connection: it would drop the file, so a new window, which connects
+  const cli = remote && codeCli();
+  const dead = cli && (await deadRemotes(cli)).has(remote!.target);
+  const argv = openArgv(a, path, remote, undefined, !!dead);
+  const note = dead ? `VS Code's window for ${remote!.label} had lost its connection, so ${path.split("/").at(-1)} opens in a new window. Close the old one, or reload it (Developer: Reload Window).` : undefined;
   const p = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" });
   // the open command returns at once; VS Code's CLI may wait for the window: give it a few seconds
   const code = await Promise.race([p.exited, Bun.sleep(8000).then(() => 0)]);
@@ -124,5 +151,5 @@ export async function openWith(app: string, path: string, remote?: Remote): Prom
     const err = (await new Response(p.stderr).text()).trim();
     throw new AfError("open_failed", `could not open ${path}: ${err || `exit ${code}`}`);
   }
-  return { app: a, path, how: argv.join(" ") };
+  return { app: a, path, how: argv.join(" "), ...(note ? { note } : {}) };
 }

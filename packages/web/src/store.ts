@@ -201,5 +201,7 @@ export function appsFor(path: string, remote = false): OpenAppName[] {
 }
 
 export function openIn(app: OpenAppName, path: string, opts: { pane?: string; delivery?: string } = {}) {
-  return api("POST", "/open-with", { path, app, pane: opts.pane, delivery: opts.delivery, run: undefined }).catch(failed(`Could not open it in ${APP_LABEL[app]}`));
+  return api<{ note?: string }>("POST", "/open-with", { path, app, pane: opts.pane, delivery: opts.delivery, run: undefined })
+    .then((r) => void (r?.note && notify("warn", r.note)))
+    .catch(failed(`Could not open it in ${APP_LABEL[app]}`));
 }
