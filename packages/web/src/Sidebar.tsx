@@ -349,6 +349,8 @@ export interface Need {
 /** Desktop notifications: what comes within NOTE_GATHER is one notification; each closes by itself after NOTE_LIFE. */
 const NOTE_GATHER = 1500;
 const NOTE_LIFE = 60_000;
+/** A "finished" item leaves Needs you by itself this long after the agent finished. */
+const FINISHED_LIFE = 20 * 60_000;
 
 function NeedsYou({
   herdr,
@@ -370,6 +372,12 @@ function NeedsYou({
   onFold?: () => void;
 }) {
   const [questions, setQuestions] = useState<Record<string, string>>({});
+  // the clock for finished items that expire (once a minute is close enough)
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
   const { dispatchers } = useStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const online = (p: HPane) => {
@@ -442,6 +450,7 @@ function NeedsYou({
     // waiting on background work (a Monitor, a background command) is not finished
     if (!p.agent || p.agentStatus !== "done" || p.background || !p.statusAt || hidden.has(p.workspaceId) || !online(p)) continue;
     if ((seen[p.id] ?? "") >= p.statusAt) continue;
+    if (now - Date.parse(p.statusAt) > FINISHED_LIFE) continue; // finished long ago: it goes by itself
     if (managed.has(p.id)) continue; // members and routers report to whoever manages them
     // dispatched by a session (a member of a team, or a worker of a run from before teams, also when that team or
     // run is no longer loaded): the session that sent it deals with its result
