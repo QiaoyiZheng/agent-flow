@@ -117,8 +117,11 @@ export class FakeBackend implements TerminalBackend {
   async listAgents(): Promise<HerdrAgentInfo[]> {
     return [...this.panes.values()].filter((p) => p.agent).map((p) => ({ name: p.agent!.name, paneId: p.id, tabId: p.tabId, status: p.agent!.status }));
   }
+  /** Lets a test redraw the screen as text is typed in. */
+  onPrompt?: (name: string, text: string) => void;
   async prompt(name: string, text: string) {
     this.prompts.push({ name, text });
+    this.onPrompt?.(name, text);
   }
   keys: { target: string; keys: string[] }[] = [];
   /** Lets a test redraw the screen as keys are pressed. */

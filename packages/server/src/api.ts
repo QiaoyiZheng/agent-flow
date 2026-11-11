@@ -657,7 +657,7 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
           const remote = w.remoteOf(paneId);
           if (remote && /\b255\b|connection|broken pipe|closed by remote/i.test(reason)) return void remote.verify?.();
           opts.notices.add("warn", `terminal:${paneId}`, `The terminal stream for ${paneId} stopped`, reason);
-        });
+        }, (paneId) => w.noteTyped(paneId));
         ws.data.chat = new ChatBridge({
           fsFor: access.fsFor,
           send,

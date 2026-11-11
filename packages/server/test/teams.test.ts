@@ -91,6 +91,32 @@ async function setup(over: Partial<TeamsOptions> = {}, home = tmp("af-teams-home
 }
 
 describe("mode 1: a session hands out tasks", () => {
+  test("the notice waits while the user types to the session (text in its box, or keys in its web terminal)", async () => {
+    const { o, w, backend, call, step, turn, typed, replies, lead } = await setup();
+    const r = await call("/task", { callerPane: lead, kind: "claude", task: "count them", name: "counter" });
+    await step();
+    const m = o.get(r.body.team).members.counter!;
+    // the user has half a message in the session's box (claude's prompt line)
+    backend.screens.set(lead, "─".repeat(40) + "\n❯\u00a0我想问一下第三节的\n" + "─".repeat(40) + "\n");
+    replies.set(m.paneId!, { reply: "There are 4." });
+    await turn(herdrMemberName(r.body.team, "counter"));
+    await step();
+    expect(typed(lead)).toEqual([]); // nothing joined their text
+    expect(o.get(r.body.team).queue[0]).toMatchObject({ kind: "turn", state: "queued" });
+    // they sent it or cleared it: the box is empty, and the notice goes in
+    backend.screens.set(lead, "─".repeat(40) + "\n❯\u00a0\n" + "─".repeat(40) + "\n");
+    // but a key pressed in the web terminal just now (an input method's text is not in the box yet): still waits
+    w.noteTyped(lead);
+    await step();
+    expect(typed(lead)).toEqual([]);
+    (w as any).typedAt.set(lead, Date.now() - 10_000); // four seconds and more since
+    await step();
+    expect(typed(lead).at(-1)).toStartWith("[agent-flow] 1 new in your queue: T1 counter finished.");
+    // what the user sends themselves goes at once, whatever is in the box
+    backend.screens.set(lead, "─".repeat(40) + "\n❯\u00a0draft\n" + "─".repeat(40) + "\n");
+    expect((await call("/prompt", { pane: lead, text: "hello", mode: "auto" })).status).toBe(200);
+  });
+
   test("af task starts a plain session, types the task, and puts its final reply in the session's queue", async () => {
     const { o, backend, call, step, turn, typed, replies, lead } = await setup();
     const r = await call("/task", { callerPane: lead, kind: "codex", task: "Count the exported functions in calc.js", name: "counter" });

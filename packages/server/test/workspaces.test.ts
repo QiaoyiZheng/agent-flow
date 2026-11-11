@@ -690,6 +690,26 @@ describe("composer: prompt with attachments, keys", () => {
   });
 });
 
+describe("composer: a message queued for the end of the turn", () => {
+  test("waits while the user types to the agent in its terminal, and goes out once the box is empty", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("a1", "claude", ws.paneId, []);
+    backend.set("a1", "working");
+    await w.refresh();
+    expect("queued" in (await w.send(ws.paneId, "run the tests next", [], "auto"))).toBe(true);
+    const box = (text: string) => backend.screens.set(ws.paneId, `${"─".repeat(40)}\n❯\u00a0${text}\n${"─".repeat(40)}\n`);
+    box("wait, first look at"); // the user types in its terminal meanwhile
+    backend.set("a1", "idle");
+    await w.refresh();
+    await Bun.sleep(20);
+    expect(backend.prompts).toEqual([]);
+    box("");
+    await w.refresh();
+    await Bun.sleep(20);
+    expect(backend.prompts.at(-1)).toEqual({ name: ws.paneId, text: "run the tests next" });
+  });
+});
+
 describe("gemini: a prompt left unsent in its box", () => {
   test("when the box still holds the text after typing it, Enter is pressed once more", async () => {
     const { backend, w, ws } = await setup();
@@ -697,12 +717,14 @@ describe("gemini: a prompt left unsent in its box", () => {
     backend.set("g1", "idle");
     await w.refresh();
     const band = (t: string) => [`${"▄".repeat(60)}`, ` > ${t}`, `${"▀".repeat(60)}`, " workspace (/directory)        sandbox", " /tmp/x                        no sandbox"].join("\n");
-    // gemini kept the pasted text in its box
-    backend.screens.set(ws.paneId, band("Reply with just the word pong."));
+    // the box is empty when agent-flow types; gemini keeps the pasted text in it
+    backend.screens.set(ws.paneId, band("  Type your message or @path/to/file"));
+    backend.onPrompt = (_, text) => backend.screens.set(ws.paneId, band(text));
     backend.keys = [];
     await w.prompt(ws.paneId, "Reply with just the word pong.");
     expect(backend.keys.map((k) => k.keys.join(" "))).toEqual(["enter"]);
     // sent normally: the box is empty, nothing more is pressed
+    backend.onPrompt = undefined;
     backend.screens.set(ws.paneId, band("  Type your message or @path/to/file"));
     backend.keys = [];
     await w.prompt(ws.paneId, "Reply with just the word pong.");

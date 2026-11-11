@@ -40,6 +40,8 @@ export interface WorkspacesOptions {
   steerPolls?: number;
   /** How long a gemini prompt is watched for staying unsent in its box (tests make it short). */
   submitCheckMs?: number;
+  /** How long after a key pressed in a pane's web terminal agent-flow does not type into it (default 4 s). */
+  typingQuietMs?: number;
   /** How often remote machines are polled (local: every refresh). */
   remotePollMs?: number;
 }
@@ -124,6 +126,8 @@ export class Workspaces {
   private draining = new Set<string>();
   /** When agent-flow last typed a prompt into each pane. Herdr takes a few seconds to see the agent start. */
   private promptedAt = new Map<string, number>();
+  /** When the user last pressed a key in each pane's web terminal. */
+  private typedAt = new Map<string, number>();
   /** Sessions by pane: given at launch (claude --session-id) or reported by claude's SessionStart hook. */
   sessions: Record<string, { id: string; path?: string }> = {};
   /**
@@ -749,12 +753,35 @@ export class Workspaces {
     await this.changed(r.m.meta.id);
   }
 
-  async prompt(pane: string, text: string) {
+  /** The user pressed a key in this pane's web terminal. */
+  noteTyped(pane: string) {
+    this.typedAt.set(pane, Date.now());
+  }
+
+  /**
+   * Whether the user is typing to this agent in its terminal: text in its input box (typed in the web terminal or in
+   * Herdr), or a key pressed in the web terminal in the last few seconds (text being composed with an input method
+   * is not in the box yet). Text agent-flow types now would join theirs and go out with it, half written.
+   */
+  async userTyping(pane: string) {
+    const at = this.typedAt.get(pane);
+    if (at && Date.now() - at < (this.opts.typingQuietMs ?? 4000)) return true;
+    const r = this.route(pane);
+    const box = inputText(this.pane(pane).agent, await r.backend.readScreen(r.raw, true).catch(() => ""));
+    return !!box;
+  }
+
+  /**
+   * Type a message into the agent and press Enter. byUser: the user sent it (from the message box): it goes now.
+   * Otherwise (agent-flow's own notices and messages, queued messages) not while the user types in the terminal.
+   */
+  async prompt(pane: string, text: string, byUser = false) {
     if (this.pane(pane).asleep) await this.wake(pane);
     const r = this.route(pane);
     // typed text + Enter would answer a question, approval or notice on screen (Herdr does not always see them)
     const st = await this.screenState(pane);
     if (st.menu || st.overlay) throw new AfError("agent_asking", "the agent is showing a question or a notice; answer it first", 409);
+    if (!byUser && (await this.userTyping(pane))) throw new AfError("user_typing", "the user is typing to this agent in its terminal; try again when they have sent it", 409);
     await r.backend.prompt(r.raw, text);
     this.promptedAt.set(pane, Date.now());
     if (this.pane(pane).agent === "gemini") await this.submitIfLeft(pane, text);
@@ -793,7 +820,7 @@ export class Workspaces {
    */
   async steerNow(pane: string, text: string) {
     const p = this.pane(pane);
-    await this.prompt(pane, text);
+    await this.prompt(pane, text, true);
     const how = STEER_NOW[p.agent ?? ""];
     if (!how) return { sentNow: true };
     const r = this.route(pane);
@@ -850,7 +877,7 @@ export class Workspaces {
       if (p.asleep) void this.drainQueues();
       return { queued: item, ...(p.asleep ? { waking: true } : {}) };
     }
-    await this.prompt(pane, text);
+    await this.prompt(pane, text, true);
     return { sent: text };
   }
 
@@ -863,7 +890,7 @@ export class Workspaces {
     const text = composePrompt(item.body, item.files);
     const p = this.pane(pane);
     // throws (and keeps it queued) if the agent is asking something
-    const r = this.busy(p) ? await this.steerNow(pane, text) : (await this.prompt(pane, text), { sentNow: true });
+    const r = this.busy(p) ? await this.steerNow(pane, text) : (await this.prompt(pane, text, true), { sentNow: true });
     list.splice(i, 1);
     this.saveQueue();
     return { sent: text, ...r };
@@ -921,9 +948,9 @@ export class Workspaces {
         if (this.queue[pane]?.[0]?.id === item.id) this.queue[pane]!.shift();
         this.saveQueue();
       } catch (e) {
-        // asking something, or unreachable: try again later
-        this.queueSentAt.set(pane, Date.now());
-        if ((e as AfError).code !== "agent_asking") this.opts.notify?.("warn", `queue:${pane}`, `A queued message for ${pane} could not be sent yet`, (e as Error).message);
+        // asking something, or unreachable: try again later (the user typing to it: as soon as they stop)
+        if ((e as AfError).code !== "user_typing") this.queueSentAt.set(pane, Date.now());
+        if (!["agent_asking", "user_typing"].includes((e as AfError).code)) this.opts.notify?.("warn", `queue:${pane}`, `A queued message for ${pane} could not be sent yet`, (e as Error).message);
       } finally {
         this.draining.delete(pane);
       }

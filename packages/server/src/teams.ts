@@ -1460,7 +1460,8 @@ export class Teams {
       if (m) t.typing.set(m.name, this.clock());
       return true;
     } catch (e) {
-      if ((e as AfError).code === "agent_asking") return false;
+      // a question on its screen, or the user typing to it: typed later (the caller tries again)
+      if ((e as AfError).code === "agent_asking" || (e as AfError).code === "user_typing") return false;
       if (rethrow) throw e;
       console.error(`team ${t.id}: could not type into ${pane}:`, (e as Error).message);
       return false;

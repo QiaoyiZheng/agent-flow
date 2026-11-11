@@ -4,7 +4,7 @@
 import type { ClientPush, ServerPush } from "@af/core";
 type ArgvFor = (paneId: string, mode: "control" | "observe", cols: number, rows: number) => string[];
 
-type Session = { proc: ReturnType<typeof Bun.spawn>; stdin: import("bun").FileSink };
+type Session = { proc: ReturnType<typeof Bun.spawn>; stdin: import("bun").FileSink; paneId: string };
 
 export class TerminalBridge {
   private sessions = new Map<string, Session>();
@@ -14,14 +14,19 @@ export class TerminalBridge {
     private send: (msg: ServerPush) => void,
     /** A stream that ended on its own with an error message (not closed by the UI). */
     private onError: (paneId: string, reason: string) => void = () => {},
+    /** The user pressed keys in this pane's terminal (agent-flow then waits before typing into it). */
+    private onInput: (paneId: string) => void = () => {},
   ) {}
 
   handle(msg: ClientPush) {
     switch (msg.type) {
       case "term.open":
         return this.open(msg.id, msg.paneId, msg.mode, msg.cols, msg.rows);
-      case "term.input":
+      case "term.input": {
+        const s = this.sessions.get(msg.id);
+        if (s) this.onInput(s.paneId);
         return this.write(msg.id, { type: "terminal.input", text: msg.text });
+      }
       case "term.resize":
         return this.write(msg.id, { type: "terminal.resize", cols: msg.cols, rows: msg.rows });
       case "term.scroll":
@@ -41,7 +46,7 @@ export class TerminalBridge {
       return;
     }
     const proc = Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-    this.sessions.set(id, { proc, stdin: proc.stdin as import("bun").FileSink });
+    this.sessions.set(id, { proc, stdin: proc.stdin as import("bun").FileSink, paneId });
     const stderr = new Response(proc.stderr as ReadableStream<Uint8Array>).text();
     void (async () => {
       const dec = new TextDecoder();
