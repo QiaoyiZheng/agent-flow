@@ -115,6 +115,65 @@ function messageHistory(entries: ChatEntry[], sent: { text: string; at: number }
   return out;
 }
 
+/**
+ * Going through earlier messages with ↑/↓, per pane: list (oldest first), at (how far back: 0 = the latest), and what
+ * was in the box before (it comes back with ↓). Kept when the pane is left, and over a reload, so the draft is not lost.
+ */
+interface HistoryNav {
+  list: string[];
+  at: number;
+  typed: string;
+}
+const navs = new Map<string, HistoryNav>();
+const shownOf = (n: HistoryNav) => n.list[n.list.length - 1 - n.at] ?? "";
+function setNav(pane: string, n: HistoryNav | undefined) {
+  if (n) {
+    navs.set(pane, n);
+    localStorage.setItem(`af-hist:${pane}`, JSON.stringify({ typed: n.typed, shown: shownOf(n) }));
+  } else {
+    navs.delete(pane);
+    localStorage.removeItem(`af-hist:${pane}`);
+  }
+}
+/** The pane's history browsing, if the box still shows the message it went to (else it is over). */
+function navOf(pane: string, text: string, history: () => string[]): HistoryNav | undefined {
+  let n = navs.get(pane);
+  if (!n) {
+    // after a reload: the list again, at the message the box shows
+    try {
+      const saved = JSON.parse(localStorage.getItem(`af-hist:${pane}`) ?? "null") as { typed: string; shown: string } | null;
+      if (saved) {
+        const list = history();
+        const i = list.lastIndexOf(saved.shown);
+        if (i >= 0) n = { list, at: list.length - 1 - i, typed: saved.typed };
+      }
+    } catch {}
+  }
+  if (n && shownOf(n) !== text) n = undefined; // the box was changed another way (edited, a message put back into it)
+  if (!n) setNav(pane, undefined);
+  else navs.set(pane, n);
+  return n;
+}
+
+/** The top of the row the caret at `pos` is on, in a textarea (measured on a hidden copy of its text, wrapped alike). */
+function caretRowTop(el: HTMLTextAreaElement, pos: number) {
+  const cs = getComputedStyle(el);
+  const copy = document.createElement("div");
+  const st = copy.style;
+  for (const k of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontVariant", "letterSpacing", "wordSpacing", "lineHeight", "textIndent", "textTransform", "tabSize", "wordBreak"] as const) st[k] = cs[k];
+  const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+  Object.assign(st, { position: "absolute", visibility: "hidden", top: "0", left: "-10000px", width: `${el.clientWidth - pad}px`, whiteSpace: "pre-wrap", overflowWrap: "break-word", padding: "0", border: "0", boxSizing: "content-box" });
+  copy.textContent = el.value.slice(0, pos);
+  // the rest of the text after it: a caret where a line wraps is on the row its next character is on
+  const mark = document.createElement("span");
+  mark.textContent = el.value.slice(pos) || ".";
+  copy.append(mark);
+  document.body.append(copy);
+  const top = mark.offsetTop;
+  copy.remove();
+  return top;
+}
+
 /** auto: now if the agent is free, else into agent-flow's queue for the end of its turn. steer: now, into the turn. */
 function sendOutgoing(pane: string, o: Outgoing, mode: "auto" | "steer" = o.steer ? "steer" : "auto") {
   outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sending", error: undefined } : x)));
@@ -1078,19 +1137,19 @@ function Composer({
 }) {
   const draft = drafts.use(paneId);
   const { text, files } = draft;
-  // ↑/↓ through earlier messages, as in a shell: at = how far back (0 = the latest); what was typed comes back after
-  const nav = useRef<{ list: string[]; at: number; typed: string }>(undefined);
-  useEffect(() => void (nav.current = undefined), [paneId]);
+  // ↑/↓ through earlier messages, as in a shell; what was in the box comes back after the newest (navOf)
   const setText = (t: string) => drafts.update(paneId, (d) => ({ ...d, text: t }));
   const recall = (dir: -1 | 1) => {
     const el = ta.current;
     if (!el || el.selectionStart !== el.selectionEnd) return false;
-    // only from the first line (↑) or the last line (↓): elsewhere the arrows move in the text
-    if (dir === -1 ? el.selectionStart > 0 && text.lastIndexOf("\n", el.selectionStart - 1) !== -1 : text.indexOf("\n", el.selectionStart) !== -1) return false;
-    const n = nav.current ?? { list: history(), at: -1, typed: text };
+    // only from the first row (↑) or the last row (↓) as shown, wrapped lines too: elsewhere the arrows move the caret
+    const row = caretRowTop(el, el.selectionStart);
+    if (dir === -1 ? row > caretRowTop(el, 0) : row < caretRowTop(el, text.length)) return false;
+    const was = navOf(paneId, text, history);
+    const n = was ?? { list: history(), at: -1, typed: text };
     const at = n.at - dir;
-    if (at >= n.list.length || (at < 0 && !nav.current)) return false;
-    nav.current = at < 0 ? undefined : { ...n, at };
+    if (at >= n.list.length || (at < 0 && !was)) return false;
+    setNav(paneId, at < 0 ? undefined : { ...n, at });
     const t = at < 0 ? n.typed : n.list[n.list.length - 1 - at]!;
     setText(t);
     // ↑ leaves the caret at the start, so the next ↑ goes further back; ↓ at the end
@@ -1148,7 +1207,7 @@ function Composer({
     const o: Outgoing = { id: ++outSeq, body, files: ready.map((f) => f.path!), prompt: body, at: Date.now(), state: "sending", steer: steer && working };
     outbox.update(paneId, (l) => [...l, o]);
     if (body) sentLog.update(paneId, (l) => [...l, { text: body, at: Date.now() }].slice(-100));
-    nav.current = undefined;
+    setNav(paneId, undefined);
     drafts.update(paneId, () => ({ text: "", files: [] }));
     sendOutgoing(paneId, o);
     if (body.startsWith("/")) onSlash();
@@ -1209,7 +1268,7 @@ function Composer({
                 ? `${agent} is working — Enter queues for after this turn, ⌘/Ctrl+Enter steers it now`
                 : `Message ${agent} — Enter to send, Shift+Enter for a new line, paste or drop images and files`
           }
-          onChange={(e) => ((nav.current = undefined), setText(e.target.value))}
+          onChange={(e) => (setNav(paneId, undefined), setText(e.target.value))}
           onPaste={(e) => {
             const fl = e.clipboardData.files;
             if (fl.length) {
@@ -1221,7 +1280,7 @@ function Composer({
             // earlier messages: first while going through them, else when no "/" list is open
             const arrow = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
             const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing && e.keyCode !== 229;
-            if (arrow && plain && (nav.current || !(cmd.open && cmd.items.length)) && recall(arrow)) return e.preventDefault();
+            if (arrow && plain && (navs.has(paneId) || !(cmd.open && cmd.items.length)) && recall(arrow)) return e.preventDefault();
             if (cmd.open && cmd.items.length) {
               if (e.key === "ArrowDown") return (e.preventDefault(), cmd.move(1));
               if (e.key === "ArrowUp") return (e.preventDefault(), cmd.move(-1));
