@@ -174,12 +174,18 @@ function caretRowTop(el: HTMLTextAreaElement, pos: number) {
   return top;
 }
 
+/**
+ * The command a message runs ("/model" in "/model sonnet"), or undefined: its first word starts with "/" and has no
+ * other "/" in it. A path ("/models/x/data.csv, what is in it?") is an ordinary message.
+ */
+const slashWord = (body: string) => body.trim().match(/^\/[^\s/]+(?=\s|$)/)?.[0];
+
 /** auto: now if the agent is free, else into agent-flow's queue for the end of its turn. steer: now, into the turn. */
 function sendOutgoing(pane: string, o: Outgoing, mode: "auto" | "steer" = o.steer ? "steer" : "auto") {
   outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sending", error: undefined } : x)));
   api<{ sent?: string; queued?: unknown }>("POST", "/prompt", { pane, text: o.body, attachments: o.files, mode })
     .then((r) =>
-      r.queued || o.body.startsWith("/")
+      r.queued || slashWord(o.body)
         ? outbox.update(pane, (list) => list.filter((x) => x.id !== o.id)) // the queue panel shows it; a command shows its own result
         : outbox.update(pane, (list) => list.map((x) => (x.id === o.id ? { ...x, state: "sent", prompt: r.sent ?? o.body, at: Date.now() } : x))),
     )
@@ -272,6 +278,8 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
   }, [version]);
   const [height, setHeight] = useState(0);
   const [showTerm, setShowTerm] = useState(false);
+  // opened because a command was sent (not with its button): the next ordinary message closes it again
+  const termByCommand = useRef(false);
   // stopped for being idle (the server's sleep.ts): its terminal is a shell now; opening it starts the agent again
   useEffect(() => {
     if (showTerm && asleep) api("POST", "/pane/wake", { pane: paneId }).catch(failed("Could not resume it"));
@@ -658,12 +666,12 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
           </button>
         )}
         {(!blocked || menu) && (
-          <button className={showTerm ? "on" : ""} onClick={() => setShowTerm((v) => !v)} title="Show the agent's live terminal (menus, approvals, output in progress)">
+          <button className={showTerm ? "on" : ""} onClick={() => ((termByCommand.current = false), setShowTerm((v) => !v))} title="Show the agent's live terminal (menus, approvals, output in progress)">
             {showTerm ? "hide terminal" : "terminal"}
           </button>
         )}
       </div>
-      <Composer paneId={paneId} agent={agent} working={status === "working"} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => setShowTerm(true)} history={() => messageHistory(log.current.entries, sentLog.get(paneId))} />
+      <Composer paneId={paneId} agent={agent} working={status === "working"} focused={focused && !blocked} disabled={blocked} disabledHint={menu ? "Choose an option above" : overlay ? "Answer the notice above first" : undefined} onSlash={() => ((termByCommand.current = true), setShowTerm(true))} onMessage={() => termByCommand.current && ((termByCommand.current = false), setShowTerm(false))} history={() => messageHistory(log.current.entries, sentLog.get(paneId))} />
     </div>
   );
 }
@@ -1122,6 +1130,7 @@ function Composer({
   disabled,
   disabledHint,
   onSlash,
+  onMessage,
   working,
   history,
 }: {
@@ -1130,7 +1139,10 @@ function Composer({
   focused: boolean;
   disabled: boolean;
   disabledHint?: string;
+  /** One of the agent's built-in commands was sent (its terminal shows what the command shows). */
   onSlash: () => void;
+  /** Anything else was sent. */
+  onMessage: () => void;
   working: boolean;
   /** The user's earlier messages to this agent, oldest first (↑/↓ go through them). */
   history: () => string[];
@@ -1210,7 +1222,10 @@ function Composer({
     setNav(paneId, undefined);
     drafts.update(paneId, () => ({ text: "", files: [] }));
     sendOutgoing(paneId, o);
-    if (body.startsWith("/")) onSlash();
+    // the agent's own commands may show a picker or panel there; skills, unknown commands and paths need no terminal
+    const word = slashWord(body);
+    if (word && cmd.isBuiltin(word)) onSlash();
+    else onMessage();
     ta.current?.focus();
   };
 
@@ -1659,6 +1674,8 @@ function useCommandMenu(pane: string, text: string, setText: (t: string) => void
       setText(`${c.insert} `);
     },
     dismiss: () => setDismissed(token),
+    /** One of the agent's built-in commands (not a skill). Not known yet (the list did not load): taken as one. */
+    isBuiltin: (word: string) => !all || all.some((c) => c.kind === "command" && c.insert.toLowerCase() === word.toLowerCase()),
   };
 }
 
