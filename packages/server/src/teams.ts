@@ -63,6 +63,7 @@ import type { PlaybookLibrary } from "./playbooks.ts";
 import { type Host, addWorktree, gitTop, hostOf, hostPathOf } from "./hosts.ts";
 import { codexProfileToml } from "./agents.ts";
 import { type Peek, TRANSIENT } from "./transcripts/peek.ts";
+import { agentMdText, contextChanges, contextFiles, sameContext } from "./context.ts";
 
 export interface TeamsOptions {
   /** Root for all state, normally ~/.agent-flow */
@@ -90,6 +91,8 @@ export interface TeamsOptions {
   stuckMs?: number;
   /** A notice the manager did not act on is typed again after this long. */
   renotifyMs?: number;
+  /** An edit of a team's project context (context.md) goes out once the file has not changed for this long. */
+  contextSettleMs?: number;
 }
 
 /** Who is calling, once known: a member or router of a team, a session by its pane (mode 1), or the user. */
@@ -133,6 +136,8 @@ export class Teams {
   private listeners = new Set<(team: string, ev: TeamEvent) => void>();
   private ticking = false;
   private timer?: ReturnType<typeof setInterval>;
+  /** team -> an edit of its project context not sent yet, and since when the file has had that text (ms). */
+  private contextEdits = new Map<string, { text: string; since: number }>();
   private pending = new Set<Promise<unknown>>();
   private snapshotTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private now: () => string;
@@ -353,7 +358,111 @@ export class Teams {
     const repo = !meta.machine || meta.machine === "local" ? git.repoRoot(meta.cwd) : undefined;
     this.teams.set(id, t);
     this.emit(t, { type: "team.created", at: this.now(), meta: { ...meta, id, dir: t.dir, createdAt: this.now(), repo: repo && git.hasCommits(repo) ? repo : undefined } });
+    const f = contextFiles(t.dir);
+    if (!existsSync(f.dynamic)) writeFileSync(f.dynamic, "");
+    this.writeAgentMd(t);
     return t;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // the project context: the dynamic part of the team's agent.md (context.ts)
+
+  /** The text agent.md has now (the last one sent out). */
+  private publishedContext(t: Team) {
+    const f = contextFiles(t.dir);
+    return existsSync(f.published) ? readFileSync(f.published, "utf8") : "";
+  }
+
+  /** agent.md as a session on `machine` reads it (the af command there). */
+  private agentMd(t: Team, machine?: string) {
+    return agentMdText(t.state.meta?.mode === "router" ? "router" : "direct", this.publishedContext(t), this.afPathOn(machine));
+  }
+
+  private writeAgentMd(t: Team) {
+    writeFileSync(contextFiles(t.dir).agentMd, this.agentMd(t));
+  }
+
+  /** agent.md where a session on `machine` reads it: here, or its copy in that machine's ~/.agent-flow. */
+  private agentMdFor(t: Team, machine?: string) {
+    const f = contextFiles(t.dir).agentMd;
+    return machine && machine !== "local" ? hostPathOf(this.host(machine), this.opts.home, f) : f;
+  }
+
+  /** The team whose project context a caller keeps: the one it hands out work to (made on first use), or routes. */
+  private contextTeam(who: Who): Team {
+    if (who.kind === "router") return this.active(who.team);
+    if (who.kind === "pane" || who.kind === "member") return this.directTeam(who.pane!);
+    throw new AfError("no_team", "run this inside the session that hands out the work (it is known by its Herdr pane)");
+  }
+
+  /** af context: where the project context is, and its text. */
+  context(who: Who) {
+    const t = this.contextTeam(who);
+    const f = contextFiles(t.dir);
+    if (!existsSync(f.dynamic)) writeFileSync(f.dynamic, this.publishedContext(t));
+    const sessions = Object.values(t.state.members).filter((m) => this.readAgentMd(t, m)).map((m) => m.name);
+    return { team: t.id, path: f.dynamic, agentMd: f.agentMd, text: readFileSync(f.dynamic, "utf8"), sessions };
+  }
+
+  /** af context set: the project context is this text now; it goes out at once. */
+  setContext(who: Who, text: string) {
+    const t = this.contextTeam(who);
+    writeFileSync(contextFiles(t.dir).dynamic, text.trim() ? `${text.trim()}\n` : "");
+    this.contextEdits.delete(t.id);
+    return { team: t.id, ...this.publishContext(t, readFileSync(contextFiles(t.dir).dynamic, "utf8")) };
+  }
+
+  /** A member that has read agent.md: one of its tickets was typed in, and it is still there. */
+  private readAgentMd(t: Team, m: Member) {
+    if (m.team || m.status === "exited" || m.name === t.state.meta?.manager.member) return false;
+    return ticketList(t.state).some((k) => k.assignee === m.name && k.deliveredAt);
+  }
+
+  /** The manager edited context.md: once it has stayed the same for a moment, send it out. */
+  private checkContext(t: Team) {
+    let text: string;
+    try {
+      text = readFileSync(contextFiles(t.dir).dynamic, "utf8");
+    } catch {
+      return;
+    }
+    if (sameContext(text, this.publishedContext(t))) return void this.contextEdits.delete(t.id);
+    const now = this.clock();
+    const settle = this.opts.contextSettleMs ?? 3000;
+    const seen = this.contextEdits.get(t.id);
+    if (!seen || seen.text !== text) {
+      this.contextEdits.set(t.id, { text, since: now });
+      if (settle > 0) return;
+    } else if (now - seen.since < settle) return;
+    this.contextEdits.delete(t.id);
+    this.publishContext(t, text);
+  }
+
+  /**
+   * The project context is `text` now: agent.md gets it, and each session that has read agent.md is told (once it is
+   * free, as af tell; one that was stopped for being idle when it wakes). A change it was not told yet is replaced.
+   */
+  private publishContext(t: Team, text: string) {
+    const f = contextFiles(t.dir);
+    const before = this.publishedContext(t);
+    if (sameContext(text, before)) return { changed: false, told: [] as string[] };
+    writeFileSync(f.published, text);
+    this.writeAgentMd(t);
+    const changes = contextChanges(before, text);
+    const told: string[] = [];
+    for (const m of Object.values(t.state.members)) {
+      if (!this.readAgentMd(t, m)) continue;
+      const old = pendingMessages(t.state, m.name).filter((o) => o.kind === "context").map((o) => o.id);
+      if (old.length) this.emit(t, { type: "message.dropped", at: this.now(), ids: old });
+      const msg = [
+        `[agent-flow] The project context changed${old.length ? " (more than once since you were last told)" : ""}. Read the part "Project context" in ${this.agentMdFor(t, m.machine)} again, and follow it from now on.`,
+        ...(changes ? [`Changed lines:\n${changes}`] : []),
+        "Take it into account for the work from here on. Reply in one line that you have read it; if it changes work you already handed back, say what would change, and do not redo that work unless you are asked to.",
+      ].join("\n");
+      this.queueMessage(t, { member: m.name, kind: "context", text: msg });
+      told.push(m.name);
+    }
+    return { changed: true, told };
   }
 
   /** The direct team led by `pane`, created on its first ticket. */
@@ -1175,6 +1284,11 @@ export class Teams {
     try {
       for (const t of this.teams.values()) {
         if (!t.state.meta || t.state.stopped) continue;
+        try {
+          this.checkContext(t);
+        } catch (e) {
+          console.error(`team ${t.id} context:`, (e as Error).message);
+        }
         for (const m of Object.values(t.state.members)) {
           if (m.team || t.starting.has(m.name) || !m.paneId) continue;
           try {
@@ -1296,9 +1410,14 @@ export class Teams {
     }
     if (!settled) return;
 
-    // something to type in: a message first (a follow-up, an answer, the router's brief), else its next ticket
-    const msg = pendingMessages(t.state, m.name)[0];
+    // something to type in: a message first (a follow-up, an answer, the router's brief), else its next ticket. A
+    // change of the project context does not wake a session stopped for being idle: it gets it when it is back.
+    const msg = pendingMessages(t.state, m.name).find((x) => !(x.kind === "context" && p.asleep));
     if (msg) {
+      if (msg.kind === "context" && m.machine && m.machine !== "local") {
+        const host = this.host(m.machine);
+        await host.writeFile(this.agentMdFor(t, m.machine), this.agentMd(t, m.machine));
+      }
       if (await this.type(t, m, msg.text)) {
         this.emit(t, { type: "message.delivered", at: this.now(), id: msg.id });
         if (msg.ticket && (msg.kind === "tell" || msg.kind === "reply" || msg.kind === "continue")) {
@@ -1312,6 +1431,7 @@ export class Teams {
       const next = waitingTickets(t.state, m.name)[0];
       if (next) {
         try {
+          this.writeAgentMd(t); // its first part is agent-flow's: as this version of agent-flow writes it
           await this.mirror(t, m, next);
           const text = this.taskMessage(t, m, next);
           if (await this.type(t, m, text, true)) this.emit(t, { type: "ticket.delivered", at: this.now(), id: next.id });
@@ -1387,6 +1507,13 @@ export class Teams {
     return !this.typedByUs(t, m, pk.lastUser);
   }
 
+  /** Whether this message is one of agent-flow's notes to the member that the project context changed. */
+  private isContextMessage(t: Team, m: Member, text: string) {
+    const n = (s: string) => s.replace(/\s+/g, " ").trim();
+    const head = n(text).slice(0, 80);
+    return t.state.outbox.some((o) => o.member === m.name && o.kind === "context" && o.delivered && !o.dropped && n(o.text).startsWith(head));
+  }
+
   /** Whether agent-flow typed this message to the member (a task, af tell, an answer, "continue"), not the user. */
   private typedByUs(t: Team, m: Member, text: string) {
     const n = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -1434,6 +1561,11 @@ export class Teams {
     // no reply in its conversation (none found, or it stopped before writing one): the end of its screen instead
     const screen = pk?.reply ? "" : (await this.opts.w.read(m.paneId!, 25).catch(() => "")).trimEnd();
     const reply = pk?.reply ?? (screen ? `(no reply found in its conversation; its screen ends with:)\n${screen}` : "");
+    // its reply to a change of the project context ("read it"): nothing for its manager
+    if (k.resumed && pk?.lastUser && this.isContextMessage(t, m, pk.lastUser)) {
+      this.emit(t, { type: "ticket.closed", at: this.now(), id: k.id, outcome: "done", note: "read the new project context" });
+      return true;
+    }
     if (m.protocol === "none" && this.userTalked(t, m, k, pk)) {
       // the user talked with it after its result was taken: that conversation is theirs, its manager does not hear
       // each reply. What it changes for the work, the session reports itself (af report, as its task says).
@@ -1477,6 +1609,7 @@ export class Teams {
     if (!m.machine || m.machine === "local") return;
     const host = this.host(m.machine);
     const dir = this.ticketDir(t, k.id);
+    await host.writeFile(this.agentMdFor(t, m.machine), this.agentMd(t, m.machine));
     await host.writeFile(hostPathOf(host, this.opts.home, join(dir, "task.md")), readFileSync(join(dir, "task.md"), "utf8"));
     for (const f of k.inputs)
       if (f.startsWith(`${t.dir}/`) && existsSync(f)) await host.writeFile(hostPathOf(host, this.opts.home, f), readFileSync(f, "utf8"));
@@ -1493,13 +1626,18 @@ export class Teams {
     const task = readFileSync(join(local, "task.md"), "utf8").trim();
     const dir = this.ticketDirFor(t, m, k.id);
     const there = (f: string) => (m.machine && m.machine !== "local" ? hostPathOf(this.host(m.machine), this.opts.home, f) : f);
+    // its first ticket: agent.md first (agent-flow's rules for it, and the project context); later ones are told
+    // when the context changes (publishContext)
+    const first = ticketList(t.state).find((x) => x.assignee === m.name)?.id === k.id;
+    const agentMd = this.agentMdFor(t, m.machine);
     if (m.protocol === "none") {
       const body = task.length > 1500 ? `Your task is in ${join(dir, "task.md")}. Read it and do it.` : task;
-      // the user may talk with it afterwards: those replies are not passed on (userTalked), so it reports what matters
-      return `${body}\n\n(agent-flow ticket ${k.id}${k.branch ? `, on branch ${k.branch}` : ""}: when you finish, end your reply with a short summary of the result. If the user then talks with you directly, just answer them: those answers are not passed on. When that conversation changes something the session that gave you this task must know (progress on the work, or a change to what was agreed: scope, framing, decisions, numbers), tell it in one shell command: ${this.afPathOn(m.machine)} report "<what changed>". Not for answers to questions.)`;
+      const head = first ? `Before you start, read ${agentMd}: how you work with agent-flow, and the project context (you are told when it changes).\n\n` : "";
+      return `${head}${body}\n\n(agent-flow ticket ${k.id}${k.branch ? `, on branch ${k.branch}` : ""}: when you finish, end your reply with a short summary of the result.${first ? "" : ` Your instructions: ${agentMd}.`})`;
     }
     const parts = [
       `[agent-flow] Ticket ${k.id} for you${k.round > 1 ? ` (thread ${k.thread}, round ${k.round})` : ""}: ${k.title}.`,
+      ...(first ? [`Before you start, read ${agentMd} (the project context the router keeps; you are told when it changes).`] : []),
       `Read ${join(dir, "task.md")} and do it.`,
       ...(k.inputs.length ? [`Read first: ${k.inputs.map(there).join(", ")}.`] : []),
       ...(k.note ? [`Router's note: ${k.note}`] : []),

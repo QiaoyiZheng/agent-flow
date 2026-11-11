@@ -156,11 +156,14 @@ export interface QueueItem {
 export interface Outgoing {
   id: string;
   member: string;
-  kind: "tell" | "reply" | "brief" | "continue";
+  /** context: the project context in the team's agent.md changed (see server context.ts). */
+  kind: "tell" | "reply" | "brief" | "continue" | "context";
   text: string;
   ticket?: string;
   at: string;
   delivered?: string;
+  /** Not delivered: a newer message replaced it (a later change of the project context). */
+  dropped?: boolean;
 }
 
 export type AttentionKind = "approval" | "loop_limit" | "exited" | "startup" | "unhandled" | "notice_ignored" | "report" | "error";
@@ -199,6 +202,7 @@ export type TeamEvent = (
   | E<"queue.handled", { seqs: number[] }>
   | E<"message.queued", { message: Outgoing }>
   | E<"message.delivered", { id: string }>
+  | E<"message.dropped", { ids: string[] }>
   | E<"attention.raised", { attention: Attention }>
   | E<"attention.resolved", { id: string }>
 ) & { seq?: number };
@@ -332,6 +336,9 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
       if (m) m.delivered = ev.at;
       break;
     }
+    case "message.dropped":
+      for (const m of s.outbox) if (ev.ids.includes(m.id) && !m.delivered) Object.assign(m, { delivered: ev.at, dropped: true });
+      break;
     case "attention.raised":
       s.attention[ev.attention.id] = ev.attention;
       break;

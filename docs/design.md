@@ -116,6 +116,8 @@ af task gemini "根据 plan.md 写一份发布说明" --name write
 - `af task --to plan "…"` 把新工单交给已有的成员（同一个 session）；`af tell T1 "…"` 在同一张工单上追加要求。
 - 成员做完一轮（working → idle/done，6 秒后仍空闲且无后台任务、屏幕上也没有提示或提问，防止状态抖动），agent-flow 从它的对话记录里取这一轮最后的回复，写进 `result.md`，工单变 submitted，队列里进一条 `turn`。对话记录里找不到回复时，标明没有找到回复并附上屏幕最后 25 行。
 - 模式一里 `af queue take` 取走即算处理完；工单不需要显式关闭。
+- **agent.md**（`server/src/context.ts`）：每个 team 的文件夹里有 `agent.md`，成员拿到第一张工单时先读它。静态部分由 agent-flow 生成（模式一：交结果的方式、`af report` 的规矩；模式二：照成员协议办），每次派工单时按当前版本重写；动态部分"Project context"来自同一文件夹的 `context.md`，由管理者编辑（`af context` 给出路径）。server 每秒看一次 `context.md`，内容变了且 3 秒内没再变，就写进 `agent.md`（`context.published.md` 记着已发出的版本），并给每个读过 agent.md、还在的成员排一条 `context` 消息：读哪一部分、改了哪几行（逐行增删，最多 1500 字）。成员空闲时打进去；还没送出的旧消息被新消息替换（`message.dropped`）；因空闲被暂停的成员不叫醒，恢复后再送。远程成员的 agent.md 在它那台机器 `~/.agent-flow` 下同样的位置，派工单和送 context 消息前拷过去，里面的 af 路径是那台机器的。成员回应 context 消息的那一轮不进管理者的队列：结果取走后它为此重新干活（`ticket.resumed`），这一轮最后一条打进去的消息是 context 消息，就把工单直接再关上。
+- 读"最后一轮回复"（`transcripts/peek.ts`）时，agent-flow 自己打进去的消息（以 `[agent-flow]` 开头，界面上显示成提示）也算一轮的开头，不只是用户消息。
 - 模式一里结果取走后成员又干起活来（后台任务叫醒它，或用户直接跟它说话），工单重新打开（`ticket.resumed`）。这一轮结束时看它对话记录里最后一条用户消息：不是 agent-flow 打进去的（任务、`af tell`、"continue"），而且写在结果取走之后，就算用户自己的对话：不进队列，工单直接再关上。成员自己判断聊出了进展或口径变化时用 `af report "…"` 告诉主 agent（任务消息末尾写了这条规矩）。后台任务叫醒的那一轮没有新的用户消息，结果照常进队列。
 
 ### 4.4 模式二：agent team 和 router
@@ -254,6 +256,7 @@ server 每秒看一次 Herdr 的状态，再加上屏幕和对话记录：
 | `af status <成员>` | 管理者 | 成员的状态、最后的回复、屏幕最后几行 |
 | `af report "…" [--done]` | router | 向调用者（或"需要你"）汇报 |
 | `af report "…"` | 模式一里 `af task` 开的 session | 用户直接跟它聊出了进展或口径变化时，告诉派活的 session（进它的队列） |
+| `af context` · `af context set "…"\|--file F` | 管理者（主 session、router） | 项目上下文：team 的 agent.md 里动态的那部分（见 4 节） |
 | `af submit --status ready\|blocked\|failed\|dropped --note "…" [--to 成员] [--ticket T]` | 成员 | 交结果（result.md 写在工单文件夹里） |
 | `af progress "…"` · `af ask "…"` | 成员 | 进展（不进队列）· 提问（进队列） |
 | `af machines` | 所有人 | 列出 `--on` 能用的机器（本机和已连接的 SSH 机器，远程机器上也可调用） |

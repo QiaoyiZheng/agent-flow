@@ -117,6 +117,74 @@ describe("mode 1: a session hands out tasks", () => {
     expect((await call("/prompt", { pane: lead, text: "hello", mode: "auto" })).status).toBe(200);
   });
 
+  test("the project context: the main session edits it, its sessions read it first and are told when it changes", async () => {
+    const { o, backend, call, step, turn, typed, replies, lead } = await setup({ contextSettleMs: 0 });
+    // before any task: the file to edit (its team is made for it)
+    const c = await call("/team/context", { callerPane: lead }, "GET");
+    expect(c.status).toBe(200);
+    expect(c.body).toMatchObject({ text: "", sessions: [] });
+    expect(c.body.path).toEndWith(`/teams/${c.body.team}/context.md`);
+    writeFileSync(c.body.path, "口径：只报最终结论。\n");
+    await step();
+    const agentMd = readFileSync(c.body.agentMd, "utf8");
+    expect(agentMd).toContain("## How you work with agent-flow");
+    expect(agentMd).toContain("## Project context\n\n口径：只报最终结论。");
+
+    const r = await call("/task", { callerPane: lead, kind: "claude", task: "write section 3", name: "writer" });
+    expect(r.body.team).toBe(c.body.team);
+    await step();
+    const m = o.get(r.body.team).members.writer!;
+    const herdr = herdrMemberName(r.body.team, "writer");
+    expect(typed(m.paneId!)[0]).toStartWith(`Before you start, read ${c.body.agentMd}`);
+    replies.set(m.paneId!, { reply: "Section 3 written.", lastUser: typed(m.paneId!)[0] });
+    await turn(herdr);
+    await call("/team/take", { callerPane: lead });
+    await turn("lead");
+    const toLead = typed(lead).length;
+
+    // the main session edits the context: the writer is told, with what changed
+    writeFileSync(c.body.path, "口径：只报最终结论。\n主结果用两年全量。\n");
+    await step();
+    const note = typed(m.paneId!).at(-1)!;
+    expect(note).toStartWith(`[agent-flow] The project context changed. Read the part "Project context" in ${c.body.agentMd} again`);
+    expect(note).toContain("Changed lines:\n+ 主结果用两年全量。");
+    expect(readFileSync(c.body.agentMd, "utf8")).toContain("主结果用两年全量。");
+    expect((await call("/team/context", { callerPane: lead }, "GET")).body.sessions).toEqual(["writer"]);
+    // its "read it" reply is not news for the main session
+    await Bun.sleep(5);
+    replies.set(m.paneId!, { reply: "Read it.", lastUser: note });
+    await turn(herdr);
+    expect(o.get(r.body.team).tickets.T1).toMatchObject({ status: "closed", closeNote: "read the new project context" });
+    expect(o.get(r.body.team).queue.filter((q) => q.state !== "handled")).toEqual([]);
+    expect(typed(lead).length).toBe(toLead);
+
+    // two edits while it is busy: one message once it is free
+    const before = typed(m.paneId!).length;
+    backend.set(herdr, "working");
+    await step();
+    writeFileSync(c.body.path, "口径：只报最终结论。\n主结果用两年全量。\n不写 11 月 5 日的测试。\n");
+    await step();
+    const set = await call("/team/context", { callerPane: lead, text: "口径：只报最终结论。\n主结果用两年全量和测试集。" });
+    expect(set.body).toMatchObject({ changed: true, told: ["writer"] });
+    await step();
+    expect(typed(m.paneId!).length).toBe(before);
+    replies.set(m.paneId!, { reply: "ok", lastUser: note });
+    await Bun.sleep(5);
+    backend.set(herdr, "idle");
+    await step();
+    await step();
+    const sent = typed(m.paneId!).slice(before);
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("(more than once since you were last told)");
+    expect(sent[0]).toContain("+ 主结果用两年全量和测试集。");
+    // a later task for it does not ask it to read agent.md first
+    await call("/team/tell", { callerPane: lead, ref: "writer", text: "now section 4" });
+    replies.set(m.paneId!, { reply: "ok", lastUser: sent[0] });
+    await turn(herdr);
+    await step();
+    expect(typed(m.paneId!).at(-1)).toStartWith("now section 4");
+  });
+
   test("af task starts a plain session, types the task, and puts its final reply in the session's queue", async () => {
     const { o, backend, call, step, turn, typed, replies, lead } = await setup();
     const r = await call("/task", { callerPane: lead, kind: "codex", task: "Count the exported functions in calc.js", name: "counter" });
@@ -133,7 +201,9 @@ describe("mode 1: a session hands out tasks", () => {
     expect(pane.env.AF_TEAM).toBeUndefined();
     expect(pane.env.AF_OUT).toContain(join("teams", team, "out"));
     // the task is its first message
-    expect(typed(m.paneId!)[0]).toStartWith("Count the exported functions in calc.js");
+    // agent.md first (agent-flow's rules, the project context), then the task
+    expect(typed(m.paneId!)[0]).toStartWith(`Before you start, read ${join(o.opts.home, "teams", r.body.team, "agent.md")}`);
+    expect(typed(m.paneId!)[0]).toContain("\n\nCount the exported functions in calc.js\n\n(agent-flow ticket T1:");
     expect(s.tickets.T1!.status).toBe("working");
 
     replies.set(m.paneId!, { reply: "There are 4 exported functions: add, sub, mul, div." });
@@ -192,8 +262,8 @@ describe("mode 1: a session hands out tasks", () => {
     const team = r.body.team;
     const m = o.get(team).members.chat!;
     const herdr = herdrMemberName(team, "chat");
-    // its task says how to report
-    expect(typed(m.paneId!)[0]).toContain('/af/bin/af report "<what changed>"');
+    // its agent.md says how to report
+    expect(readFileSync(join(o.opts.home, "teams", team, "agent.md"), "utf8")).toContain('/af/bin/af report "<what changed>"');
     replies.set(m.paneId!, { reply: "Read it; ready.", lastUser: typed(m.paneId!)[0] });
     await turn(herdr);
     await call("/team/take", { callerPane: lead });
@@ -635,6 +705,9 @@ describe("reading what an agent said last", () => {
     const lines = [claude("user", "first"), claude("assistant", [{ type: "text", text: "old answer" }]), claude("user", "count them"), claude("assistant", [{ type: "text", text: "There are 4." }]), claude("assistant", [{ type: "text", text: "Done." }])];
     expect(lastReply("claude", lines)).toEqual({ reply: "There are 4.\n\nDone.", error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z" });
     expect(lastReply("claude", ["not json", ...lines.slice(0, 3)])).toEqual({ reply: undefined, error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z" });
+    // a message agent-flow typed in ("[agent-flow] …", shown as a notice) starts a turn too
+    const note = "[agent-flow] The project context changed. Read it again.";
+    expect(lastReply("claude", [...lines, claude("user", note), claude("assistant", [{ type: "text", text: "Read it." }])])).toMatchObject({ reply: "Read it.", lastUser: note });
   });
 });
 
@@ -666,7 +739,7 @@ describe("choosing a worktree, and preparing a member's folder", () => {
     const team = ok.body.team;
     expect(readFileSync(join(cwd, "ready.txt"), "utf8")).toBe("prepared\n");
     expect(readFileSync(join(o.opts.home, "teams", team, "tickets", "T1", "prepare.log"), "utf8")).toContain("done");
-    expect(typed(o.get(team).members.loader!.paneId!)[0]).toStartWith("use the data");
+    expect(typed(o.get(team).members.loader!.paneId!)[0]).toContain("\n\nuse the data\n\n");
     expect((await call("/task", { callerPane: lead, kind: "claude", task: "x", name: "user" })).body.error.code).toBe("bad_name");
 
     const bad = await call("/task", { callerPane: lead, kind: "claude", task: "never", name: "broken", prepare: "echo missing dependency; exit 3" });
@@ -758,7 +831,11 @@ describe("members on another machine", () => {
     // claude's SessionStart hook is a file on the Mac: not for another machine
     expect(pane.agent!.args.join(" ")).not.toContain("--settings");
     expect(pane.agent!.args).toContain("--session-id");
-    expect(remote.prompts.at(-1)!.text).toStartWith("run the profile on the GPUs");
+    expect(remote.prompts.at(-1)!.text).toContain("\n\nrun the profile on the GPUs\n\n");
+    // its agent.md is copied there, with that machine's af
+    const agentMd = join(rhome, ".agent-flow", "teams", team, "agent.md");
+    expect(remote.prompts.at(-1)!.text).toStartWith(`Before you start, read ${agentMd}`);
+    expect(readFileSync(agentMd, "utf8")).toContain(`${rhome}/.agent-flow/bin/af report`);
     replies.set(m.paneId!, { reply: "42 tokens/s on 2 GPUs" });
     remote.set(herdrMemberName(team, "profile"), "working");
     await step();

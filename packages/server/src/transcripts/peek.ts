@@ -7,13 +7,13 @@ import { PARSERS, type Agent } from "./parse.ts";
 import type { TranscriptFS } from "./index.ts";
 
 export interface Peek {
-  /** The assistant's prose since the last user message, as written. */
+  /** The assistant's prose since the last message typed in (the user's, or agent-flow's own), as written. */
   reply?: string;
   /** The last error notice since the last user message (an API error, a failed request). */
   error?: string;
   /** The transcript's size in bytes. */
   size?: number;
-  /** The last user message ("/command args" for a skill or custom command): who started the last turn. */
+  /** The last message typed in ("/command args" for a skill or custom command; agent-flow's own "[agent-flow] …"). */
   lastUser?: string;
   /** When it was written (ISO), if the transcript says. */
   lastUserAt?: string;
@@ -55,9 +55,11 @@ export function lastReply(agent: Agent, lines: string[]): Omit<Peek, "size"> {
     }
   }
   const blocks = [...entries.values()];
+  // a turn starts with a message typed in: the user's, or agent-flow's own (shown as a notice: "[agent-flow] …")
+  const typedIn = (b: ChatBlock) => b.kind === "user" || (b.kind === "notice" && b.text.startsWith("[agent-flow]"));
   let last = -1;
   blocks.forEach((b, i) => {
-    if (b.kind === "user") last = i;
+    if (typedIn(b)) last = i;
   });
   const after = blocks.slice(last + 1);
   const reply = after
@@ -69,8 +71,8 @@ export function lastReply(agent: Agent, lines: string[]): Omit<Peek, "size"> {
   // an error counts only when nothing came after it: the agent went on after an error it recovered from
   const tail = after.at(-1);
   const u = blocks[last];
-  const lastUser = u?.kind === "user" ? (u.command ? `${u.command} ${u.text}`.trim() : u.text) : undefined;
-  const lastUserAt = u?.kind === "user" ? times.get(u) : undefined;
+  const lastUser = u?.kind === "user" ? (u.command ? `${u.command} ${u.text}`.trim() : u.text) : u?.kind === "notice" ? u.text : undefined;
+  const lastUserAt = u ? times.get(u) : undefined;
   return { reply: reply || undefined, error: err && tail === err ? err.detail ?? err.text : undefined, lastUser, ...(lastUserAt ? { lastUserAt } : {}) };
 }
 

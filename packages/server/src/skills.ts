@@ -52,6 +52,12 @@ The user may talk with a session directly after you took its result. Its answers
 session tells you itself when that changes something for the work (progress, or a change to what was agreed): it
 shows in your queue as "reported". Take that into account; you need not repeat it to the user, who was there.
 
+Each session you start reads an agent.md first: agent-flow's rules for it, then the project context, which you keep.
+When the user gives new context or requirements that all your sessions should follow (scope, framing, decisions,
+constraints, numbers, where things are), put them there instead of repeating them in every task: \`${af} context\` shows
+the file to edit; each change goes to the sessions already working (or \`${af} context set --file <file>\`). Keep it to
+what every session needs, current and short; the details of one task go in that task.
+
 If the user says you may answer those prompts for them (folder trust, permission prompts, "Enter to continue"
 notices of the sessions you start), run \`${af} delegate on\` (or add --delegate to af task / af team new). Never
 turn it on by yourself. Then such a prompt reaches your queue as "has a prompt for you to answer", with its options:

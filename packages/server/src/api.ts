@@ -121,6 +121,10 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(await o.status(who, String(body.ref ?? "")));
         case "POST /team/report":
           return json(o.report(who, String(body.text ?? ""), !!body.done));
+        case "GET /team/context":
+          return json(o.context(who));
+        case "POST /team/context":
+          return json(o.setContext(who, String(body.text ?? "")));
         case "POST /team/submit":
           return json(await o.submit(who, { status: body.status ?? "ready", note: str(body.note), to: str(body.to), ticket: str(body.ticket) }));
         case "POST /team/progress":

@@ -126,6 +126,9 @@ Mode 1 — hand out tasks from this session (it gets each session's final reply 
   af delegate on|off                        let this session answer its sessions' trust prompts, permission prompts
                                             and notices for the user (only when the user said you may); or stop
   af status <name>                          its status, last reply and screen
+  af context                                the project context the sessions you start read (in their agent.md): its
+                                            file, to edit; each change goes to them
+  af context set "<text>" | --file F        replace it
   af report "<text>"                        (in a session started with af task) tell the session that gave you the
                                             task what your conversation with the user changed; answers are not passed on
   af tickets [--json]    af ticket show <T>
@@ -329,6 +332,26 @@ async function main() {
           `${r.member} (${r.kind}): ${r.status}${r.asking ? `, asking: ${r.asking}` : ""}${r.ticket ? `; ${r.ticket.id} ${r.ticket.stage}` : ""}`,
           ...(r.lastReply ? ["--- last reply", r.lastReply] : []),
           "--- screen", r.screen,
+        ].join("\n"),
+      );
+    }
+    case "context": {
+      if (pos[0] === "set") {
+        const file = str(flags.file);
+        const text = file ? (REMOTE ? (await call<{ text: string }>("POST", "/remote/read", { path: absolute(file) })).text : readFileSync(absolute(file), "utf8")) : pos.slice(1).join(" ");
+        if (!file && !pos[1]) die('usage: af context set "<text>" | af context set --file F');
+        const r = await call("POST", "/team/context", { text });
+        return console.log(r.changed ? `project context set; told: ${r.told.join(", ") || "(no session has read it yet)"}` : "project context unchanged");
+      }
+      const r = await call("GET", "/team/context", {});
+      return out(flags, r, () =>
+        [
+          REMOTE
+            ? "The project context your sessions read. To change it, write the new text to a file here and run: af context set --file <file>"
+            : `The project context your sessions read. Edit this file to change it (agent-flow sends each change to them):\n  ${r.path}`,
+          `Sessions that have read it: ${r.sessions.join(", ") || "(none yet)"}`,
+          "--- now:",
+          r.text.trim() || "(empty)",
         ].join("\n"),
       );
     }

@@ -57,6 +57,8 @@ const ALLOWED = new Set([
   "POST /team/reply",
   "GET /team/status",
   "POST /team/report",
+  "GET /team/context",
+  "POST /team/context",
   "POST /team/submit",
   "POST /team/progress",
   "POST /team/ask",
