@@ -34,13 +34,13 @@ export interface ForkPlan {
 }
 
 /** Create the forked conversation (if the agent needs a file) and say how to start the agent on it. */
-export async function prepareFork(fs: TranscriptFS, source: ChatSource, before: number | undefined, newId = crypto.randomUUID()): Promise<ForkPlan> {
+export async function prepareFork(fs: TranscriptFS, source: ChatSource, before: number | undefined, newId = crypto.randomUUID(), codexExtra: string[] = []): Promise<ForkPlan> {
   if (source.agent === "gemini") return geminiFork(fs, source, before, newId);
   const oldId = sessionIdOf(source);
   if (source.agent === "codex") {
     if (before !== undefined) throw new AfError("fork_point_unsupported", "codex can only fork the whole conversation");
-    // no update prompt (it would block the new pane); keep scrollback for the UI
-    return { args: ["fork", "-c", "check_for_update_on_startup=false", "--no-alt-screen", oldId] };
+    // no update prompt (it would block the new pane); keep scrollback for the UI; codexExtra: the user's flags (YOLO)
+    return { args: ["fork", "-c", "check_for_update_on_startup=false", "--no-alt-screen", ...codexExtra, oldId] };
   }
   const dir = dirname(source.path);
   const path =

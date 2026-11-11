@@ -37,7 +37,8 @@ describe("resuming an agent with the flags it was started with", () => {
   });
 
   test("codex: its resume subcommand with its options; omp: its file; gemini: no first message", () => {
-    expect(resumeArgs("codex", plainArgs("codex", config), { id: ID })).toEqual(["resume", "-c", "check_for_update_on_startup=false", "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", ID]);
+    // YOLO (the default for codex agent-flow starts) stays YOLO after a resume
+    expect(resumeArgs("codex", plainArgs("codex", config), { id: ID })).toEqual(["resume", "-c", "check_for_update_on_startup=false", "--no-alt-screen", "-c", "sandbox_workspace_write.network_access=true", "--dangerously-bypass-approvals-and-sandbox", ID]);
     expect(resumeArgs("codex", ["resume", "old-id", "-p", "agent-flow-member", "-i", "a.png", "b.png", "do it"], { id: ID })).toEqual(["resume", "-p", "agent-flow-member", ID]);
     expect(resumeArgs("omp", ["--append-system-prompt=/t/member.md", "--continue"], { path: "/s/x.jsonl" })).toEqual(["--append-system-prompt=/t/member.md", "--resume=/s/x.jsonl"]);
     expect(resumeArgs("gemini", launchArgs("gemini", "member", "/t/p/member.md", config), { id: ID })).toEqual(["--include-directories", "/t/p", "--approval-mode=yolo", "--resume", ID]);

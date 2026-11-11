@@ -55,9 +55,10 @@ export function plainArgs(kind: AgentKind, config: AgentConfig, session?: string
 }
 
 export const DEFAULT_CONFIG: AgentConfig = {
-  // gemini: YOLO (no approval prompt per command or file write; the user's choice). Gemini allows YOLO only as a
-  // flag, not in its settings file. Override in ~/.agent-flow/config.json: {"args": {"gemini": []}}.
-  args: { claude: ["--permission-mode", "auto"], gemini: ["--approval-mode=yolo"] },
+  // gemini and codex: YOLO (no approval prompt per command or file write; the user's choice, 2026-11-11). Gemini allows
+  // YOLO only as a flag, not in its settings file; codex's is --dangerously-bypass-approvals-and-sandbox (no sandbox
+  // either, so af reaches the server's socket). Override in ~/.agent-flow/config.json: {"args": {"codex": []}}.
+  args: { claude: ["--permission-mode", "auto"], gemini: ["--approval-mode=yolo"], codex: ["--dangerously-bypass-approvals-and-sandbox"] },
 };
 
 export function loadConfig(home: string): AgentConfig {

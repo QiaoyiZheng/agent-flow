@@ -145,6 +145,8 @@ describe("fork", () => {
     const codex = { agent: "codex" as const, path: "/x/rollout-2026-11-02T14-16-30-01a19ae6-f5c1-7b70-bf1d-6b1cd834650a.jsonl", how: "session" as const };
     expect((await prepareFork(new LocalFS(), codex, undefined)).args).toEqual(["fork", "-c", "check_for_update_on_startup=false", "--no-alt-screen", "01a19ae6-f5c1-7b70-bf1d-6b1cd834650a"]);
     await expect(prepareFork(new LocalFS(), codex, 100)).rejects.toThrow(/whole conversation/);
+    // the user's codex flags (YOLO by default) go before the session id
+    expect((await prepareFork(new LocalFS(), codex, undefined, undefined, ["--dangerously-bypass-approvals-and-sandbox"])).args.slice(-2)).toEqual(["--dangerously-bypass-approvals-and-sandbox", "01a19ae6-f5c1-7b70-bf1d-6b1cd834650a"]);
   });
 
   test("gemini: a copy under a new id resumed with --resume <id>; cut where the fork point's message was first written", async () => {

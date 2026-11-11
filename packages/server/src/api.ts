@@ -246,7 +246,7 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           const r = await access.resolve(pane);
           if ("reason" in r) throw new AfError("no_transcript", `cannot fork: ${r.reason}`);
           const before = body.before === undefined || body.before === null ? undefined : Number(body.before);
-          const plan = await prepareFork(access.fsFor(pane).fs, r.source, before);
+          const plan = await prepareFork(access.fsFor(pane).fs, r.source, before, undefined, o.opts.config.args.codex ?? []);
           const { paneId } = await w.split(pane, body.direction === "down" ? "down" : "right");
           if (plan.session) w.rememberSession(paneId, plan.session.id, plan.session.path);
           const route = w.route(paneId);
@@ -375,7 +375,7 @@ async function splitAgent(o: Teams, w: Workspaces, pane: string, direction: "rig
         ? claudeExtraArgs(o.opts.config, session)
         : ["--session-id", session]
       : kind === "codex"
-          ? ["-c", "check_for_update_on_startup=false", "--no-alt-screen"]
+          ? ["-c", "check_for_update_on_startup=false", "--no-alt-screen", ...(o.opts.config.args.codex ?? [])]
           : kind === "gemini"
             ? (o.opts.config.args.gemini ?? [])
             : [];
