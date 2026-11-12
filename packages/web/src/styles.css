@@ -474,7 +474,22 @@ body.resizing-x iframe, body.resizing-y iframe { pointer-events: none; }
 .md .code-block { position: relative; margin: 0.6em 0; border: 1px solid var(--line); border-radius: 8px; background: #0d1117; overflow: hidden; }
 .md .code-block pre { margin: 0; padding: 10px 14px; overflow-x: auto; font: 12.5px/1.55 var(--mono); background: transparent !important; }
 .md .code-block pre.plain { color: var(--text-2); }
-.md .code-lang { position: absolute; top: 4px; right: 8px; font: 10px var(--mono); color: var(--text-3); }
+.md .code-bar { position: absolute; top: 4px; right: 6px; display: flex; align-items: center; gap: 6px; z-index: 1; }
+.md .code-lang { font: 10px var(--mono); color: var(--text-3); }
+/* Copy: always there, faint until the block is hovered */
+.code-copy, .copy-btn { font: 10.5px var(--sans); color: var(--text-3); background: var(--bg-2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; cursor: pointer; opacity: 0.55; transition: opacity 0.12s; }
+.code-block:hover .code-copy, .copy-wrap:hover .copy-btn, .code-copy:focus-visible, .copy-btn:focus-visible { opacity: 1; }
+.code-copy:hover, .copy-btn:hover { color: var(--text); background: var(--bg-hover); }
+.code-copy.done, .copy-btn.done { color: var(--accent); opacity: 1; }
+.code-copy.failed, .copy-btn.failed { color: #f87171; opacity: 1; }
+/* a tool's command or output, with its Copy button */
+.copy-wrap { position: relative; }
+.copy-wrap > .copy-btn { position: absolute; top: 6px; right: 8px; z-index: 1; }
+.copy-wrap > .c-pre { padding-right: 60px; }
+/* under a reply: copy its Markdown */
+.c-reply-actions { display: flex; gap: 6px; margin: -2px 0 10px; }
+.c-reply-actions .copy-btn { opacity: 0.7; padding: 2px 9px; font-size: 11px; }
+.c-reply-actions .copy-btn:hover { opacity: 1; }
 .md .math-block { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .md .katex { font-size: 1.08em; }
 .md .katex-display { margin: 0.3em 0; }

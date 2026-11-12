@@ -6,6 +6,7 @@
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { Marked } from "marked";
+import { CODE_COPY_BUTTON } from "./copy";
 
 const LANG_ALIAS: Record<string, string> = { js: "javascript", ts: "typescript", sh: "bash", shell: "bash", zsh: "bash", py: "python", yml: "yaml", md: "markdown", rs: "rust" };
 const LANGS = ["typescript", "tsx", "javascript", "jsx", "json", "python", "rust", "go", "bash", "yaml", "toml", "css", "html", "sql", "java", "c", "cpp", "ruby", "swift", "kotlin", "latex", "markdown", "diff"];
@@ -90,9 +91,10 @@ const EXTENSIONS: import("marked").TokenizerAndRendererExtension[] = [
     },
   ];
 
-const codeBlock = (text: string, lang?: string) => {
+/** A fenced code block: its language and a Copy button in its corner (copy.ts handles the click). */
+const codeBlock = (text: string, lang?: string, copy = CODE_COPY_BUTTON) => {
   if (lang === "math") return `<div class="math-block">${math(text, true)}</div>`;
-  return `<div class="code-block">${lang ? `<span class="code-lang">${esc(lang)}</span>` : ""}${highlight(text, lang)}</div>`;
+  return `<div class="code-block"><div class="code-bar">${lang ? `<span class="code-lang">${esc(lang)}</span>` : ""}${copy}</div>${highlight(text, lang)}</div>`;
 };
 
 // agent output: untrusted, so raw HTML is shown as text
@@ -101,10 +103,7 @@ marked.use({
   extensions: EXTENSIONS,
   renderer: {
     code({ text, lang }) {
-      if (lang === "math" || lang === "latex" || lang === "tex") {
-        if (lang === "math") return `<div class="math-block">${math(text, true)}</div>`;
-      }
-      return `<div class="code-block">${lang ? `<span class="code-lang">${esc(lang)}</span>` : ""}${highlight(text, lang)}</div>`;
+      return codeBlock(text, lang);
     },
     link({ href, title, tokens }) {
       const text = this.parser.parseInline(tokens);
@@ -195,7 +194,7 @@ docMarked.use({
     code({ text, lang }) {
       // the diagram's source stays in the code element (an attribute would lose it: the sanitizer drops "-->")
       if (lang === "mermaid") return `<div class="mermaid-block"><pre class="plain"><code>${esc(text)}</code></pre></div>`;
-      return codeBlock(text, lang);
+      return codeBlock(text, lang, ""); // its button is added after sanitizing
     },
     heading({ tokens, depth }) {
       const inner = this.parser.parseInline(tokens);
@@ -255,6 +254,8 @@ function sanitize(html: string) {
       img.setAttribute("src", docFile(p));
     }
   }
+  // code blocks get their Copy button now (buttons are not allowed in a document's own HTML)
+  for (const bar of Array.from(doc.querySelectorAll(".code-block > .code-bar"))) bar.insertAdjacentHTML("beforeend", CODE_COPY_BUTTON);
   for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
     const href = a.getAttribute("href")!;
     if (a.hasAttribute("data-path") || a.hasAttribute("data-anchor") || href === "#") continue;

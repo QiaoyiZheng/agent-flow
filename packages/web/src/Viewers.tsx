@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { type DocHeading, drawMermaid, onHighlighterReady, renderDoc } from "./markdown";
 import { FileBrowser } from "./Files";
 import { APP_LABEL, TOKEN, api, appsFor, fileUrl, failed, openIn, useStore } from "./store";
+import { copyCodeClick } from "./copy";
 import { ago } from "./view";
 
 const LANG: Record<string, string> = {
@@ -147,6 +148,7 @@ function FileContent({ path, paneId, machine }: { path: string; paneId?: string;
   }, [html]);
 
   const onClick = (e: React.MouseEvent) => {
+    if (copyCodeClick(e.target)) return; // a code block's Copy button
     const a = (e.target as HTMLElement).closest("a") as HTMLAnchorElement | null;
     if (!a) return;
     if (a.dataset.path) {

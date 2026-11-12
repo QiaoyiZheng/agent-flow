@@ -8,6 +8,7 @@ import type { ChatBlock, ChatEntry, ChatMeta, ChatOp, ChatSource, Delivery, Queu
 import { TOKEN, api, failed, fileUrl, notify, onChat, onReconnect, openIn, send, useStore } from "./store";
 import { Terminal } from "./Terminal";
 import { onHighlighterReady, renderMarkdown } from "./markdown";
+import { copyCodeClick, copyText } from "./copy";
 import { basename } from "./view";
 import { OpenButtons } from "./Viewers";
 
@@ -451,6 +452,7 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
   // links to files in agent output (codex writes [x.ts](/Users/…/x.ts:12)) open next to this pane: in a preview on
   // the agent's machine (a remote agent's file is read over SSH; its preview has the VS Code button)
   const openLink = (e: React.MouseEvent) => {
+    if (copyCodeClick(e.target)) return; // a code block's Copy button
     const a = (e.target as HTMLElement).closest("a[data-path]") as HTMLAnchorElement | null;
     if (!a) return;
     e.preventDefault();
@@ -497,6 +499,33 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
   // of the turn they came in, i.e. under the agent's reply, before the next user message. Ones from turns not loaded
   // yet (earlier pages) wait until those are.
   const { deliveries } = useStore();
+  // each turn's reply (its text after the turn's last tool call), copied as Markdown with the button under it;
+  // a turn starts with a user message, or a message agent-flow typed in
+  const replyAt = useMemo(() => {
+    const at = new Map<number, string>();
+    let start = 0;
+    let last = -1;
+    const close = () => {
+      if (last < 0) return;
+      const texts: string[] = [];
+      for (let j = last; j >= start; j--) {
+        const g = segs[j]!;
+        if (g.kind === "steps") break;
+        if (g.entry.block.kind === "text") texts.unshift(g.entry.block.text.trim());
+      }
+      if (texts.length) at.set(last, texts.join("\n\n"));
+      last = -1;
+    };
+    segs.forEach((g, i) => {
+      const b = g.kind === "entry" ? g.entry.block : undefined;
+      if (b && (b.kind === "user" || (b.kind === "notice" && b.text.startsWith("[agent-flow]")))) {
+        close();
+        start = i + 1;
+      } else if (b?.kind === "text") last = i;
+    });
+    close();
+    return at;
+  }, [segs]);
   const docsAt = useMemo(() => {
     const mine = deliveries.filter((d) => d.pane === paneId);
     const at = new Map<number, Delivery[]>();
@@ -583,6 +612,11 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
                   : undefined
               }
             />
+          ),
+          replyAt.has(i) && s.kind === "entry" && (
+            <div key={`reply-${s.entry.key}`} className="c-reply-actions">
+              <CopyButton text={replyAt.get(i)!} title="Copy this reply as Markdown" label="Copy Markdown" />
+            </div>
           ),
         ])}
         {docsAt.get(segs.length) && <DeliveredFiles docs={docsAt.get(segs.length)!} paneId={paneId} />}
@@ -929,6 +963,37 @@ function OutgoingMessage({ o, pane, working, stale, onTerminal }: { o: Outgoing;
   );
 }
 
+/** A button that copies `text` and says "Copied" for a moment. */
+function CopyButton({ text, title = "Copy", label = "Copy" }: { text: string; title?: string; label?: string }) {
+  const [state, setState] = useState<"" | "done" | "failed">("");
+  return (
+    <button
+      type="button"
+      className={`copy-btn ${state}`}
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        void copyText(text).then((ok) => {
+          setState(ok ? "done" : "failed");
+          setTimeout(() => setState(""), 1500);
+        });
+      }}
+    >
+      {state === "done" ? "Copied" : state === "failed" ? "Failed" : label}
+    </button>
+  );
+}
+
+/** A tool's command or output, with a Copy button in its corner. */
+function CopyPre({ text, out }: { text: string; out?: boolean }) {
+  return (
+    <div className="copy-wrap">
+      <pre className={`c-pre ${out ? "out" : ""}`}>{text}</pre>
+      <CopyButton text={text} />
+    </div>
+  );
+}
+
 export function Prose({ text, hl }: { text: string; hl: number }) {
   const html = useMemo(() => renderMarkdown(text), [text, hl]);
   return <div className="c-text md" dangerouslySetInnerHTML={{ __html: html }} />;
@@ -1021,7 +1086,7 @@ function ToolCard({ t }: { t: Tool }) {
       </div>
       {open && (
         <div className="c-tool-body">
-          {t.input && <pre className="c-pre">{t.input}</pre>}
+          {t.input && <CopyPre text={t.input} />}
           {t.patch ? <Patch text={t.patch} /> : t.edit && <EditDiff before={t.edit.before} after={t.edit.after} />}
           {t.report && (
             <div className="c-report">
@@ -1029,7 +1094,7 @@ function ToolCard({ t }: { t: Tool }) {
             </div>
           )}
           {t.images && t.images.length > 0 && <Thumbs images={t.images} />}
-          {t.output && <pre className="c-pre out">{t.output}</pre>}
+          {t.output && <CopyPre text={t.output} out />}
         </div>
       )}
     </div>

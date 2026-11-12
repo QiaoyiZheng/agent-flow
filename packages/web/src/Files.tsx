@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, failed, notify } from "./store";
+import { copyText } from "./copy";
 
 interface FsEntry {
   name: string;
@@ -64,17 +65,7 @@ export function relPath(from: string, to: string) {
   return [...Array<string>(a.length - i).fill(".."), ...b.slice(i)].join("/") || ".";
 }
 
-function copy(text: string) {
-  const done = () => notify("info", `Copied ${text}`);
-  if (navigator.clipboard?.writeText) return void navigator.clipboard.writeText(text).then(done, failed("Could not copy"));
-  // no clipboard API (a page that is not a secure context): the old way
-  const ta = Object.assign(document.createElement("textarea"), { value: text });
-  document.body.append(ta);
-  ta.select();
-  const ok = document.execCommand("copy");
-  ta.remove();
-  ok ? done() : notify("error", "Could not copy", text);
-}
+const copy = (text: string) => void copyText(text).then((ok) => (ok ? notify("info", `Copied ${text}`) : notify("error", "Could not copy", text)));
 
 /** Right-click on a file or folder: copy its path, relative to the folder the browser started in, or in full. */
 function EntryMenu({ entry, root, x, y, onClose }: { entry: FsEntry; root: string; x: number; y: number; onClose: () => void }) {
