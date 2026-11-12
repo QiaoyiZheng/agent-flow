@@ -29,6 +29,7 @@ af task claude "在 GPU 上跑 profile" --name profile --no-worktree --on allina
   `[agent-flow] 1 new in your queue: T1 plan finished. Run: af queue take`
   你的 session 执行 `af queue take` 拿到结果，接着派下一步或向你汇报。
 - **项目上下文（agent.md）**：你的 session 开出的每个新 session，第一件事是读这个 team 的 `agent.md`。它分两部分：上半部分是 agent-flow 写的固定规矩（怎么交结果、什么时候 `af report`），下半部分"Project context"由你的主 session 维护，放所有子 session 都该遵守的东西（范围、口径、决定、约束、数据在哪）。主 session 用 `af context` 看到要编辑的文件（`context.md`），改完存盘，几秒后 agent-flow 就把改动（连同改了哪几行）发给已经在干活的子 session；正忙的等它这一轮结束再收，因空闲被暂停的等它恢复再收。子 session 回一行"已读"，这一轮不进主 session 的队列。也可以 `af context set --file <文件>` 整个替换（远程机器上的主 session 只能用这个）。
+- **上下文快满时交接（handoff）**：主 session（派过活的那个）每做完一轮，agent-flow 就从它的对话记录里看上下文用了多少（就是界面底部那个上下文条）。到 80% 时，agent-flow 往里打一条请求：用 `handoff` skill 把交接文档写到给定路径（`~/.agent-flow/handoffs/` 下），再运行 `af handoff ready <文档>`。这一轮结束后由 agent-flow 接手：先关掉它开过的、已经没事可做的子 session（结果已取走、没在干活）；还在干活的、结果还没取的、你正在跟它聊的、代表整个 team 的都留着；再关掉主 agent，在同一个 pane 里用同样的参数开一个新会话，第一条消息让它先读交接文档，并列出关掉了谁、谁还在跑。新会话仍是这些子 session 的主 session，它们的结果照常进它的队列。你随时也可以直接说"交接一下"。阈值在 `~/.agent-flow/config.json` 里改：`{"handoff": {"at": 0.7}}`；`{"handoff": false}` 关掉自动请求（手动交接还能用）。旧会话的记录还在，新会话需要时可以去里面查。
 - 结果交回以后，你可以直接去那个 session 跟它聊（问问题、讨论）。这些对话**不会**每轮都转给你的主 session；只有聊出了项目进展或口径（范围、表述、决定、数字）的变化，它才用 `af report "<变了什么>"` 告诉主 session（任务的第一条消息里写了这条规矩）。主 session 用 `af tell` 交给它的新活，结果照常回队列。
 - 队列里还会出现：某个 session 屏幕上在问和任务有关的问题（你的 session 用 `af answer T2 <选项号>` 回答）、可能卡住了、进程退出了、API 报错（agent-flow 已经自动让它"继续"过 3 次）。
 - **权限审批和"信任这个文件夹"永远只交给你**：出现在左栏"需要你"里，你的 session 碰不到。
@@ -93,6 +94,7 @@ af team new --playbook humanize-loop --goal "给登录页加验证码"
 | router 用 | `af ticket open/close` · `af reply <seq>` · `af report "…" [--done]` · `af thread max` · `af queue done <seq>` |
 | 成员用 | `af submit --status ready\|blocked\|failed\|dropped --note "…"` · `af progress` · `af ask` |
 | 停掉 team | `af team stop [<team>]`，或关掉它的 workspace |
+| 交接给新 session | `af handoff`（给出交接文档的路径）· `af handoff ready <文档>`（写好后运行；agent-flow 在这一轮结束后重开这个 session） |
 | 项目上下文 | `af context`（看要编辑的文件和当前内容）· `af context set "…"` / `--file <文件>` |
 | 交付文档 / 打开文件 | `af deliver <文件> --title "…"` · `af open <文件> [--app vscode\|obsidian\|default\|finder]` |
 | 完整说明 | `af guide router` · `af guide member` · `af help` |

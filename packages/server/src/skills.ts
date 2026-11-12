@@ -132,6 +132,44 @@ reply. Do not retry, and do not open the file with other commands.
 }
 
 /**
+ * The "handoff" skill: a session hands off to a fresh one in its pane when its context is nearly full (agent-flow asks
+ * it, handoff.ts) or when the user asks. It writes the document; agent-flow closes it and starts the new session.
+ */
+export function handoffSkillText(af: string) {
+  return `---
+name: handoff
+description: Hand this session off to a fresh one that continues the work, by writing a handoff document; agent-flow then closes this session and starts the new one in its pane. Use when agent-flow says your context is nearly full ("[agent-flow] Your context is …% full … handoff"), or when the user asks to hand off or to go on in a new session ("交接一下", "写个 handoff", "开个新 session 接着做", "上下文快满了", "hand off", "start fresh").
+---
+
+# Hand off to a fresh session
+
+1. The document's path: the one in agent-flow's message, if it gave one; else run \`${af} handoff\` (it prints one).
+2. Write the handoff document there. Its reader is a new session of you that has not seen this conversation and must
+   go on from where you stop. Facts, not a story; paths, ticket numbers and commands, not pasted contents. Put in:
+   - The goal, and the user's current request, in the user's words where the wording matters.
+   - What the user decided or asked for along the way, and what they said not to do (corrections, preferences,
+     framing). This is what a new session gets wrong most easily.
+   - Where things stand: what is done (files, commits, branches, results with their paths); what is in progress and
+     who does it; what waits on the user.
+   - The sessions you started (\`${af} tickets\`). Those that have finished are closed when you hand off: put the
+     paths of their results in the document if the work needs them. Those still working stay and report to the new
+     session: say what each one does and what you wait for from it.
+   - What to do next, in order.
+   - What to read first (files, docs), and things learned the hard way: commands that work, machines and folders,
+     traps. Say what is not checked yet.
+   Keep it as short as it can be while complete; the next session can open the files you name.
+3. Run \`${af} handoff ready <the document's path>\`. Then end your turn with one line to the user: that you handed off,
+   and where the document is.
+
+agent-flow then closes this session and starts a new one in this pane, which reads the document first. Do not close
+yourself, close the sessions you started, start a session yourself, or go on working after \`${af} handoff ready\`.
+
+If the command fails (agent-flow is not running, or this session is not in it), give the user the document's path and
+say that a new session should read it.
+`;
+}
+
+/**
  * Install the skills where claude, codex, gemini and omp look for user skills. Returns the files written. omp reads
  * ~/.claude/skills too: its own folder gets them only where there is no ~/.claude (else omp would list them twice).
  */
@@ -145,6 +183,7 @@ export function installSkill(af: string, home = process.env.HOME ?? homedir()) {
     for (const [name, text] of [
       ["agent-flow", skillText(af)],
       ["deliver-document", deliverSkillText(af)],
+      ["handoff", handoffSkillText(af)],
     ] as const) {
       const dir = join(root, name);
       mkdirSync(dir, { recursive: true });

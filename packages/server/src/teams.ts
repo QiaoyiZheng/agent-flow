@@ -1593,7 +1593,7 @@ export class Teams {
       return true;
     } catch (e) {
       // a question on its screen, or the user typing to it: typed later (the caller tries again)
-      if ((e as AfError).code === "agent_asking" || (e as AfError).code === "user_typing") return false;
+      if (["agent_asking", "user_typing", "held"].includes((e as AfError).code)) return false;
       if (rethrow) throw e;
       console.error(`team ${t.id}: could not type into ${pane}:`, (e as Error).message);
       return false;
@@ -1698,7 +1698,51 @@ export class Teams {
     }
   }
 
-  private afPathOn(machine: string | undefined) {
+  /**
+   * A main session hands off (handoff.ts): close the sessions it started that have nothing left to do. A session
+   * stays when it works on a ticket, has a result not taken yet, has a message or a ticket waiting, stands for a whole
+   * team, or the user has been talking with it. Returns who was closed, and who goes on (with their tickets).
+   */
+  async closeFinished(mainPane: string): Promise<{ closed: string[]; running: { name: string; ticket?: string; title?: string; stage: string }[] }> {
+    const t = this.directTeamOf(mainPane);
+    const out = { closed: [] as string[], running: [] as { name: string; ticket?: string; title?: string; stage: string }[] };
+    if (!t) return out;
+    const w = this.opts.w;
+    for (const m of Object.values(t.state.members)) {
+      if (m.status === "exited" || !m.paneId) continue;
+      const mine = ticketList(t.state).filter((k) => k.assignee === m.name);
+      const open = mine.filter((k) => k.status !== "closed");
+      const last = mine.at(-1);
+      const p = w.model.panes.find((x) => x.id === m.paneId);
+      const busy = !!p?.agent && (p.agentStatus === "working" || p.agentStatus === "blocked" || !!p.asking || !!p.background);
+      const talking = last?.closeNote === "the user talked with it" || (w.lastTyped(m.paneId) ?? 0) > this.clock() - 10 * 60_000;
+      if (m.team || open.length || pendingMessages(t.state, m.name).length || busy || talking) {
+        const k = open[0] ?? last;
+        const stage = m.team ? "a team" : open[0]?.status === "submitted" ? "its result waits in your queue" : open.length || busy ? "working" : talking ? "the user talks with it" : "has a message waiting";
+        out.running.push({ name: m.name, ticket: k?.id, title: k?.title, stage });
+        continue;
+      }
+      // marked first: a member whose pane closes is otherwise reported as exited
+      this.setStatus(t, m.name, "exited");
+      await w.close(m.paneId).catch(() => {});
+      out.closed.push(m.name);
+    }
+    return out;
+  }
+
+  /** Whether the agent in `pane` works for a team: a member (af task, a router's member) or a router. */
+  isMemberPane(pane: string) {
+    for (const t of this.teams.values()) if (!t.state.stopped && Object.values(t.state.members).some((m) => m.paneId === pane && m.status !== "exited" && !m.team)) return true;
+    return false;
+  }
+
+  /** The panes of the sessions that hand out work (mode 1), whose teams are active. */
+  mainPanes(): string[] {
+    return [...this.teams.values()].filter((t) => !t.state.stopped && t.state.meta?.mode === "direct").map((t) => t.state.meta!.manager.pane!).filter(Boolean);
+  }
+
+  /** The af command on a machine: this Mac's, or the one agent-flow puts in that machine's ~/.agent-flow/bin. */
+  afPathOn(machine: string | undefined) {
     if (!machine || machine === "local") return join(this.opts.binDir, "af");
     const home = this.opts.w.remoteOf(`${machine}~x`)?.home;
     return home ? `${home}/.agent-flow/bin/af` : "af";

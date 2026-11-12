@@ -59,6 +59,8 @@ const ALLOWED = new Set([
   "POST /team/report",
   "GET /team/context",
   "POST /team/context",
+  "POST /handoff/start",
+  "POST /handoff/ready",
   "POST /team/submit",
   "POST /team/progress",
   "POST /team/ask",
@@ -95,6 +97,7 @@ export interface RemoteAfOptions {
   cliMain: string;
   /** Write the agent-flow skill on each machine (the main server does; a second server does not). */
   skillText?: (af: string) => string;
+  handoffText?: (af: string) => string;
   /** The deliver-document skill's text for that machine's af (agents there hand over documents with af deliver). */
   deliverText?: (af: string) => string;
   log?: (msg: string) => void;
@@ -162,6 +165,7 @@ export class RemoteAf {
           );
         const r = await put("agent-flow", this.opts.skillText(af));
         if (this.opts.deliverText) await put("deliver-document", this.opts.deliverText(af));
+        if (this.opts.handoffText) await put("handoff", this.opts.handoffText(af));
         if (r.code === 0) {
           this.skilled.add(machine);
           this.opts.log?.(`  skill on ${machine}: ${r.out.toString().trim().split("\n").filter(Boolean).join(", ") || "(no agent folders)"}`);

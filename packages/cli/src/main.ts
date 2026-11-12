@@ -129,6 +129,9 @@ Mode 1 — hand out tasks from this session (it gets each session's final reply 
   af context                                the project context the sessions you start read (in their agent.md): its
                                             file, to edit; each change goes to them
   af context set "<text>" | --file F        replace it
+  af handoff                                hand off to a fresh session in this pane: where to write the handoff
+  af handoff ready <file>                   document; once it is written (agent-flow then restarts this session,
+                                            closes the sessions you started that have finished, keeps the rest)
   af report "<text>"                        (in a session started with af task) tell the session that gave you the
                                             task what your conversation with the user changed; answers are not passed on
   af tickets [--json]    af ticket show <T>
@@ -334,6 +337,19 @@ async function main() {
           "--- screen", r.screen,
         ].join("\n"),
       );
+    }
+    case "handoff": {
+      if (pos[0] === "ready") {
+        const doc = pos[1] ? absolute(pos[1]) : undefined;
+        if (!doc) die("usage: af handoff ready <the handoff document>");
+        const r = await call("POST", "/handoff/ready", { path: doc });
+        return console.log(
+          `Handed off: ${r.doc}. End your turn now, with one line to the user that you handed off and where the document is. ` +
+            "When your turn ends, agent-flow closes the sessions you started that have finished, closes this session, and starts a new one in this pane that reads the document. Do nothing else.",
+        );
+      }
+      const r = await call("POST", "/handoff/start", {});
+      return console.log(`Write the handoff document (the handoff skill says what goes in it) to:\n  ${r.doc}\nThen run: ${r.af} handoff ready ${r.doc}`);
     }
     case "context": {
       if (pos[0] === "set") {

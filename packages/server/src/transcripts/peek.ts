@@ -17,6 +17,9 @@ export interface Peek {
   lastUser?: string;
   /** When it was written (ISO), if the transcript says. */
   lastUserAt?: string;
+  /** Tokens in its context after its last turn, and the window's size (as the footer's meter shows them). */
+  contextTokens?: number;
+  contextWindow?: number;
 }
 
 const TAIL = 2 * 1024 * 1024;
@@ -41,6 +44,7 @@ export function lastReply(agent: Agent, lines: string[]): Omit<Peek, "size"> {
   // entries by key, in order; a later "add" with the same key replaces it, "remove" takes it out (gemini rewrites)
   const entries = new Map<string, ChatBlock>();
   const times = new Map<ChatBlock, string | undefined>();
+  const meta: { contextTokens?: number; contextWindow?: number } = {};
   for (const line of lines) {
     if (line.length < 2) continue;
     let ops: ChatOp[];
@@ -52,6 +56,10 @@ export function lastReply(agent: Agent, lines: string[]): Omit<Peek, "size"> {
     for (const op of ops) {
       if (op.op === "add") (entries.set(op.entry.key, op.entry.block), times.set(op.entry.block, op.entry.at));
       else if (op.op === "remove") for (const k of op.keys) entries.delete(k);
+      else if (op.op === "meta") {
+        if (op.meta.contextTokens !== undefined) meta.contextTokens = op.meta.contextTokens;
+        if (op.meta.contextWindow !== undefined) meta.contextWindow = op.meta.contextWindow;
+      }
     }
   }
   const blocks = [...entries.values()];
@@ -73,7 +81,7 @@ export function lastReply(agent: Agent, lines: string[]): Omit<Peek, "size"> {
   const u = blocks[last];
   const lastUser = u?.kind === "user" ? (u.command ? `${u.command} ${u.text}`.trim() : u.text) : u?.kind === "notice" ? u.text : undefined;
   const lastUserAt = u ? times.get(u) : undefined;
-  return { reply: reply || undefined, error: err && tail === err ? err.detail ?? err.text : undefined, lastUser, ...(lastUserAt ? { lastUserAt } : {}) };
+  return { reply: reply || undefined, error: err && tail === err ? err.detail ?? err.text : undefined, lastUser, ...(lastUserAt ? { lastUserAt } : {}), ...meta };
 }
 
 /** An error that goes away by itself: rate limits, overload, server errors, dropped connections, timeouts. */

@@ -113,14 +113,14 @@ describe("skills written on server start", () => {
     expect(installSkill("/af", withClaude).some((f) => f.includes(".omp"))).toBe(false);
     const ompOnly = tmp();
     for (const d of [".codex", ".omp"]) mkdirSync(join(ompOnly, d));
-    expect(installSkill("/af", ompOnly)).toEqual([".codex/skills", ".omp/agent/skills"].flatMap((d) => [join(ompOnly, d, "agent-flow/SKILL.md"), join(ompOnly, d, "deliver-document/SKILL.md")]));
+    expect(installSkill("/af", ompOnly)).toEqual([".codex/skills", ".omp/agent/skills"].flatMap((d) => ["agent-flow", "deliver-document", "handoff"].map((n) => join(ompOnly, d, n, "SKILL.md"))));
   });
 
   test("agent-flow and deliver-document, for each installed agent (claude, codex, gemini), with this server's af path", () => {
     const home = tmp();
     for (const d of [".claude", ".codex", ".gemini"]) mkdirSync(join(home, d));
     const files = installSkill("/srv/af/bin/af", home);
-    expect(files).toEqual([".claude", ".codex", ".gemini"].flatMap((d) => [join(home, d, "skills/agent-flow/SKILL.md"), join(home, d, "skills/deliver-document/SKILL.md")]));
+    expect(files).toEqual([".claude", ".codex", ".gemini"].flatMap((d) => ["agent-flow", "deliver-document", "handoff"].map((n) => join(home, d, "skills", n, "SKILL.md"))));
     expect(readFileSync(files[0]!, "utf8")).toStartWith("---\nname: agent-flow\ndescription: ");
     const deliver = readFileSync(files[1]!, "utf8");
     expect(deliver).toStartWith("---\nname: deliver-document\ndescription: ");
@@ -133,7 +133,13 @@ describe("skills written on server start", () => {
     // an agent that is not installed gets nothing
     const bare = tmp();
     mkdirSync(join(bare, ".claude"));
-    expect(installSkill("/af", bare).map((f) => f.slice(bare.length))).toEqual(["/.claude/skills/agent-flow/SKILL.md", "/.claude/skills/deliver-document/SKILL.md"]);
+    expect(installSkill("/af", bare).map((f) => f.slice(bare.length))).toEqual(["/.claude/skills/agent-flow/SKILL.md", "/.claude/skills/deliver-document/SKILL.md", "/.claude/skills/handoff/SKILL.md"]);
+    // the handoff skill: with this server's af, triggered by agent-flow's request and by the user
+    const handoff = readFileSync(files[2]!, "utf8");
+    expect(handoff).toStartWith("---\nname: handoff\ndescription: ");
+    expect(handoff).toContain("/srv/af/bin/af handoff ready <the document's path>");
+    expect(handoff.split("\n")[2]).toContain("Your context is");
+    expect(handoff.split("\n")[2]).toContain("交接一下");
   });
 });
 

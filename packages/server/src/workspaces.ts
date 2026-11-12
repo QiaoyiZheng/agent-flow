@@ -128,6 +128,8 @@ export class Workspaces {
   private promptedAt = new Map<string, number>();
   /** When the user last pressed a key in each pane's web terminal. */
   private typedAt = new Map<string, number>();
+  /** Panes agent-flow types nothing into for now (its agent is being replaced: handoff.ts). */
+  private held = new Set<string>();
   /** Sessions by pane: given at launch (claude --session-id) or reported by claude's SessionStart hook. */
   sessions: Record<string, { id: string; path?: string }> = {};
   /**
@@ -753,9 +755,20 @@ export class Workspaces {
     await this.changed(r.m.meta.id);
   }
 
+  /** Type nothing into this pane on agent-flow's own account (notices, queued messages) until released. */
+  hold(pane: string, on: boolean) {
+    if (on) this.held.add(pane);
+    else this.held.delete(pane);
+  }
+
   /** The user pressed a key in this pane's web terminal. */
   noteTyped(pane: string) {
     this.typedAt.set(pane, Date.now());
+  }
+
+  /** When the user last pressed a key in this pane's web terminal (ms), if they did since the server started. */
+  lastTyped(pane: string) {
+    return this.typedAt.get(pane);
   }
 
   /**
@@ -781,6 +794,7 @@ export class Workspaces {
     // typed text + Enter would answer a question, approval or notice on screen (Herdr does not always see them)
     const st = await this.screenState(pane);
     if (st.menu || st.overlay) throw new AfError("agent_asking", "the agent is showing a question or a notice; answer it first", 409);
+    if (!byUser && this.held.has(pane)) throw new AfError("held", "agent-flow is replacing this agent; try again in a moment", 409);
     if (!byUser && (await this.userTyping(pane))) throw new AfError("user_typing", "the user is typing to this agent in its terminal; try again when they have sent it", 409);
     await r.backend.prompt(r.raw, text);
     this.promptedAt.set(pane, Date.now());
@@ -841,7 +855,7 @@ export class Workspaces {
    */
   isFree(pane: string) {
     const p = this.model.panes.find((x) => x.id === pane);
-    return !!p && !!p.agent && !p.asking && !p.scrolled && !this.busy(p);
+    return !!p && !!p.agent && !p.asking && !p.scrolled && !this.busy(p) && !this.held.has(pane);
   }
 
   /** When agent-flow last typed a prompt into the pane (ms), if it did. */
@@ -936,7 +950,7 @@ export class Workspaces {
         }
         continue;
       }
-      if (!p.agent || this.busy(p)) continue;
+      if (!p.agent || this.busy(p) || this.held.has(pane)) continue;
       // after a delivery (or a failed try), wait until the agent has taken it up (its status changed since), or 30 s
       const last = Math.max(this.queueSentAt.get(pane) ?? 0, this.promptedAt.get(pane) ?? 0);
       if (last && Date.now() - last < 30_000 && !(p.statusAt && Date.parse(p.statusAt) >= last && p.agentStatus !== "unknown")) continue;
@@ -950,7 +964,7 @@ export class Workspaces {
       } catch (e) {
         // asking something, or unreachable: try again later (the user typing to it: as soon as they stop)
         if ((e as AfError).code !== "user_typing") this.queueSentAt.set(pane, Date.now());
-        if (!["agent_asking", "user_typing"].includes((e as AfError).code)) this.opts.notify?.("warn", `queue:${pane}`, `A queued message for ${pane} could not be sent yet`, (e as Error).message);
+        if (!["agent_asking", "user_typing", "held"].includes((e as AfError).code)) this.opts.notify?.("warn", `queue:${pane}`, `A queued message for ${pane} could not be sent yet`, (e as Error).message);
       } finally {
         this.draining.delete(pane);
       }
@@ -1274,6 +1288,41 @@ export class Workspaces {
    * closes the pane (seen live with two codex panes). Ctrl+C there does nothing. The pane shows the agent as before
    * from the start, so nothing sees it exit.
    */
+  /** End the agent's process: Ctrl+C (twice: claude asks for a second one), then TERM. Only Ctrl+C: a Ctrl+D that
+   * reached the shell after the agent quit would end the shell and close the pane. */
+  private async endProcess(pane: string, pid: number, agent: string) {
+    const machine = splitId(pane).machine;
+    const r = this.route(pane);
+    for (let i = 0; i < 2; i++) {
+      if (!(await this.alive(machine, pid))) break;
+      await r.backend.sendKeys(r.raw, ["ctrl+c"]);
+      if (await this.gone(machine, pid, i === 0 ? 500 : 4000)) break;
+    }
+    if (!(await this.gone(machine, pid, 200))) {
+      await this.machineExec(machine, `kill -TERM ${pid}`).catch(() => {});
+      if (!(await this.gone(machine, pid, 5000))) throw new AfError("stop_failed", `${agent} did not exit`);
+    }
+  }
+
+  /**
+   * Replace the agent in `pane` (its process `pid`) with a new conversation of the same agent, started in the same
+   * shell: `bin args` in `cwd` (handoff.ts). Waits until its input box is up (or it asks something).
+   */
+  async replaceAgent(pane: string, pid: number, start: { agent: string; bin: string; args: string[]; cwd: string; session?: string }) {
+    if (this.sleepOps.has(pane) || this.wakeOps.has(pane) || this.asleep[pane]) throw new AfError("busy", "this agent is being stopped or started", 409);
+    const r = this.route(pane);
+    await this.endProcess(pane, pid, start.agent);
+    if (start.session) this.rememberSession(pane, start.session);
+    await r.backend.runInPane(r.raw, `cd ${sq(start.cwd)} && ${[start.bin, ...start.args].map(sq).join(" ")}`);
+    await Bun.sleep(1500);
+    for (const end = Date.now() + 90_000; Date.now() < end; await Bun.sleep(300)) {
+      const screen = await r.backend.readScreen(r.raw, true).catch(() => "");
+      if (inputText(start.agent, screen) !== undefined || parseMenu(screen, start.agent) || screenOverlay(screen, start.agent)?.hint) break;
+    }
+    this.changed(r.m.meta.id);
+    await this.refresh();
+  }
+
   async putToSleep(rec: SleepRecord, pid: number) {
     const pane = rec.pane;
     if (this.sleepOps.has(pane) || this.wakeOps.has(pane)) throw new AfError("busy", "this agent is being stopped or started", 409);
@@ -1283,15 +1332,7 @@ export class Workspaces {
       this.asleep[pane] = { ...rec, stopping: true };
       this.saveAsleep();
       try {
-        for (let i = 0; i < 2; i++) {
-          if (!(await this.alive(machine, pid))) break;
-          await r.backend.sendKeys(r.raw, ["ctrl+c"]);
-          if (await this.gone(machine, pid, i === 0 ? 500 : 4000)) break;
-        }
-        if (!(await this.gone(machine, pid, 200))) {
-          await this.machineExec(machine, `kill -TERM ${pid}`).catch(() => {});
-          if (!(await this.gone(machine, pid, 5000))) throw new AfError("stop_failed", `${rec.agent} did not exit`);
-        }
+        await this.endProcess(pane, pid, rec.agent);
       } catch (e) {
         delete this.asleep[pane];
         this.saveAsleep();

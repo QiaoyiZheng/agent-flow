@@ -7,6 +7,7 @@ import type { AgentKind, ClientPush, ServerPush, ShowRequest } from "@af/core";
 import { AGENT_KINDS } from "@af/core";
 import { AfError } from "./errors.ts";
 import { isLocalOrigin } from "./origin.ts";
+import { Handoffs, loadHandoffSettings } from "./handoff.ts";
 import type { Teams, Who } from "./teams.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
@@ -34,10 +35,20 @@ const repoRootOf = (cwd: string) => {
 };
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
-export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w), sleeper?: Sleeper) {
+export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w), sleeper?: Sleeper, handoffs?: Handoffs) {
   const needSleeper = () => {
     if (!sleeper) throw new AfError("unavailable", "process management is not running", 503);
     return sleeper;
+  };
+  const needHandoffs = () => {
+    if (!handoffs) throw new AfError("unavailable", "handoffs are not running", 503);
+    return handoffs;
+  };
+  /** The caller's own pane (af handoff runs inside the session that hands off). */
+  const ownPane = (who: Who) => {
+    if (who.kind !== "pane" && who.kind !== "member" && who.kind !== "router") throw new AfError("no_pane", "run this inside the session that hands off (it is known by its Herdr pane)");
+    if (!who.pane) throw new AfError("no_pane", "run this inside the session that hands off (it is known by its Herdr pane)");
+    return who.pane;
   };
   const commandCache = new Map<string, { at: number; items: unknown[] }>();
   // a remote machine's files (machine=<id> in a request), undefined for this Mac
@@ -121,6 +132,10 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(await o.status(who, String(body.ref ?? "")));
         case "POST /team/report":
           return json(o.report(who, String(body.text ?? ""), !!body.done));
+        case "POST /handoff/start":
+          return json(await needHandoffs().begin(ownPane(who)));
+        case "POST /handoff/ready":
+          return json(await needHandoffs().ready(ownPane(who), String(body.path ?? "")));
         case "GET /team/context":
           return json(o.context(who));
         case "POST /team/context":
@@ -587,7 +602,10 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   const sleeper = new Sleeper(w, access, o, opts.home, dispatchers);
   if (opts.sleep !== false) sleeper.start();
   sleeper.startRemembering(); // for after a Herdr restart (a reboot): pages stay, agents resume on a message
-  const handler = makeHandler(o, w, opts.backend, access, sleeper);
+  // a main session whose context is nearly full hands off to a fresh one (handoff.ts); not from a second server
+  const handoffs = new Handoffs(w, o, access, { home: opts.home, settings: loadHandoffSettings(opts.home), claudeSettings: o.opts.config.claudeSettings, notify: (level, key, text, detail) => opts.notices.add(level, key, text, detail) });
+  if (opts.sleep !== false) handoffs.start();
+  const handler = makeHandler(o, w, opts.backend, access, sleeper, handoffs);
   if (opts.watchDocs !== false) watchDocuments(w, access);
   watchTakeBacks(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();
