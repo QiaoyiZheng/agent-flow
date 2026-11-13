@@ -180,6 +180,60 @@ describe("a main session hands off when its context is nearly full", () => {
     expect(o.get(team).queue.find((q) => q.ticket === "T3")?.state).toBe("queued");
     expect(notes.at(-1)).toContain("smt-loop: claude handed off to a new session (its context was 85% full)");
     expect(notes.at(-1)).toContain("Closed 1 finished session(s) (reader); 2 still running.");
+
+    // close idle: once the counter's result is taken, it waits for nothing; the runner still works; a shell left
+    // alone in a tab with nothing running goes too; the main session never
+    const { idleSessions, closeIdle } = await import("../src/idle.ts");
+    await call("/team/take", { callerPane: lead });
+    const leftover = await backend.createTab(ws.workspaceId, cwd, "shell", {});
+    backend.procs.set(leftover.paneId, [{ pid: 1, argv: ["-zsh"] }]);
+    const busyShell = await backend.createTab(ws.workspaceId, cwd, "shell", {});
+    backend.procs.set(busyShell.paneId, [{ pid: 2, argv: ["-zsh"] }, { pid: 3, argv: ["python", "train.py"] }]);
+    await step();
+    // its conversation holds only what agent-flow typed (the task, worded as an older version did): not talked with
+    peeks.set(m("counter").paneId!, { reply: "4,559 rounds", userTexts: ["count the rounds\n\n(agent-flow ticket T3: when you finish, end with a summary. If the user then talks with you, just answer.)", "[agent-flow] The project context changed."] });
+    const idle = await idleSessions(o, w);
+    expect(idle.map((x) => [x.kind, x.label, !!x.talked])).toEqual([
+      ["agent", "counter (claude)", false],
+      ["shell", `shell in ${cwd.split("/").at(-1)}`, false],
+    ]);
+    // a message the user typed to it: listed, flagged (the button leaves it unticked)
+    peeks.set(m("counter").paneId!, { reply: "4,559 rounds", userTexts: ["count the rounds", "第三节的数字是哪来的？"] });
+    expect((await idleSessions(o, w)).find((x) => x.label === "counter (claude)")?.talked).toBe(true);
+    const res = await closeIdle(o, w, idle.map((x) => x.pane));
+    expect(res.closed.length).toBe(2);
+    expect(backend.panes.has(m("counter").paneId!)).toBe(false);
+    expect(m("counter").status).toBe("exited");
+    expect(backend.panes.has(leftover.paneId)).toBe(false);
+    expect(backend.panes.has(busyShell.paneId)).toBe(true);
+    expect(backend.panes.has(m("runner").paneId!)).toBe(true);
+    expect(backend.panes.has(lead)).toBe(true);
+    expect(o.get(team).queue.some((q) => q.kind === "exited")).toBe(false);
+    w.stop();
+  });
+
+  test("Refresh: the request goes now when it is free, and after its turn when it works", async () => {
+    const home = tmp("af-ho-refresh-");
+    const backend = new FakeBackend();
+    const w = new Workspaces({ home, backend, paneEnv: () => ({}) });
+    await w.start(60_000);
+    const o = new Teams({ home, backend, w, sock: "/s", binDir: "/af/bin", protocolDir: SKILL, config: DEFAULT_CONFIG });
+    o.load();
+    const ws = await backend.createWorkspace("paper", home);
+    await backend.startAgent("me", "claude", ws.paneId, []);
+    backend.screens.set(ws.paneId, BOX());
+    await w.refresh();
+    const access = { peek: async () => undefined, resolve: async () => ({ reason: "none" }) } as unknown as TranscriptAccess;
+    const handoffs = new Handoffs(w, o, access, { home });
+    const r = await handoffs.refresh(ws.paneId);
+    expect(r.queued).toBe(false);
+    const text = backend.prompts.at(-1)!.text;
+    expect(text).toStartWith("[agent-flow] The user pressed Refresh for this session.");
+    expect(text).toContain(`/af/bin/af handoff ready ${r.doc}`);
+    // working: it waits for the end of the turn
+    backend.set("me", "working");
+    await w.refresh();
+    expect((await handoffs.refresh(ws.paneId)).queued).toBe(true);
     w.stop();
   });
 });

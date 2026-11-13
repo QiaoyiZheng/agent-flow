@@ -3,7 +3,7 @@
 // again. Here the user sees which ones, changes the limits, and stops or starts one by hand.
 
 import { useEffect, useState } from "react";
-import { api, failed, useStore } from "./store";
+import { api, failed, notify, useStore } from "./store";
 import { kindColor } from "./view";
 
 interface Row {
@@ -50,6 +50,119 @@ export function ProcessesButton({ onGoTo }: { onGoTo: (paneId: string) => void }
         {agents.length - asleep} running{asleep ? ` · ${asleep} asleep` : ""}
       </button>
       {open && <ProcessesPanel onClose={() => setOpen(false)} onGoTo={onGoTo} />}
+    </span>
+  );
+}
+
+interface IdleSession {
+  pane: string;
+  kind: "agent" | "shell";
+  label: string;
+  title?: string;
+  workspace: string;
+  workspaceLabel: string;
+  machine: string;
+  machineLabel: string;
+  /** The user has talked with it directly: listed, not ticked. */
+  talked?: boolean;
+}
+
+/**
+ * Close idle: the sessions that wait for nothing (sessions started for tasks and teams whose work is done, and
+ * shells left alone in a tab), on every connected machine. The list comes first; one click closes them all.
+ */
+export function CloseIdleButton() {
+  const [list, setList] = useState<IdleSession[]>();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // ticked to close: all but the ones the user has talked with
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const look = () => {
+    setOpen(true);
+    setList(undefined);
+    api<{ sessions: IdleSession[] }>("GET", "/idle")
+      .then((r) => (setList(r.sessions), setPicked(new Set(r.sessions.filter((x) => !x.talked).map((x) => x.pane)))))
+      .catch((e) => (setOpen(false), failed("Could not list the idle sessions")(e)));
+  };
+  const close = () => {
+    if (!picked.size) return;
+    setBusy(true);
+    api<{ closed: string[]; skipped: { pane: string; why: string }[] }>("POST", "/idle/close", { panes: [...picked] })
+      .then((r) => {
+        notify("info", `Closed ${r.closed.length} idle session${r.closed.length === 1 ? "" : "s"}`, r.skipped.length ? `Left open: ${r.skipped.map((x) => `${list?.find((y) => y.pane === x.pane)?.label ?? x.pane} (${x.why})`).join(", ")}` : undefined);
+        setOpen(false);
+      })
+      .catch(failed("Could not close them"))
+      .finally(() => setBusy(false));
+  };
+  // grouped by machine and workspace
+  const groups = new Map<string, IdleSession[]>();
+  for (const x of list ?? []) {
+    const k = `${x.machine === "local" ? "" : `${x.machineLabel} / `}${x.workspaceLabel}`;
+    groups.set(k, [...(groups.get(k) ?? []), x]);
+  }
+  return (
+    <span className="notices-wrap">
+      <button className="notices-btn" title="Close the sessions that wait for nothing: sessions started for tasks and teams whose work is done, and shells left alone in a tab" onClick={() => (open ? setOpen(false) : look())}>
+        close idle
+      </button>
+      {open && (
+        <div className="notices-panel proc-panel">
+          <div className="notices-head">
+            <b>Idle sessions</b>
+            <span className="proc-ws">{list ? `${list.length} on the connected machines` : ""}</span>
+            <span className="spacer" />
+            <button className="c-more" onClick={() => setOpen(false)}>
+              cancel
+            </button>
+          </div>
+          <div className="proc-settings">
+            <div className="proc-note">
+              Sessions started for a task or a team whose work is done (results taken, nothing waiting, not working), and shells with nothing running that are alone in a tab. Not your own sessions, viewers, or a workspace's last tab. The ones you have talked with are not ticked. Conversations stay saved.
+            </div>
+          </div>
+          <div className="notices-list">
+            {!list && <div className="empty" style={{ padding: 12 }}>Looking…</div>}
+            {list && !list.length && <div className="empty" style={{ padding: 12 }}>Nothing is idle.</div>}
+            {[...groups].map(([g, xs]) => (
+              <div key={g}>
+                <div className="proc-group">{g}</div>
+                {xs.map((x) => (
+                  <label key={x.pane} className="proc-row idle-row">
+                    <input
+                      type="checkbox"
+                      checked={picked.has(x.pane)}
+                      onChange={(e) =>
+                        setPicked((p) => {
+                          const n = new Set(p);
+                          if (e.target.checked) n.add(x.pane);
+                          else n.delete(x.pane);
+                          return n;
+                        })
+                      }
+                    />
+                    <i className="proc-dot" style={{ background: x.kind === "shell" ? "var(--text-3)" : kindColor(x.label.match(/\((\w+)\)$/)?.[1] ?? "") }} />
+                    <div className="proc-main">
+                      <div className="proc-name">
+                        {x.label}
+                        {x.talked && <span className="proc-ws"> · you have talked with it</span>}
+                      </div>
+                      {x.title && <div className="proc-title">{x.title}</div>}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+          {!!list?.length && (
+            <div className="idle-foot">
+              <button className="btn primary" disabled={busy || !picked.size} onClick={close}>
+                {busy ? "closing…" : `Close ${picked.size}`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </span>
   );
 }

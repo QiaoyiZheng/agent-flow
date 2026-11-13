@@ -17,6 +17,8 @@ export interface Peek {
   lastUser?: string;
   /** When it was written (ISO), if the transcript says. */
   lastUserAt?: string;
+  /** The user messages in the part read (the last 50, oldest first): who has talked with it (Teams.talkedWith). */
+  userTexts?: string[];
   /** Tokens in its context after its last turn, and the window's size (as the footer's meter shows them). */
   contextTokens?: number;
   contextWindow?: number;
@@ -81,7 +83,8 @@ export function lastReply(agent: Agent, lines: string[]): Omit<Peek, "size"> {
   const u = blocks[last];
   const lastUser = u?.kind === "user" ? (u.command ? `${u.command} ${u.text}`.trim() : u.text) : u?.kind === "notice" ? u.text : undefined;
   const lastUserAt = u ? times.get(u) : undefined;
-  return { reply: reply || undefined, error: err && tail === err ? err.detail ?? err.text : undefined, lastUser, ...(lastUserAt ? { lastUserAt } : {}), ...meta };
+  const userTexts = blocks.filter((b): b is Extract<ChatBlock, { kind: "user" }> => b.kind === "user").map((b) => (b.command ? `${b.command} ${b.text}`.trim() : b.text)).slice(-50);
+  return { reply: reply || undefined, error: err && tail === err ? err.detail ?? err.text : undefined, lastUser, ...(lastUserAt ? { lastUserAt } : {}), ...meta, ...(userTexts.length ? { userTexts } : {}) };
 }
 
 /** An error that goes away by itself: rate limits, overload, server errors, dropped connections, timeouts. */

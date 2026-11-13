@@ -8,6 +8,7 @@ import { AGENT_KINDS } from "@af/core";
 import { AfError } from "./errors.ts";
 import { isLocalOrigin } from "./origin.ts";
 import { Handoffs, loadHandoffSettings } from "./handoff.ts";
+import { closeIdle, idleSessions } from "./idle.ts";
 import type { Teams, Who } from "./teams.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
@@ -132,6 +133,12 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(await o.status(who, String(body.ref ?? "")));
         case "POST /team/report":
           return json(o.report(who, String(body.text ?? ""), !!body.done));
+        case "POST /pane/refresh":
+          return json(await needHandoffs().refresh(String(body.pane ?? "")));
+        case "GET /idle":
+          return json({ sessions: await idleSessions(o, w, shellWorkspace(o.opts.home)) });
+        case "POST /idle/close":
+          return json(await closeIdle(o, w, Array.isArray(body.panes) ? body.panes.map(String) : [], shellWorkspace(o.opts.home)));
         case "POST /handoff/start":
           return json(await needHandoffs().begin(ownPane(who)));
         case "POST /handoff/ready":

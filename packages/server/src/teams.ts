@@ -136,6 +136,8 @@ export class Teams {
   private listeners = new Set<(team: string, ev: TeamEvent) => void>();
   private ticking = false;
   private timer?: ReturnType<typeof setInterval>;
+  /** team -> member -> when the user last talked with it (from the team's events: "the user talked with it"). */
+  private talks = new Map<string, Map<string, string>>();
   /** team -> an edit of its project context not sent yet, and since when the file has had that text (ms). */
   private contextEdits = new Map<string, { text: string; since: number }>();
   private pending = new Set<Promise<unknown>>();
@@ -1521,6 +1523,16 @@ export class Teams {
     const got = n(text);
     const ours = [
       ...t.state.outbox.filter((o) => o.member === m.name).map((o) => o.text),
+      // the task as written: the message around it was worded otherwise by earlier versions of agent-flow
+      ...ticketList(t.state)
+        .filter((x) => x.assignee === m.name)
+        .map((x) => {
+          try {
+            return readFileSync(join(this.ticketDir(t, x.id), "task.md"), "utf8");
+          } catch {
+            return "";
+          }
+        }),
       ...ticketList(t.state)
         .filter((x) => x.assignee === m.name)
         .map((x) => {
@@ -1571,6 +1583,8 @@ export class Teams {
       // the user talked with it after its result was taken: that conversation is theirs, its manager does not hear
       // each reply. What it changes for the work, the session reports itself (af report, as its task says).
       this.emit(t, { type: "ticket.closed", at: this.now(), id: k.id, outcome: "done", note: "the user talked with it" });
+      this.talkedAt(t, m.name);
+      this.talks.get(t.id)?.set(m.name, this.now());
       return true;
     }
     if (m.protocol === "none") {
@@ -1700,35 +1714,106 @@ export class Teams {
   }
 
   /**
-   * A main session hands off (handoff.ts): close the sessions it started that have nothing left to do. A session
-   * stays when it works on a ticket, has a result not taken yet, has a message or a ticket waiting, stands for a whole
-   * team, or the user has been talking with it. Returns who was closed, and who goes on (with their tickets).
+   * Why a member's session stays (undefined: it has nothing left to do and may be closed). It stays when it stands
+   * for a whole team, works, has a result not taken yet, has a ticket or a message waiting, or the user has been
+   * talking with it. In a router's team that still runs, the router may give any member more work.
+   */
+  keepReason(t: Team, m: Member): string | undefined {
+    const w = this.opts.w;
+    if (m.team) return "a team";
+    const p = w.model.panes.find((x) => x.id === m.paneId);
+    const busy = !!p?.agent && (p.agentStatus === "working" || p.agentStatus === "blocked" || !!p.asking || !!p.background);
+    const mine = ticketList(t.state).filter((k) => k.assignee === m.name);
+    const open = mine.filter((k) => k.status !== "closed");
+    const talking = (w.lastTyped(m.paneId!) ?? 0) > this.clock() - 10 * 60_000; // keys in its terminal just now
+    if (busy) return "working";
+    if (talking) return "the user talks with it";
+    if (t.state.stopped) return undefined; // its team is over: nothing more will come
+    if (t.state.meta?.mode === "router") return m.name === t.state.meta.manager.member ? "the router of a running team" : "its team's router may give it more work";
+    if (open[0]?.status === "submitted") return "its result waits in your queue";
+    if (open.length) return "working";
+    if (pendingMessages(t.state, m.name).length) return "has a message waiting";
+    return undefined;
+  }
+
+  /** Close a member's session: marked first (a member whose pane closes is otherwise reported as exited). */
+  async closeMember(t: Team, m: Member) {
+    this.setStatus(t, m.name, "exited");
+    await this.opts.w.close(m.paneId!).catch(() => {});
+  }
+
+  /**
+   * A main session hands off (handoff.ts): close the sessions it started that have nothing left to do (keepReason).
+   * Returns who was closed, and who goes on (with their tickets).
    */
   async closeFinished(mainPane: string): Promise<{ closed: string[]; running: { name: string; ticket?: string; title?: string; stage: string }[] }> {
     const t = this.directTeamOf(mainPane);
     const out = { closed: [] as string[], running: [] as { name: string; ticket?: string; title?: string; stage: string }[] };
     if (!t) return out;
-    const w = this.opts.w;
     for (const m of Object.values(t.state.members)) {
       if (m.status === "exited" || !m.paneId) continue;
-      const mine = ticketList(t.state).filter((k) => k.assignee === m.name);
-      const open = mine.filter((k) => k.status !== "closed");
-      const last = mine.at(-1);
-      const p = w.model.panes.find((x) => x.id === m.paneId);
-      const busy = !!p?.agent && (p.agentStatus === "working" || p.agentStatus === "blocked" || !!p.asking || !!p.background);
-      const talking = last?.closeNote === "the user talked with it" || (w.lastTyped(m.paneId) ?? 0) > this.clock() - 10 * 60_000;
-      if (m.team || open.length || pendingMessages(t.state, m.name).length || busy || talking) {
-        const k = open[0] ?? last;
-        const stage = m.team ? "a team" : open[0]?.status === "submitted" ? "its result waits in your queue" : open.length || busy ? "working" : talking ? "the user talks with it" : "has a message waiting";
-        out.running.push({ name: m.name, ticket: k?.id, title: k?.title, stage });
+      const why = this.keepReason(t, m) ?? ((await this.talkedWith(t, m)) ? "the user has talked with it" : undefined);
+      if (why) {
+        const mine = ticketList(t.state).filter((k) => k.assignee === m.name);
+        const k = mine.find((x) => x.status !== "closed") ?? mine.at(-1);
+        out.running.push({ name: m.name, ticket: k?.id, title: k?.title, stage: why });
         continue;
       }
-      // marked first: a member whose pane closes is otherwise reported as exited
-      this.setStatus(t, m.name, "exited");
-      await w.close(m.paneId).catch(() => {});
+      await this.closeMember(t, m);
       out.closed.push(m.name);
     }
     return out;
+  }
+
+  /** The sessions of all teams (running or over) that have nothing left to do: for the "close idle" button. */
+  async idleMembers(): Promise<{ team: string; member: string; pane: string; agent: string; title?: string; talked: boolean }[]> {
+    const found: { t: Team; m: Member }[] = [];
+    for (const t of this.teams.values()) {
+      if (!t.state.meta) continue;
+      for (const m of Object.values(t.state.members)) {
+        if (m.status === "exited" || !m.paneId || !this.opts.w.model.panes.some((p) => p.id === m.paneId && p.agent)) continue;
+        if (!this.keepReason(t, m)) found.push({ t, m });
+      }
+    }
+    const talked = new Map<Member, boolean>();
+    for (let i = 0; i < found.length; i += 8) await Promise.all(found.slice(i, i + 8).map(async ({ t, m }) => talked.set(m, await this.talkedWith(t, m).catch(() => false))));
+    return found.map(({ t, m }) => ({ team: t.id, member: m.name, pane: m.paneId!, agent: m.kind, title: ticketList(t.state).filter((k) => k.assignee === m.name).at(-1)?.title, talked: !!talked.get(m) }));
+  }
+
+  /** When the user last talked with a member directly (its turns agent-flow took for theirs: userTalked). */
+  private talkedAt(t: Team, member: string): string | undefined {
+    let map = this.talks.get(t.id);
+    if (!map) {
+      map = new Map();
+      try {
+        for (const line of readFileSync(join(t.dir, "events.jsonl"), "utf8").split("\n")) {
+          if (!line.includes("the user talked with it")) continue;
+          const e = JSON.parse(line);
+          const who = e.type === "ticket.closed" && e.note === "the user talked with it" ? t.state.tickets[e.id]?.assignee : undefined;
+          if (who) map.set(who, e.at);
+        }
+      } catch {}
+      this.talks.set(t.id, map);
+    }
+    return map.get(member);
+  }
+
+  /**
+   * Whether the user has talked with a member's session directly: agent-flow saw it (talkedAt), or its conversation
+   * has a message that neither agent-flow nor its manager typed (before agent-flow told those turns apart).
+   */
+  async talkedWith(t: Team, m: Member): Promise<boolean> {
+    if (this.talkedAt(t, m.name)) return true;
+    if (!m.paneId || !this.opts.peek) return false;
+    const pk = await this.opts.peek(m.paneId).catch(() => undefined);
+    return (pk?.userTexts ?? []).some((u) => u.trim() && !u.startsWith("[agent-flow]") && !this.typedByUs(t, m, u));
+  }
+
+  /** Close the member in `pane` of team `team` (idle.ts checked it has nothing left to do). */
+  async closeIdleMember(team: string, member: string) {
+    const t = this.teams.get(team);
+    const m = t?.state.members[member];
+    if (t && m?.paneId) await this.closeMember(t, m);
   }
 
   /** Whether the agent in `pane` works for a team: a member (af task, a router's member) or a router. */

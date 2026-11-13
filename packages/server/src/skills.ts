@@ -138,7 +138,7 @@ reply. Do not retry, and do not open the file with other commands.
 export function handoffSkillText(af: string) {
   return `---
 name: handoff
-description: Hand this session off to a fresh one that continues the work, by writing a handoff document; agent-flow then closes this session and starts the new one in its pane. Use when agent-flow says your context is nearly full ("[agent-flow] Your context is …% full … handoff"), or when the user asks to hand off or to go on in a new session ("交接一下", "写个 handoff", "开个新 session 接着做", "上下文快满了", "hand off", "start fresh").
+description: Hand this session off to a fresh one that continues the work, by writing a handoff document; agent-flow then closes this session and starts the new one in its pane. Use when agent-flow says your context is nearly full ("[agent-flow] Your context is …% full … handoff") or that the user pressed Refresh ("[agent-flow] The user pressed Refresh"), or when the user asks to hand off or to go on in a new session ("交接一下", "写个 handoff", "开个新 session 接着做", "上下文快满了", "hand off", "start fresh").
 ---
 
 # Hand off to a fresh session

@@ -498,7 +498,9 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
   // documents this agent handed over (af deliver, or found at the end of its turn): a row of open buttons at the end
   // of the turn they came in, i.e. under the agent's reply, before the next user message. Ones from turns not loaded
   // yet (earlier pages) wait until those are.
-  const { deliveries } = useStore();
+  const { deliveries, teams } = useStore();
+  // Refresh (a handoff now) is for the user's own sessions; one that works for a team or on a task gets new work instead
+  const isMember = teams.some((t) => !t.stopped && t.memberPanes.includes(paneId));
   // each turn's reply (its text after the turn's last tool call), copied as Markdown with the button under it;
   // a turn starts with a user message, or a message agent-flow typed in
   const replyAt = useMemo(() => {
@@ -694,6 +696,7 @@ export function AgentView({ paneId, agent, status, background, asleep, focused, 
             </div>
           )}
         </span>
+        {!isMember && source && !source.pending && <RefreshButton pane={paneId} agent={agent} working={status === "working"} />}
         {source && !source.pending && (
           <button disabled={forking} onClick={() => fork()} title="Fork: a new agent next to this one, with this whole conversation so far">
             {forking ? "forking…" : "⑂ Fork"}
@@ -960,6 +963,40 @@ function OutgoingMessage({ o, pane, working, stale, onTerminal }: { o: Outgoing;
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Refresh: the session writes a handoff document; agent-flow then closes the sessions it started that have finished,
+ * closes it, and starts a fresh session here that reads the document (server handoff.ts). A second click confirms.
+ */
+function RefreshButton({ pane, agent, working }: { pane: string; agent: string; working: boolean }) {
+  const [armed, setArmed] = useState(false);
+  const [sent, setSent] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  const go = () => {
+    setArmed(false);
+    api<{ queued: boolean }>("POST", "/pane/refresh", { pane })
+      .then((r) => {
+        setSent(true);
+        setTimeout(() => setSent(false), 8000);
+        notify("info", `${agent} will hand off${r.queued ? " when its turn ends" : ""}`, "It writes a handoff document; then agent-flow closes the sessions it started that have finished, and starts a fresh session here that reads it.");
+      })
+      .catch(failed("Could not refresh"));
+  };
+  return (
+    <button
+      className={armed ? "on" : ""}
+      disabled={sent}
+      onClick={() => (armed ? go() : setArmed(true))}
+      title={`Refresh: ${agent} writes a handoff document${working ? " (after this turn)" : ""}; then agent-flow closes the sessions it started that have finished, closes ${agent}, and starts a fresh ${agent} here that reads the document and goes on. The sessions still working stay and report to it.`}
+    >
+      {sent ? "refreshing…" : armed ? "click again to refresh" : "↻ Refresh"}
+    </button>
   );
 }
 

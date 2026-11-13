@@ -703,8 +703,8 @@ describe("reading what an agent said last", () => {
   test("the reply after the last user message, and that message; an error only when nothing came after it", () => {
     const claude = (type: string, content: unknown) => JSON.stringify({ type, message: { role: type, content }, uuid: Math.random().toString(36), timestamp: "2026-11-04T10:00:00Z" });
     const lines = [claude("user", "first"), claude("assistant", [{ type: "text", text: "old answer" }]), claude("user", "count them"), claude("assistant", [{ type: "text", text: "There are 4." }]), claude("assistant", [{ type: "text", text: "Done." }])];
-    expect(lastReply("claude", lines)).toEqual({ reply: "There are 4.\n\nDone.", error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z" });
-    expect(lastReply("claude", ["not json", ...lines.slice(0, 3)])).toEqual({ reply: undefined, error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z" });
+    expect(lastReply("claude", lines)).toEqual({ reply: "There are 4.\n\nDone.", error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z", userTexts: ["first", "count them"] });
+    expect(lastReply("claude", ["not json", ...lines.slice(0, 3)])).toEqual({ reply: undefined, error: undefined, lastUser: "count them", lastUserAt: "2026-11-04T10:00:00Z", userTexts: ["first", "count them"] });
     // a message agent-flow typed in ("[agent-flow] …", shown as a notice) starts a turn too
     const note = "[agent-flow] The project context changed. Read it again.";
     expect(lastReply("claude", [...lines, claude("user", note), claude("assistant", [{ type: "text", text: "Read it." }])])).toMatchObject({ reply: "Read it.", lastUser: note });

@@ -2,7 +2,8 @@
 //   1. After each turn of a main session (the session that hands out tasks, mode 1), agent-flow reads how full its
 //      context is from its transcript (the footer's meter: transcripts/peek.ts). At `at` (80% by default) it types a
 //      request: write a handoff document to <path> with the handoff skill, then run af handoff ready <path>.
-//      Any session can also hand off when the user asks it to (af handoff gives it the path).
+//      Any session can also hand off when the user asks it to (af handoff gives it the path), or presses Refresh
+//      (refresh: the same request, now).
 //   2. af handoff ready: when that turn has ended (and the user is not typing to it), agent-flow closes the sessions
 //      it started that have nothing left to do (Teams.closeFinished), ends the agent and starts a new conversation of
 //      the same agent, with the same flags, in the same pane: it is the same main session for agent-flow, so the
@@ -45,9 +46,10 @@ export function freshArgs(agent: string, args: string[], opts: { session?: strin
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 const tokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M` : `${Math.round(n / 1000)}k`);
 
-export function requestText(o: { used: number; tokens: number; window: number; doc: string; af: string }) {
+/** The request to hand off: when the context is nearly full (used, tokens, window), or when the user pressed Refresh. */
+export function requestText(o: { used?: number; tokens?: number; window?: number; doc: string; af: string }) {
   return [
-    `[agent-flow] Your context is ${pct(o.used)} full (${tokens(o.tokens)} of ${tokens(o.window)} tokens).`,
+    o.used !== undefined ? `[agent-flow] Your context is ${pct(o.used)} full (${tokens(o.tokens!)} of ${tokens(o.window!)} tokens).` : "[agent-flow] The user pressed Refresh for this session.",
     `Hand off to a fresh session now, with the handoff skill: write the handoff document to ${o.doc}, then run: ${o.af} handoff ready ${o.doc}`,
     "When your turn ends, agent-flow closes the sessions you started that have finished (their results taken), closes this session, and starts a new one in this pane that reads the document. The sessions still working stay and report to the new session: say in the document what each one does and what you wait for. Do not start other work first.",
   ].join("\n");
@@ -147,6 +149,18 @@ export class Handoffs {
     this.agentPane(pane);
     const doc = await this.docPath(pane);
     return { doc, af: this.teams.afPathOn(splitId(pane).machine) };
+  }
+
+  /**
+   * The Refresh button: ask the session to hand off now, as when its context is nearly full. It goes now if the agent
+   * is free, else when its turn ends (agent-flow's queue).
+   */
+  async refresh(pane: string) {
+    const p = this.agentPane(pane);
+    if (this.pending.has(pane) || this.replacing.has(pane)) throw new AfError("busy", "it is handing off already", 409);
+    const doc = await this.docPath(pane);
+    const r = await this.w.send(pane, requestText({ doc, af: this.teams.afPathOn(p.machine) }), [], "auto");
+    return { doc, agent: p.agent, queued: "queued" in r };
   }
 
   /** af handoff ready <doc>: the document is written; the session is replaced once its turn ends. */
