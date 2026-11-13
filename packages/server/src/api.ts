@@ -606,6 +606,8 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   const handoffs = new Handoffs(w, o, access, { home: opts.home, settings: loadHandoffSettings(opts.home), claudeSettings: o.opts.config.claudeSettings, notify: (level, key, text, detail) => opts.notices.add(level, key, text, detail) });
   if (opts.sleep !== false) handoffs.start();
   const handler = makeHandler(o, w, opts.backend, access, sleeper, handoffs);
+  // another route to a machine's Herdr found: documents handed over there keep their panes under that machine
+  w.onRemap((from, to) => access.deliveries.remap(from, to));
   if (opts.watchDocs !== false) watchDocuments(w, access);
   watchTakeBacks(w, access);
   const clients = new Set<import("bun").ServerWebSocket<WsData>>();

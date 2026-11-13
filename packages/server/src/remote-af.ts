@@ -134,7 +134,8 @@ export class RemoteAf {
   }
 
   async tick() {
-    for (const m of this.opts.w.model.machines) if (!m.local && m.state === "online") void this.ensure(m.id);
+    // another route to a machine's Herdr is not set up again: the machine's af (through whichever route works) serves it
+    for (const m of this.opts.w.model.machines) if (!m.local && m.state === "online" && !m.aliasOf) void this.ensure(m.id);
   }
 
   /** Set the machine up (or check it is still set up): its socket here, the forward, the af script, the skill. */

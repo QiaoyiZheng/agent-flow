@@ -76,6 +76,7 @@ export function hostOf(w: Workspaces, machine: string, local: LocalHostParts): H
       expand: (p) => (p === "~" ? home : p.startsWith("~/") ? `${home}${p.slice(1)}` : p),
     };
   }
+  machine = w.primaryOf(machine); // another route to a machine's Herdr: that machine
   const meta = w.model.machines.find((m) => m.id === machine);
   if (!meta) throw new AfError("unknown_machine", `no machine ${machine} (machines: ${w.model.machines.map((m) => m.id).join(", ")})`, 404);
   const remote = w.remoteOf(`${machine}${MACHINE_SEP}x`);

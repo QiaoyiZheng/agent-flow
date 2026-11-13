@@ -195,6 +195,13 @@ export interface HMachine {
   error?: string;
   /** Remote Herdr session name. */
   session?: string;
+  /**
+   * Another route (SSH target) to the Herdr of machine `aliasOf`: its panes are shown, and used, under that machine
+   * (the same Herdr twice would make every pane twice). It is the connection when that machine's own one is down.
+   */
+  aliasOf?: string;
+  /** This machine's own connection is down, and its Herdr is reached through this other route. */
+  via?: string;
 }
 
 export interface HerdrModel {

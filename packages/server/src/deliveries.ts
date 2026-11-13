@@ -34,6 +34,19 @@ export class Deliveries {
     return () => this.listeners.delete(fn);
   }
 
+  /** Machine `from` is another route to the Herdr of `to`: the documents keep their panes under `to`. */
+  remap(from: string, to: string) {
+    const pre = `${from}~`; // MACHINE_SEP
+    const move = (id?: string) => (id?.startsWith(pre) ? `${to}~${id.slice(pre.length)}` : id);
+    let n = 0;
+    for (const d of this.list)
+      if (d.machine === from || d.pane?.startsWith(pre) || d.workspace?.startsWith(pre) || d.viewer?.startsWith(pre)) {
+        Object.assign(d, { machine: d.machine === from ? to : d.machine, pane: move(d.pane), workspace: move(d.workspace), viewer: move(d.viewer) });
+        n++;
+      }
+    if (n) this.changed();
+  }
+
   private changed() {
     if (this.list.length > MAX) this.list = this.list.slice(-MAX);
     writeFileSync(this.file, JSON.stringify(this.list, null, 2));

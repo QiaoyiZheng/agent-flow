@@ -162,6 +162,13 @@ export class Workspaces {
   /** Herdr profile ids of machines the user connected: reconnected on every start until they disconnect. */
   private autoconnect = new Set<string>();
   private autoFile: string;
+  /**
+   * Each saved machine's Herdr, as "<machine id>|<home>" (learned when it connects; saved). Two saved machines with the
+   * same are two routes (SSH targets) to one Herdr: its panes are shown, and used, under the first of them in the list.
+   */
+  private identities: Record<string, string> = {};
+  private identityFile: string;
+  private remapListeners = new Set<(from: string, to: string) => void>();
 
   constructor(private opts: WorkspacesOptions) {
     this.viewsFile = join(opts.home, "views.json");
@@ -190,7 +197,110 @@ export class Workspaces {
     if (existsSync(sf))
       for (const [k, v] of Object.entries(JSON.parse(readFileSync(sf, "utf8")) as Record<string, unknown>))
         this.sessions[k] = typeof v === "string" ? { id: v } : (v as { id: string; path?: string });
+    this.identityFile = join(opts.home, "machine-ids.json");
+    try {
+      if (existsSync(this.identityFile)) this.identities = JSON.parse(readFileSync(this.identityFile, "utf8"));
+    } catch {}
     this.machines.set("local", this.newMachine({ id: "local", label: "Local", target: "local", local: true, state: "online" }, opts.backend));
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // routes: saved machines that reach the same Herdr
+
+  /** The machine whose ids stand for this machine's Herdr: the first in the list with the same Herdr, else itself. */
+  primaryOf(machine: string): string {
+    const me = this.identities[machine];
+    if (!me || machine === "local") return machine;
+    for (const [k, m] of this.machines) if (!m.meta.local && this.identities[k] === me) return k;
+    return machine;
+  }
+
+  /** The other routes to the Herdr of `primary`. */
+  private aliasesOf(primary: string): Machine[] {
+    const me = this.identities[primary];
+    if (!me) return [];
+    return [...this.machines.values()].filter((m) => !m.meta.local && m.meta.id !== primary && this.identities[m.meta.id] === me);
+  }
+
+  /** An id as agent-flow keeps it: one on another route to a machine's Herdr goes under that machine. */
+  canonId(id: string) {
+    const { machine, raw } = splitId(id);
+    const p = this.primaryOf(machine);
+    return p === machine ? id : `${p}${MACHINE_SEP}${raw}`;
+  }
+
+  /** The connection a machine's ids go through: its own, or (while that is down) another route to its Herdr. */
+  private io(m: Machine): { backend?: TerminalBackend; remote?: RemoteLike; via?: Machine } {
+    if (m.backend || m.meta.local) return { backend: m.backend, remote: m.remote };
+    for (const a of this.aliasesOf(m.meta.id)) if (a.backend) return { backend: a.backend, remote: a.remote, via: a };
+    return { backend: m.backend, remote: m.remote };
+  }
+
+  /** Called when the ids of machine `from` become those of machine `to` (another route to the same Herdr). */
+  onRemap(fn: (from: string, to: string) => void) {
+    this.remapListeners.add(fn);
+    return () => this.remapListeners.delete(fn);
+  }
+
+  /** Which Herdr a remote machine reaches: learned once it is connected; routes are regrouped when it is new. */
+  private async learnIdentity(m: Machine) {
+    const r = m.remote;
+    if (!r || m.meta.local) return;
+    // machine-id (Linux) or the hardware UUID (macOS), else the host name and the Herdr socket's inode; and the home
+    // folder (each user has a Herdr of their own)
+    const cmd = `id=$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}'); [ -n "$id" ] || id="$(hostname):$(ls -i "$HOME/.config/herdr/herdr.sock" 2>/dev/null | awk '{print $1}')"; printf '%s|%s' "$id" "$HOME"`;
+    const out = await r.exec(cmd, { timeoutMs: 15_000 }).catch(() => undefined);
+    const id = out && out.code === 0 ? out.out.toString().trim() : "";
+    if (!/^[^|]+\|\/./.test(id) || this.identities[m.meta.id] === id) return;
+    const before = new Map([...this.machines.keys()].map((k) => [k, this.primaryOf(k)]));
+    this.identities[m.meta.id] = id;
+    writeFileSync(this.identityFile, JSON.stringify(this.identities, null, 2));
+    this.regroup(before);
+  }
+
+  /** After routes changed: a machine that stood for a Herdr and now is another route to it hands its ids over. */
+  private regroup(before: Map<string, string>) {
+    for (const [k, was] of before) {
+      const now = this.machines.has(k) ? this.primaryOf(k) : before.get(k)!;
+      if (was === k && now !== k) this.remap(k, now);
+    }
+    for (const m of this.machines.values()) m.lastPoll = 0;
+    this.publish(true);
+    void this.refresh();
+  }
+
+  /** Move everything kept under machine `from`'s ids to machine `to`'s (the same Herdr, so the same raw ids). */
+  private remap(from: string, to: string) {
+    const pre = `${from}${MACHINE_SEP}`;
+    const move = (id: string) => (id.startsWith(pre) ? `${to}${MACHINE_SEP}${id.slice(pre.length)}` : id);
+    const rekey = <T>(rec: Record<string, T>, fix?: (v: T, key: string) => T, keep?: (a: T, b: T) => T) => {
+      for (const k of Object.keys(rec)) {
+        if (!k.startsWith(pre)) continue;
+        const nk = move(k);
+        const v = fix ? fix(rec[k]!, nk) : rec[k]!;
+        rec[nk] = nk in rec && keep ? keep(rec[nk]!, v) : nk in rec ? rec[nk]! : v;
+        delete rec[k];
+      }
+    };
+    // a stopped agent recorded on both: the later stop is the one
+    rekey(this.asleep, (r, key) => ({ ...r, pane: key }), (a, b) => (Date.parse(b.since) > Date.parse(a.since) ? b : a));
+    rekey(this.known, (r, key) => ({ ...r, pane: key }));
+    rekey(this.sessions);
+    rekey(this.views, (v) => ({ ...v, machine: v.machine === from ? to : v.machine }));
+    rekey(this.queue);
+    if (this.savedStatus[from]) {
+      this.savedStatus[to] = { ...this.savedStatus[from], ...this.savedStatus[to] };
+      delete this.savedStatus[from];
+    }
+    const m = this.machines.get(from);
+    if (m) Object.assign(m, { workspaces: [], tabs: [], panes: [], layouts: {}, sigs: {} });
+    this.saveAsleep();
+    writeFileSync(this.knownFile, JSON.stringify(this.known, null, 2));
+    writeFileSync(join(this.opts.home, "sessions.json"), JSON.stringify(this.sessions, null, 2));
+    this.saveViews();
+    this.saveQueue();
+    this.saveStatus(to, new Map(Object.entries(this.savedStatus[to] ?? {})));
+    for (const l of this.remapListeners) l(from, to);
   }
 
   private saveAutoconnect() {
@@ -216,6 +326,7 @@ export class Workspaces {
     const saved = await this.opts.backend.savedMachines();
     const ids = new Set(saved.map((s) => s.id));
     let changed = false;
+    const before = new Map([...this.machines.keys()].map((k) => [k, this.primaryOf(k)]));
     for (const [key, m] of this.machines)
       if (!m.meta.local && !ids.has(m.profileId!)) {
         m.stopWatch?.();
@@ -241,7 +352,15 @@ export class Workspaces {
       // stay connected across restarts: machines the user connected, or whose SSH connection is still up
       if (m.remote && (this.autoconnect.has(s.id) || m.remote.masterAlive?.())) void m.remote.connect().catch(() => {});
     }
-    if (changed) this.publish(true);
+    if (changed) {
+      // a removed machine that stood for a Herdr: the next route to it takes its ids
+      for (const [k, was] of before)
+        if (was === k && !this.machines.has(k) && this.identities[k]) {
+          const next = [...this.machines.values()].find((m) => !m.meta.local && this.identities[m.meta.id] === this.identities[k]);
+          if (next) this.remap(k, next.meta.id);
+        }
+      this.publish(true);
+    }
   }
 
   /** Save a new SSH machine in Herdr (so the Herdr TUI has it too) and connect to it. */
@@ -303,6 +422,8 @@ export class Workspaces {
     m.stopWatch = m.backend?.watchLifecycle(() => {
       clearTimeout(this.debounce);
       m.lastPoll = 0;
+      const p = this.machines.get(this.primaryOf(m.meta.id));
+      if (p) p.lastPoll = 0;
       this.debounce = setTimeout(() => void this.refresh(), 80);
     });
   }
@@ -316,7 +437,10 @@ export class Workspaces {
     if (say) {
       const src = `machine:${key}`;
       if (r.state === "error" && (prev.state !== "error" || prev.error !== r.error)) say("error", src, `${m.meta.label}: ${r.error ?? "connection failed"}`, `ssh ${m.meta.target} — retrying automatically`);
-      else if (r.state === "connecting" && prev.state === "online") say("warn", src, `Lost the connection to ${m.meta.label}; reconnecting`, r.error);
+      else if (r.state === "connecting" && prev.state === "online") {
+        const other = this.aliasesOf(this.primaryOf(key)).concat(this.machines.get(this.primaryOf(key)) ?? []).find((x) => x !== m && x.backend);
+        say("warn", src, `Lost the connection to ${m.meta.label}; reconnecting${other ? ` (its Herdr is still reached through ${other.meta.label})` : ""}`, r.error);
+      }
       else if (r.state === "online" && prev.state !== "online" && m.troubled) say("info", src, `Connected to ${m.meta.label} again`);
       if (r.state === "error" || (r.state === "connecting" && prev.state === "online")) m.troubled = true;
       if (r.state === "online" || r.state === "offline") m.troubled = false;
@@ -325,6 +449,7 @@ export class Workspaces {
       m.backend = m.makeBackend();
       this.watch(m);
       m.lastPoll = 0;
+      void this.learnIdentity(m);
       void this.refresh();
     }
     if (r.state !== "online" && m.backend) {
@@ -332,8 +457,13 @@ export class Workspaces {
       m.stopWatch = undefined;
       m.backend = undefined;
     }
-    // while reconnecting, keep showing the last known workspaces (the UI dims them); forget them on disconnect
-    if (r.state === "offline") {
+    // the machine this route serves (itself, or the one it is another route to) uses the connection that works now
+    const served = this.machines.get(this.primaryOf(key));
+    if (served) served.lastPoll = 0;
+    if (served && served !== m) void this.refresh();
+    // while reconnecting, keep showing the last known workspaces (the UI dims them); forget them on disconnect,
+    // unless another route to its Herdr shows them
+    if (r.state === "offline" && !this.io(m).via) {
       m.workspaces = [];
       m.tabs = [];
       m.panes = [];
@@ -454,12 +584,13 @@ export class Workspaces {
       const st = state.get(x.id);
       return !st || (was === "working" && st.for !== change(x.id)) || (st.n > 0 && Date.now() - st.at >= 6000);
     });
-    if (due.length && !m.bgRunning && m.remote && m.backend) {
+    const io = this.io(m);
+    if (due.length && !m.bgRunning && io.remote && io.backend) {
       for (const x of due) pending.add(x.id);
       const forChange = new Map(due.map((x) => [x.id, change(x.id)]));
       m.bgRunning = true;
-      const remote = m.remote;
-      const backend = m.backend;
+      const remote = io.remote;
+      const backend = io.backend;
       void (async () => {
         const counts = new Map<string, number>();
         try {
@@ -484,6 +615,7 @@ export class Workspaces {
    * else that waits for an agent to finish.
    */
   settled(pane: string) {
+    pane = this.canonId(pane);
     const p = this.model.panes.find((x) => x.id === pane);
     return !!p && !!p.agent && !p.asking && !p.background && (p.agentStatus === "done" || p.agentStatus === "idle") && !this.busy(p);
   }
@@ -529,13 +661,21 @@ export class Workspaces {
   }
 
   private async refreshMachine(m: Machine) {
-    if (!m.backend) return; // remote and not connected: the last known model stays until it disconnects
+    // another route to a machine's Herdr: its panes are that machine's (refreshed under it, through this route when
+    // that machine's own connection is down)
+    if (!m.meta.local && this.primaryOf(m.meta.id) !== m.meta.id) {
+      if (m.panes.length || m.workspaces.length) Object.assign(m, { workspaces: [], tabs: [], panes: [], layouts: {}, sigs: {} });
+      return;
+    }
+    const io = this.io(m);
+    const backend = io.backend;
+    if (!backend) return; // remote and not connected: the last known model stays until it disconnects
     if (!m.meta.local && Date.now() - m.lastPoll < (this.opts.remotePollMs ?? 3000)) return;
     m.lastPoll = Date.now();
     try {
       const key = m.meta.id;
       const p = (id: string) => (key === "local" ? id : `${key}${MACHINE_SEP}${id}`);
-      const snap = await m.backend.snapshot();
+      const snap = await backend.snapshot();
       const layouts: Record<string, HLayout> = {};
       const stale: string[] = [];
       for (const t of snap.tabs) {
@@ -543,7 +683,7 @@ export class Workspaces {
         if (old && m.sigs[t.id] === snap.layoutSigs[t.id]) layouts[p(t.id)] = old;
         else stale.push(t.id);
       }
-      const fresh = await Promise.all(stale.map((id) => m.backend!.exportLayout(id).catch(() => undefined)));
+      const fresh = await Promise.all(stale.map((id) => backend.exportLayout(id).catch(() => undefined)));
       const prefixTree = (n: LayoutNode): LayoutNode => (n.type === "pane" ? { type: "pane", paneId: p(n.paneId) } : { ...n, first: prefixTree(n.first), second: prefixTree(n.second) });
       stale.forEach((id, i) => {
         const l = fresh[i];
@@ -557,7 +697,7 @@ export class Workspaces {
       snap.panes = this.overlayAsleep(key, snap.panes, p);
       this.checkRestored(key, snap.panes, p);
       // background work claude still waits on after its turn ended (local only: see background.ts)
-      const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : m.remote ? this.checkBackgroundRemote(m, snap.panes) : new Map<string, number>();
+      const bg = m.meta.local ? await this.checkBackground(m, snap.panes) : io.remote ? this.checkBackgroundRemote(m, snap.panes) : new Map<string, number>();
       const bgPending = m.bgPending ?? new Set<string>();
       // when each agent's status changed: "finished" in Needs you means finished after the user last looked.
       // Saved across restarts: a status that changed while the server was down changed now. The status tracked is
@@ -612,7 +752,7 @@ export class Workspaces {
       }
     } catch (e) {
       m.failedPolls++;
-      if (m.remote && m.failedPolls >= 2) void m.remote.verify?.();
+      if (m.failedPolls >= 2) void (this.io(m).via ?? m).remote?.verify?.();
       if (m.meta.local && m.failedPolls === 1) this.opts.notify?.("error", "herdr", "Herdr is not responding", `${(e as Error).message} — is the Herdr server running?`);
       if (m.failedPolls === 1 || m.failedPolls % 20 === 0) console.error(`herdr refresh (${m.meta.id}):`, (e as Error).message);
     }
@@ -621,7 +761,7 @@ export class Workspaces {
   private publish(force = false) {
     const ms = [...this.machines.values()];
     this.model = {
-      machines: ms.map((m) => m.meta),
+      machines: ms.map((m) => this.metaOf(m)),
       workspaces: ms.flatMap((m) => m.workspaces),
       tabs: ms.flatMap((m) => m.tabs),
       panes: ms.flatMap((m) => m.panes),
@@ -634,28 +774,40 @@ export class Workspaces {
     }
   }
 
+  /** A machine as the UI and the API see it: another route is marked; one served through another route is online. */
+  private metaOf(m: Machine): HMachine {
+    if (m.meta.local) return m.meta;
+    const primary = this.primaryOf(m.meta.id);
+    if (primary !== m.meta.id) return { ...m.meta, aliasOf: primary };
+    const via = this.io(m).via;
+    return via ? { ...m.meta, state: "online", error: undefined, via: via.meta.id } : m.meta;
+  }
+
   private saveViews() {
     writeFileSync(this.viewsFile, JSON.stringify(this.views, null, 2));
   }
 
   /** Which machine and backend an id belongs to, and the id Herdr knows it by. */
   route(id: string) {
-    const { machine, raw } = splitId(id);
+    const { machine: given, raw } = splitId(id);
+    const machine = this.primaryOf(given); // an id on another route to a machine's Herdr: the same pane
     const m = this.machines.get(machine);
     if (!m) throw new AfError("unknown_machine", `no machine ${machine}`, 404);
-    if (!m.backend) throw new AfError("machine_offline", `${m.meta.label} is not connected${m.meta.error ? `: ${m.meta.error}` : ""}`, 503);
+    const io = this.io(m);
+    if (!io.backend) throw new AfError("machine_offline", `${m.meta.label} is not connected${m.meta.error ? `: ${m.meta.error}` : ""}`, 503);
     const p = (x: string) => (machine === "local" ? x : `${machine}${MACHINE_SEP}${x}`);
-    return { m, backend: m.backend, raw, local: m.meta.local, prefix: p };
+    return { m, backend: io.backend, remote: io.remote, raw, local: m.meta.local, prefix: p };
   }
 
   private pane(id: string) {
-    const p = this.model.panes.find((x) => x.id === id);
+    const c = this.canonId(id); // an id on another route to its machine's Herdr: the same pane
+    const p = this.model.panes.find((x) => x.id === c);
     if (!p) throw new AfError("unknown_pane", `no Herdr pane ${id}. Run af ls to see panes.`, 404);
     return p;
   }
 
   private changed(machine = "local") {
-    const m = this.machines.get(machine);
+    const m = this.machines.get(this.primaryOf(machine));
     if (m) m.lastPoll = 0;
     this.lastJson = "";
     return this.refresh();
@@ -688,22 +840,24 @@ export class Workspaces {
     if (!ws) throw new AfError("unknown_workspace", `no Herdr workspace ${workspaceId}`, 404);
     const r = this.route(workspaceId);
     const anyPane = this.model.panes.find((p) => p.workspaceId === workspaceId);
-    const res = await r.backend.createTab(r.raw, cwd ?? anyPane?.cwd ?? (r.local ? (process.env.HOME ?? "/") : (r.m.remote?.home ?? "/")), "shell", r.local ? this.opts.paneEnv() : {});
+    const res = await r.backend.createTab(r.raw, cwd ?? anyPane?.cwd ?? (r.local ? (process.env.HOME ?? "/") : (r.remote?.home ?? "/")), "shell", r.local ? this.opts.paneEnv() : {});
     await this.changed(r.m.meta.id);
     return { paneId: r.prefix(res.paneId), tabId: r.prefix(res.tabId) };
   }
 
   async newWorkspace(label: string, cwd: string | undefined, machine = "local") {
+    machine = this.primaryOf(machine);
     const m = this.machines.get(machine);
-    if (!m?.backend) throw new AfError("machine_offline", `${machine} is not connected`, 503);
-    let dir = cwd?.trim() || (m.meta.local ? (process.env.HOME ?? "/") : (m.remote?.home ?? "~"));
+    const io = m ? this.io(m) : {};
+    if (!m || !io.backend) throw new AfError("machine_offline", `${machine} is not connected`, 503);
+    let dir = cwd?.trim() || (m.meta.local ? (process.env.HOME ?? "/") : (io.remote?.home ?? "~"));
     if (m.meta.local && !existsSync(dir)) throw new AfError("bad_cwd", `${dir} does not exist`);
     if (!m.meta.local) {
-      if (dir === "~" || dir.startsWith("~/")) dir = `${m.remote?.home ?? ""}${dir.slice(1)}`;
-      const r = await m.remote!.exec(`test -d ${sq(dir)} && echo ok`);
+      if (dir === "~" || dir.startsWith("~/")) dir = `${io.remote?.home ?? ""}${dir.slice(1)}`;
+      const r = await io.remote!.exec(`test -d ${sq(dir)} && echo ok`);
       if (r.out.toString().trim() !== "ok") throw new AfError("bad_cwd", `${dir} does not exist on ${m.meta.label}`);
     }
-    const r = await m.backend.createWorkspace(label.trim() || basename(dir) || "workspace", dir);
+    const r = await io.backend.createWorkspace(label.trim() || basename(dir) || "workspace", dir);
     await this.changed(machine);
     const p = (x: string) => (machine === "local" ? x : `${machine}${MACHINE_SEP}${x}`);
     // the folder next to the shell, so the workspace opens on its files (on an SSH machine: read over SSH)
@@ -854,6 +1008,7 @@ export class Workspaces {
    * has not started on yet. (Typing also checks the screen for a menu or notice: see prompt.)
    */
   isFree(pane: string) {
+    pane = this.canonId(pane);
     const p = this.model.panes.find((x) => x.id === pane);
     return !!p && !!p.agent && !p.asking && !p.scrolled && !this.busy(p) && !this.held.has(pane);
   }
@@ -943,8 +1098,8 @@ export class Workspaces {
       const p = this.model.panes.find((x) => x.id === pane);
       if (!p) {
         // the pane is gone (not just out of sight on a disconnected machine): its queue has no one to go to
-        const m = this.machines.get(splitId(pane).machine);
-        if (m?.backend && m.lastPoll > 0 && m.failedPolls === 0 && (m.meta.local || m.meta.state === "online")) {
+        const m = this.machines.get(this.primaryOf(splitId(pane).machine));
+        if (m && this.io(m).backend && m.lastPoll > 0 && m.failedPolls === 0) {
           delete this.queue[pane];
           this.saveQueue();
         }
@@ -1037,7 +1192,7 @@ export class Workspaces {
     const r = pane ? this.route(pane) : undefined;
     if (!r || r.local) return { path: saveLocal(this.opts.home, bytes, name), name, size: bytes.length, remote: false };
     const { date, id } = stamp();
-    const res = await r.m.remote!.exec(`d="$HOME/.agent-flow/attachments/${date}"; mkdir -p "$d" && cat > "$d/${id}-"${sq(name)} && echo "$d/${id}-"${sq(name)}`, { stdin: bytes, timeoutMs: 120_000 });
+    const res = await r.remote!.exec(`d="$HOME/.agent-flow/attachments/${date}"; mkdir -p "$d" && cat > "$d/${id}-"${sq(name)} && echo "$d/${id}-"${sq(name)}`, { stdin: bytes, timeoutMs: 120_000 });
     const path = res.out.toString().trim();
     if (res.code !== 0 || !path) throw new AfError("upload_failed", `could not store the file on ${r.m.meta.label}: ${res.err}`);
     return { path, name, size: bytes.length, remote: true };
@@ -1251,14 +1406,15 @@ export class Workspaces {
 
   /** Run a shell command on a machine (this Mac, or a connected remote one): its output. */
   async machineExec(machine: string, cmd: string): Promise<string> {
-    const m = this.machines.get(machine);
+    const m = this.machines.get(this.primaryOf(machine));
     if (!m) throw new AfError("unknown_machine", `no machine ${machine}`, 404);
     if (m.meta.local) {
       const proc = Bun.spawn(["sh", "-c", cmd], { stdout: "pipe", stderr: "ignore" });
       return await new Response(proc.stdout).text();
     }
-    if (!m.remote) throw new AfError("machine_offline", `${m.meta.label} is not connected`, 503);
-    return (await m.remote.exec(cmd)).out.toString();
+    const remote = this.io(m).remote;
+    if (!remote) throw new AfError("machine_offline", `${m.meta.label} is not connected`, 503);
+    return (await remote.exec(cmd)).out.toString();
   }
 
   private async alive(machine: string, pid: number) {
@@ -1415,7 +1571,9 @@ export class Workspaces {
 
   remoteOf(pane: string): RemoteLike | undefined {
     const { machine } = splitId(pane);
-    return machine === "local" ? undefined : this.machines.get(machine)?.remote;
+    if (machine === "local") return undefined;
+    const m = this.machines.get(this.primaryOf(machine));
+    return m ? this.io(m).remote : undefined;
   }
 
   /** Show a file, directory, or URL: in an existing viewer pane, in a new split, or in a new tab, on the pane's machine. */
@@ -1490,11 +1648,11 @@ export class Workspaces {
 
   /** A connected remote machine's files: run a command there, and its home folder. */
   remoteFiles(machine: string): { exec: Exec; home?: string; label: string } {
-    const m = this.machines.get(machine);
+    const m = this.machines.get(this.primaryOf(machine));
     if (!m) throw new AfError("unknown_machine", `no machine ${machine}`, 404);
     if (m.meta.local) throw new AfError("local", `${machine} is this Mac`);
-    if (!m.remote || m.meta.state !== "online") throw new AfError("machine_offline", `${m.meta.label} is not connected`, 503);
-    const remote = m.remote;
+    const remote = this.io(m).remote;
+    if (!remote || remote.state !== "online") throw new AfError("machine_offline", `${m.meta.label} is not connected`, 503);
     return { exec: (cmd, opts) => remote.exec(cmd, opts), home: remote.home, label: m.meta.label };
   }
 

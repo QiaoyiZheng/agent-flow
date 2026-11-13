@@ -98,6 +98,7 @@ export function Sidebar({
         </div>
         {adding && <AddMachine onDone={() => setAdding(false)} />}
         {herdr?.machines.map((m) => {
+          const label = (id: string) => herdr.machines.find((x) => x.id === id)?.label ?? id;
           // remote machines start collapsed and connect when expanded
           const open = !(collapsed[m.id] ?? !m.local);
           const workspaces = herdr.workspaces.filter((w) => w.machine === m.id && !hidden.has(w.id));
@@ -111,9 +112,23 @@ export function Sidebar({
                 <span className="caret">{open ? "▾" : "▸"}</span>
                 {!m.local && <span className={`dot m-${m.state}`} />}
                 <span className="name">{m.label}</span>
-                {!m.local && <span className="meta">{m.state === "connecting" ? (workspaces.length ? "reconnecting…" : "connecting…") : m.state === "error" ? "retrying" : ""}</span>}
+                {!m.local && (
+                  <span className="meta" title={m.aliasOf ? `The same Herdr as ${label(m.aliasOf)}, through another SSH route (${m.target}). Its workspaces are under ${label(m.aliasOf)}; this route is used when that one's connection is down.` : m.via ? `Its own connection is down; reached through ${label(m.via)}` : undefined}>
+                    {m.aliasOf
+                      ? `route to ${label(m.aliasOf)}`
+                      : m.via
+                        ? `via ${label(m.via)}`
+                        : m.state === "connecting"
+                          ? workspaces.length
+                            ? "reconnecting…"
+                            : "connecting…"
+                          : m.state === "error"
+                            ? "retrying"
+                            : ""}
+                  </span>
+                )}
                 <span className="row-actions" onClick={(e) => e.stopPropagation()}>
-                  {(m.local || m.state === "online") && (
+                  {(m.local || m.state === "online") && !m.aliasOf && (
                     <button title={`New workspace on ${m.label}`} onClick={() => onNew(m.id)}>
                       +
                     </button>

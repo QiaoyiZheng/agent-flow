@@ -186,6 +186,8 @@ export type TeamEvent = (
   | E<"team.delegate", { on: boolean }>
   | E<"member.added", { member: Member }>
   | E<"member.placed", { name: string; paneId: string; tabId: string }>
+  /** Machine `from` turned out to be another route to the Herdr of machine `to`: its ids are `to`'s. */
+  | E<"team.remapped", { from: string; to: string }>
   | E<"member.status", { name: string; status: AgentStatus }>
   | E<"ticket.opened", { ticket: Ticket }>
   | E<"ticket.delivered", { id: string }>
@@ -243,6 +245,27 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
     case "member.added":
       s.members[ev.member.name] = { ...ev.member };
       break;
+    case "team.remapped": {
+      // "<machine>~<id>" (protocol.ts MACHINE_SEP; not imported: protocol.ts imports this file)
+      const pre = `${ev.from}~`;
+      const move = (id?: string) => (id?.startsWith(pre) ? `${ev.to}~${id.slice(pre.length)}` : id);
+      for (const m of Object.values(s.members)) {
+        m.paneId = move(m.paneId);
+        m.tabId = move(m.tabId);
+        if (m.machine === ev.from) m.machine = ev.to;
+      }
+      const meta = s.meta;
+      if (meta) {
+        meta.manager.pane = move(meta.manager.pane);
+        meta.workspace = move(meta.workspace)!;
+        if (meta.machine === ev.from) meta.machine = ev.to;
+        if (meta.workspaces?.[ev.from]) {
+          meta.workspaces[ev.to] ??= move(meta.workspaces[ev.from])!;
+          delete meta.workspaces[ev.from];
+        }
+      }
+      break;
+    }
     case "member.placed": {
       const m = s.members[ev.name];
       if (m) Object.assign(m, { paneId: ev.paneId, tabId: ev.tabId });

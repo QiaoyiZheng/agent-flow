@@ -147,6 +147,7 @@ export class Teams {
     this.now = opts.now ?? (() => new Date().toISOString());
     this.clock = opts.clock ?? (() => Date.now());
     mkdirSync(join(opts.home, "teams"), { recursive: true });
+    opts.w.onRemap((from, to) => this.remapMachine(from, to));
   }
 
   // -------------------------------------------------------------------------------------------
@@ -541,7 +542,7 @@ export class Teams {
    */
   private async placeFor(t: Team, name: string, req: { machine?: string; cwd?: string; worktree?: boolean }) {
     const meta = t.state.meta!;
-    const machine = req.machine || meta.machine || "local";
+    const machine = this.opts.w.primaryOf(req.machine || meta.machine || "local"); // a route to a machine's Herdr: that machine
     const host = this.host(machine);
     const same = machine === (meta.machine ?? "local");
     const cwd = req.cwd ? host.expand(req.cwd) : same ? meta.cwd : host.home;
@@ -811,7 +812,7 @@ export class Teams {
     else if (!ui) throw new AfError("no_pane", "run af team new inside a session, or start a team from the agent-flow UI");
     // the router's machine: as asked, else the caller's; its folder: as asked, else the caller's (same machine) or home
     const pm = parent?.state.meta;
-    const machine = req.machine || pm?.machine || "local";
+    const machine = this.opts.w.primaryOf(req.machine || pm?.machine || "local");
     const host = this.host(machine);
     const cwd = req.cwd ? host.expand(host.local ? resolve(req.cwd) : req.cwd) : pm && (pm.machine ?? "local") === machine ? pm.cwd : host.local ? undefined : host.home;
     if (!cwd || (await host.sh(`test -d ${sq(cwd)} && echo ok`)).out.trim() !== "ok") throw new AfError("bad_cwd", `${cwd ?? "(no folder)"} is not a folder${host.local ? "" : ` on ${host.label}`}`);
@@ -1311,7 +1312,7 @@ export class Teams {
   private async watchMember(t: Team, m: Member) {
     const w = this.opts.w;
     // a member on a machine that is not connected right now: nothing can be known or done until it is back
-    if (m.machine && m.machine !== "local" && w.model.machines.find((x) => x.id === m.machine)?.state !== "online") return;
+    if (m.machine && m.machine !== "local" && w.model.machines.find((x) => x.id === w.primaryOf(m.machine!))?.state !== "online") return;
     const p = w.model.panes.find((x) => x.id === m.paneId);
     const now = this.clock();
     // a pane just made on another machine shows up in Herdr's model a few seconds later
@@ -1734,6 +1735,16 @@ export class Teams {
   isMemberPane(pane: string) {
     for (const t of this.teams.values()) if (!t.state.stopped && Object.values(t.state.members).some((m) => m.paneId === pane && m.status !== "exited" && !m.team)) return true;
     return false;
+  }
+
+  /** Machine `from` is another route to the Herdr of `to`: every team keeps its ids under `to`. */
+  private remapMachine(from: string, to: string) {
+    const pre = `${from}~`; // MACHINE_SEP
+    for (const t of this.teams.values()) {
+      const m = t.state.meta;
+      const uses = m && (m.machine === from || m.manager.pane?.startsWith(pre) || m.workspace?.startsWith(pre) || m.workspaces?.[from] || Object.values(t.state.members).some((x) => x.machine === from || x.paneId?.startsWith(pre)));
+      if (uses) this.emit(t, { type: "team.remapped", at: this.now(), from, to });
+    }
   }
 
   /** The panes of the sessions that hand out work (mode 1), whose teams are active. */
