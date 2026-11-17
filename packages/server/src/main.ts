@@ -13,7 +13,7 @@ import { Workspaces } from "./workspaces.ts";
 import { RemoteMachine } from "./remote.ts";
 import { Notices } from "./notices.ts";
 import { PlaybookLibrary } from "./playbooks.ts";
-import { deliverSkillText, handoffSkillText, installSkill, skillText } from "./skills.ts";
+import { deliverSkillText, handoffSkillText, installSkills, skillText, withMark } from "./skills.ts";
 import { RemoteAf } from "./remote-af.ts";
 
 export const afHome = () => process.env.AF_HOME ?? join(homedir(), ".agent-flow");
@@ -88,14 +88,18 @@ export async function main(argv: string[]) {
   const second = process.env.AF_SECOND_SERVER === "1";
   const api = serve(o, w, { sock, port, token, home, backend, webDir: join(repoRoot, "packages/web/dist"), notices, access, watchDocs: !second, sleep: !second });
   // af on connected SSH machines (remote-af.ts); not from a second server, which would take over their af.sock
-  const remoteAf = second ? undefined : new RemoteAf({ home, w, teams: o, handler: api.handler, cliMain: join(repoRoot, "packages/cli/src/main.ts"), skillText, deliverText: deliverSkillText, handoffText: handoffSkillText, log: (m) => console.log(m) });
+  const remoteAf = second ? undefined : new RemoteAf({ home, w, teams: o, handler: api.handler, cliMain: join(repoRoot, "packages/cli/src/main.ts"), skillText: (af) => withMark(skillText(af)), deliverText: (af) => withMark(deliverSkillText(af)), handoffText: (af) => withMark(handoffSkillText(af)), log: (m) => console.log(m) });
   remoteAf?.start();
   writeFileSync(join(home, "server.json"), JSON.stringify({ pid: process.pid, port, sock, url: `http://127.0.0.1:${port}/?token=${token}` }));
   console.log(`agent-flow server: ${n} team(s) loaded`);
   console.log(`  UI:     http://127.0.0.1:${port}/?token=${token}`);
   console.log(`  socket: ${sock}`);
   console.log(`  af CLI: ${join(binDir, "af")}  (add ${binDir} to PATH)`);
-  if (!second) for (const f of installSkill(join(binDir, "af"))) console.log(`  skill:  ${f}`);
+  if (!second) {
+    const r = installSkills(join(binDir, "af"));
+    for (const f of r.written) console.log(`  skill:  ${f}`);
+    for (const f of r.skipped) console.log(`  skill:  ${f} is not agent-flow's (a skill of yours with the same name): left alone`);
+  }
   const shutdown = () => {
     o.stop();
     remoteAf?.stop();

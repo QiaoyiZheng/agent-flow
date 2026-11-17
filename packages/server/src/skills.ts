@@ -2,7 +2,7 @@
 // folder). It teaches them to hand work to other agents through agent-flow when the user asks for that:
 // "让别的 session 同时做…", "开两个 codex 并行…". Written on server start with this server's af command.
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -173,8 +173,26 @@ say that a new session should read it.
  * Install the skills where claude, codex, gemini and omp look for user skills. Returns the files written. omp reads
  * ~/.claude/skills too: its own folder gets them only where there is no ~/.claude (else omp would list them twice).
  */
-export function installSkill(af: string, home = process.env.HOME ?? homedir()) {
+/** The line in each skill agent-flow writes, after its front matter: how it knows the file is its own. */
+export const SKILL_MARK = "<!-- agent-flow writes this file and rewrites it on every start. Do not edit it. -->";
+
+/**
+ * Whether a SKILL.md is agent-flow's own: it has the mark, or (written before the mark existed) it calls agent-flow's
+ * af. A skill of the same name the user has from elsewhere is neither: it is left alone.
+ */
+export const isOurSkill = (text: string) => text.includes(SKILL_MARK) || text.includes("/.agent-flow/bin/af");
+
+/** The skill's text with the mark after its front matter. */
+export const withMark = (text: string) => text.replace(/^(---\n[\s\S]*?\n---\n)/, `$1\n${SKILL_MARK}\n`);
+
+/**
+ * Install the skills where claude, codex, gemini and omp look for user skills. Only agent-flow's three folders are
+ * written (agent-flow, deliver-document, handoff), and in them only SKILL.md; a SKILL.md there that is not agent-flow's
+ * (the user's own skill of the same name) is left alone and returned in `skipped`. Nothing else is touched.
+ */
+export function installSkills(af: string, home = process.env.HOME ?? homedir()): { written: string[]; skipped: string[] } {
   const written: string[] = [];
+  const skipped: string[] = [];
   // [the agent's folder, its skills folder]; gemini reads ~/.gemini/skills/<name>/SKILL.md in the same format
   const roots: [string, string][] = [".claude", ".codex", ".gemini"].map((d) => [join(home, d), join(home, d, "skills")]);
   if (!existsSync(join(home, ".claude"))) roots.push([join(home, ".omp"), join(home, ".omp", "agent", "skills")]);
@@ -186,10 +204,20 @@ export function installSkill(af: string, home = process.env.HOME ?? homedir()) {
       ["handoff", handoffSkillText(af)],
     ] as const) {
       const dir = join(root, name);
+      const file = join(dir, "SKILL.md");
+      if (existsSync(file) && !isOurSkill(readFileSync(file, "utf8"))) {
+        skipped.push(file);
+        continue;
+      }
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "SKILL.md"), text);
-      written.push(join(dir, "SKILL.md"));
+      writeFileSync(file, withMark(text));
+      written.push(file);
     }
   }
-  return written;
+  return { written, skipped };
+}
+
+/** installSkills, returning the files written. */
+export function installSkill(af: string, home = process.env.HOME ?? homedir()) {
+  return installSkills(af, home).written;
 }

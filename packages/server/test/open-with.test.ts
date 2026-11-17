@@ -103,10 +103,35 @@ describe("documents an agent changed during its turn", () => {
   });
 });
 
-import { deliverSkillText, installSkill, skillText } from "../src/skills.ts";
+import { SKILL_MARK, deliverSkillText, installSkill, installSkills, isOurSkill, skillText } from "../src/skills.ts";
 import { readFileSync } from "node:fs";
 
 describe("skills written on server start", () => {
+  test("a skill of the user's with the same name is left alone; agent-flow's own (old or new) is rewritten; nothing else is touched", () => {
+    const home = tmp();
+    mkdirSync(join(home, ".codex", "skills", "handoff"), { recursive: true });
+    mkdirSync(join(home, ".codex", "skills", "agent-flow"), { recursive: true });
+    mkdirSync(join(home, ".codex", "skills", "frontend-slides"), { recursive: true });
+    const mine = "---\nname: handoff\ndescription: my own handoff notes\n---\n\nMy own skill.\n";
+    writeFileSync(join(home, ".codex", "skills", "handoff", "SKILL.md"), mine);
+    writeFileSync(join(home, ".codex", "skills", "handoff", "notes.md"), "mine too");
+    // written by an agent-flow from before the mark: it calls agent-flow's af
+    writeFileSync(join(home, ".codex", "skills", "agent-flow", "SKILL.md"), "---\nname: agent-flow\n---\nRun /Users/x/.agent-flow/bin/af task\n");
+    writeFileSync(join(home, ".codex", "skills", "frontend-slides", "SKILL.md"), "slides");
+    const r = installSkills("/srv/.agent-flow/bin/af", home);
+    expect(r.skipped).toEqual([join(home, ".codex", "skills", "handoff", "SKILL.md")]);
+    expect(readFileSync(join(home, ".codex", "skills", "handoff", "SKILL.md"), "utf8")).toBe(mine);
+    expect(readFileSync(join(home, ".codex", "skills", "handoff", "notes.md"), "utf8")).toBe("mine too");
+    expect(readFileSync(join(home, ".codex", "skills", "frontend-slides", "SKILL.md"), "utf8")).toBe("slides");
+    const ours = readFileSync(join(home, ".codex", "skills", "agent-flow", "SKILL.md"), "utf8");
+    expect(ours).toStartWith("---\nname: agent-flow\ndescription: ");
+    expect(ours).toContain(SKILL_MARK);
+    expect(isOurSkill(ours)).toBe(true);
+    expect(isOurSkill(mine)).toBe(false);
+    // a second start rewrites its own files again (they have the mark now)
+    expect(installSkills("/srv/.agent-flow/bin/af", home).written).toContain(join(home, ".codex", "skills", "deliver-document", "SKILL.md"));
+  });
+
   test("omp reads ~/.claude/skills; where there is no ~/.claude, its own folder gets them", () => {
     const withClaude = tmp();
     for (const d of [".claude", ".omp"]) mkdirSync(join(withClaude, d));

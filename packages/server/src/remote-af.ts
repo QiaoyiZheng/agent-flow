@@ -160,16 +160,22 @@ export class RemoteAf {
         const af = `${remote.home}/.agent-flow/bin/af`;
         const put = (skill: string, text: string) =>
           remote.exec(
-            // omp reads ~/.claude/skills: its own folder only where there is no ~/.claude (as skills.ts installSkill)
-            `t=$(mktemp) && cat > "$t" && for d in .claude .codex .gemini; do if [ -d "$HOME/$d" ]; then mkdir -p "$HOME/$d/skills/${skill}" && cp "$t" "$HOME/$d/skills/${skill}/SKILL.md" && echo "$d"; fi; done; if [ -d "$HOME/.omp" ] && [ ! -d "$HOME/.claude" ]; then mkdir -p "$HOME/.omp/agent/skills/${skill}" && cp "$t" "$HOME/.omp/agent/skills/${skill}/SKILL.md" && echo .omp; fi; rm -f "$t"`,
+            // omp reads ~/.claude/skills: its own folder only where there is no ~/.claude (as skills.ts installSkills).
+            // A SKILL.md there that is not agent-flow's (no mark, no af of agent-flow's: the user's own skill of that
+            // name) is left alone ("skip:<folder>")
+            `t=$(mktemp) && cat > "$t" && put() { f="$HOME/$1/${skill}/SKILL.md"; if [ -f "$f" ] && ! grep -q -F -e 'agent-flow writes this file' -e '/.agent-flow/bin/af' "$f"; then echo "skip:$1"; else mkdir -p "$HOME/$1/${skill}" && cp "$t" "$f" && echo "$2"; fi; }; for d in .claude .codex .gemini; do [ -d "$HOME/$d" ] && put "$d/skills" "$d"; done; if [ -d "$HOME/.omp" ] && [ ! -d "$HOME/.claude" ]; then put .omp/agent/skills .omp; fi; rm -f "$t"; true`,
             { stdin: new TextEncoder().encode(text) },
           );
         const r = await put("agent-flow", this.opts.skillText(af));
-        if (this.opts.deliverText) await put("deliver-document", this.opts.deliverText(af));
-        if (this.opts.handoffText) await put("handoff", this.opts.handoffText(af));
+        const left: string[] = [];
+        const skips = (name: string, out: string) => left.push(...out.split("\n").filter((l) => l.startsWith("skip:")).map((l) => `~/${l.slice(5)}/${name}`));
+        skips("agent-flow", r.out.toString());
+        if (this.opts.deliverText) skips("deliver-document", (await put("deliver-document", this.opts.deliverText(af))).out.toString());
+        if (this.opts.handoffText) skips("handoff", (await put("handoff", this.opts.handoffText(af))).out.toString());
         if (r.code === 0) {
           this.skilled.add(machine);
-          this.opts.log?.(`  skill on ${machine}: ${r.out.toString().trim().split("\n").filter(Boolean).join(", ") || "(no agent folders)"}`);
+          const lines = r.out.toString().trim().split("\n").filter(Boolean);
+          this.opts.log?.(`  skill on ${machine}: ${lines.filter((l) => !l.startsWith("skip:")).join(", ") || "(no agent folders)"}${left.length ? `; left alone (a skill of the user's with the same name): ${left.join(", ")}` : ""}`);
         }
       }
       this.ready.set(machine, Date.now());
