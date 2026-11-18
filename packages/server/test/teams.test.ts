@@ -921,7 +921,7 @@ describe("members on another machine", () => {
       throw new Error("this sshd does not forward Unix sockets");
     };
     const log: string[] = [];
-    const raf = new RemoteAf({ home, w, teams: o, handler: h, cliMain: join(import.meta.dir, "../../cli/src/main.ts"), log: (m) => log.push(m) });
+    const raf = new RemoteAf({ home, w, teams: o, handler: h, cliMain: join(import.meta.dir, "../../cli/src/main.ts"), log: (m) => log.push(m), probePauseMs: 0 });
     await raf.ensure("gpu");
     await raf.ensure("gpu");
     await raf.ensure("gpu");
@@ -932,6 +932,41 @@ describe("members on another machine", () => {
     expect(forwards).toBe(2);
     expect(log.length).toBe(1); // the same reason: not logged again
     expect((raf as any).failed.get("gpu").n).toBe(2);
+    raf.stop();
+  });
+
+  test("af's socket there: re-forwarded only when it does not answer; a check that cannot run changes nothing", async () => {
+    const { home, o, w, h } = await setupRemote();
+    const remote = w.remoteOf("gpu~x") as any;
+    let forwards = 0;
+    let answer: "ok" | "no" | "down" = "down";
+    const exec = remote.exec.bind(remote);
+    remote.exec = async (cmd: string, opts?: any) => {
+      if (!cmd.includes("af/health")) return exec(cmd, opts);
+      if (answer === "down") throw new Error("ssh: connection timed out");
+      return { code: 0, out: Buffer.from(answer === "ok" ? '{"ok":true} curl=0' : " curl=7"), err: "" };
+    };
+    remote.forwardRemoteSocket = async () => {
+      forwards++;
+      answer = "ok";
+    };
+    const log: string[] = [];
+    const raf = new RemoteAf({ home, w, teams: o, handler: h, cliMain: join(import.meta.dir, "../../cli/src/main.ts"), log: (m) => log.push(m), probePauseMs: 0 });
+    // the machine is slow: the check cannot run; the forward is left as it is
+    await raf.ensure("gpu");
+    expect(forwards).toBe(0);
+    expect(log[0]).toContain("could not check");
+    // it answers: nothing to do
+    (raf as any).failed.delete("gpu");
+    answer = "ok";
+    await raf.ensure("gpu");
+    expect(forwards).toBe(0);
+    // it stops answering (curl ran, no answer): forwarded again, and said so
+    (raf as any).ready.set("gpu", 0);
+    answer = "no";
+    await raf.ensure("gpu");
+    expect(forwards).toBe(1);
+    expect(log.at(-1)).toBe("af on gpu: its socket there had stopped answering; forwarded it again");
     raf.stop();
   });
 

@@ -98,6 +98,8 @@ export interface RemoteAfOptions {
   /** Write the agent-flow skill on each machine (the main server does; a second server does not). */
   skillText?: (af: string) => string;
   handoffText?: (af: string) => string;
+  /** The pause between checks of a machine's af socket (tests: 0). */
+  probePauseMs?: number;
   /** The deliver-document skill's text for that machine's af (agents there hand over documents with af deliver). */
   deliverText?: (af: string) => string;
   log?: (msg: string) => void;
@@ -151,10 +153,28 @@ export class RemoteAf {
       const there = `${remote.home}/.agent-flow/af.sock`;
       const w = await remote.exec(`mkdir -p "$HOME/.agent-flow/bin" && chmod 700 "$HOME/.agent-flow" && cat > "$HOME/.agent-flow/bin/af" && chmod 755 "$HOME/.agent-flow/bin/af"`, { stdin: new TextEncoder().encode(REMOTE_AF) });
       if (w.code !== 0) throw new Error(`could not write ~/.agent-flow/bin/af: ${w.err}`);
-      const healthy = async () => (await remote.exec(`curl -s -m 5 --unix-socket ${sq(there)} http://af/health`)).out.toString().includes('"ok":true');
-      if (!(await healthy())) {
+      // af.sock there answers, does not (the forward is gone), or it could not be asked (the connection is slow or
+      // down: then nothing is changed). A slow machine must not make agent-flow redo a forward that works.
+      const probe = async (): Promise<"ok" | "no" | "unknown"> => {
+        const r = await remote.exec(`curl -s -m 10 --unix-socket ${sq(there)} http://af/health; echo " curl=$?"`, { timeoutMs: 30_000 }).catch(() => undefined);
+        const out = r?.out.toString() ?? "";
+        return out.includes('"ok":true') ? "ok" : /curl=\d+/.test(out) ? "no" : "unknown";
+      };
+      const healthy = async () => {
+        let last: "ok" | "no" | "unknown" = "unknown";
+        for (let i = 0; i < 3; i++) {
+          last = await probe();
+          if (last === "ok") return "ok";
+          if (i < 2) await Bun.sleep(this.opts.probePauseMs ?? 2000);
+        }
+        return last;
+      };
+      const h = await healthy();
+      if (h === "unknown") throw new Error(`could not check ${there} (the connection is slow or down); nothing changed`);
+      if (h === "no") {
         await remote.forwardRemoteSocket(there, local);
-        if (!(await healthy())) throw new Error(`${there} does not answer after forwarding it (does this sshd allow AllowStreamLocalForwarding?)`);
+        if ((await healthy()) !== "ok") throw new Error(`${there} does not answer after forwarding it (does this sshd allow AllowStreamLocalForwarding?)`);
+        if (this.ready.has(machine)) this.opts.log?.(`af on ${machine}: its socket there had stopped answering; forwarded it again`);
       }
       if (this.opts.skillText && !this.skilled.has(machine)) {
         const af = `${remote.home}/.agent-flow/bin/af`;

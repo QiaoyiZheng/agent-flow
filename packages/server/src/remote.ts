@@ -103,7 +103,14 @@ export class RemoteMachine {
    * connection: ssh -O forward -R. A stale socket file left at `remotePath` (an earlier connection's) is removed
    * first, since sshd does not replace it by default. Lives as long as the master connection.
    */
+  /**
+   * Make `remotePath` on the machine a socket that leads to `localPath` here (af's way back to the server). A forward
+   * the master already has for that path is cancelled first: else sshd keeps listening on the old one, the new request
+   * is a duplicate that does nothing, and once the file is removed nobody can reach the listener (af on joy and tea2,
+   * 2026-11-18).
+   */
   async forwardRemoteSocket(remotePath: string, localPath: string) {
+    Bun.spawnSync([...this.sshBase(["-O", "cancel", "-R", `${remotePath}:${localPath}`]), this.spec.target], { stdout: "ignore", stderr: "ignore" });
     await this.exec(`rm -f ${sq(remotePath)}`);
     const r = Bun.spawnSync([...this.sshBase(["-O", "forward", "-R", `${remotePath}:${localPath}`]), this.spec.target], { stdout: "pipe", stderr: "pipe" });
     if (r.exitCode !== 0) throw new Error(`could not forward ${remotePath} on ${this.spec.label}: ${r.stderr.toString().trim() || `exit ${r.exitCode}`}`);
