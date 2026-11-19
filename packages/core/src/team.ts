@@ -68,6 +68,8 @@ export interface Member {
   session?: string;
   /** This member stands for another team (its router): the ticket box opens that team. */
   team?: string;
+  /** The user disconnected it from its manager (the Channels tab): an independent session since then. */
+  detached?: string;
 }
 
 export type TicketStatus = "open" | "working" | "submitted" | "closed";
@@ -188,6 +190,8 @@ export type TeamEvent = (
   | E<"member.placed", { name: string; paneId: string; tabId: string }>
   /** Machine `from` turned out to be another route to the Herdr of machine `to`: its ids are `to`'s. */
   | E<"team.remapped", { from: string; to: string }>
+  /** The user disconnected a member from its manager: it goes on as an independent session; the team lets it be. */
+  | E<"member.detached", { name: string }>
   | E<"member.status", { name: string; status: AgentStatus }>
   | E<"ticket.opened", { ticket: Ticket }>
   | E<"ticket.delivered", { id: string }>
@@ -245,6 +249,11 @@ export function applyTeam(s: TeamState, ev: TeamEvent): TeamState {
     case "member.added":
       s.members[ev.member.name] = { ...ev.member };
       break;
+    case "member.detached": {
+      const m = s.members[ev.name];
+      if (m) Object.assign(m, { detached: ev.at, status: "exited" });
+      break;
+    }
     case "team.remapped": {
       // "<machine>~<id>" (protocol.ts MACHINE_SEP; not imported: protocol.ts imports this file)
       const pre = `${ev.from}~`;

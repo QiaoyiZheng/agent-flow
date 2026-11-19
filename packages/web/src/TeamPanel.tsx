@@ -5,6 +5,7 @@
 //                    and per thing a member handed back (member → router).
 // Clicking a box or an arrow shows the ticket below: its task.md, its result.md, and a way to its pane.
 
+import { ChannelsTab } from "./Channels";
 import { useEffect, useMemo, useState } from "react";
 import type { HPane, QueueItem, TeamState, TeamSummary, Ticket } from "@af/core";
 import { paneLook, ticketList, ticketStage } from "@af/core";
@@ -32,6 +33,35 @@ const look = (s: TeamState, k: Ticket, panes: Map<string, HPane>) => {
   const p = m?.paneId ? panes.get(m.paneId) : undefined;
   return stageLook(ticketStage(k, m, p ? paneLook(p) : undefined));
 };
+
+/** The right panel: the team's tickets (timeline or swim lanes), or the workspace's channels between agents. */
+export function RightPanel(props: Partial<TeamPanelProps> & { workspace?: string; panes: Map<string, HPane>; onGoTo: (paneId: string) => void; onFold?: () => void }) {
+  const [tab, setTab] = useState<"tickets" | "channels">(() => (localStorage.getItem("af.right.tab") === "channels" ? "channels" : "tickets"));
+  const pick = (t: "tickets" | "channels") => (localStorage.setItem("af.right.tab", t), setTab(t));
+  const hasTeam = !!props.team?.meta;
+  const shown = hasTeam ? tab : "channels";
+  return (
+    <>
+      <div className="panel-tabs">
+        {hasTeam && (
+          <button className={shown === "tickets" ? "on" : ""} onClick={() => pick("tickets")}>
+            {props.team!.meta!.mode === "router" ? "Team" : "Tickets"}
+          </button>
+        )}
+        <button className={shown === "channels" ? "on" : ""} onClick={() => pick("channels")} title="The ways agents of this workspace send each other messages">
+          Channels
+        </button>
+        <span className="spacer" />
+        {!hasTeam && props.onFold && (
+          <button className="fold-btn inline" title="Fold this panel to a narrow strip" onClick={props.onFold}>
+            »
+          </button>
+        )}
+      </div>
+      {shown === "tickets" && hasTeam ? <TeamPanel {...(props as TeamPanelProps)} /> : <ChannelsTab workspace={props.workspace} panes={props.panes} onGoTo={props.onGoTo} />}
+    </>
+  );
+}
 
 export function TeamPanel(props: TeamPanelProps) {
   const { team: s, siblings, onPickTeam } = props;

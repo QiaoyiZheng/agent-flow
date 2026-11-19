@@ -236,7 +236,7 @@ export class Teams {
           queued: queued(s).length,
           tickets: s.order.length,
           memberPanes: Object.values(s.members)
-            .filter((x) => x.paneId && x.protocol !== "router" && !x.team)
+            .filter((x) => x.paneId && x.protocol !== "router" && !x.team && !x.detached)
             .map((x) => x.paneId!),
           delegate: !!m.delegate,
           // members whose prompt the manager has in its queue (delegate): not the user's yet, for half an hour
@@ -1293,7 +1293,7 @@ export class Teams {
           console.error(`team ${t.id} context:`, (e as Error).message);
         }
         for (const m of Object.values(t.state.members)) {
-          if (m.team || t.starting.has(m.name) || !m.paneId) continue;
+          if (m.team || m.detached || t.starting.has(m.name) || !m.paneId) continue;
           try {
             await this.watchMember(t, m);
           } catch (e) {
@@ -1734,6 +1734,64 @@ export class Teams {
     if (open.length) return "working";
     if (pendingMessages(t.state, m.name).length) return "has a message waiting";
     return undefined;
+  }
+
+  /**
+   * Disconnect a member from its manager (the Channels tab): it goes on as an independent session. Its open tickets
+   * close (cancelled), what waits for it or for its manager from it is dropped, and the team does not watch it any
+   * more. Its pane and its agent are not touched. Not for a member that stands for a team, or a team's router.
+   */
+  detach(teamId: string, name: string) {
+    const t = this.teams.get(teamId);
+    const m = t?.state.members[name];
+    if (!t || !m) throw new AfError("unknown_member", `no member ${name} in team ${teamId}`, 404);
+    if (m.team) throw new AfError("forbidden", `${name} stands for a whole team: stop that team instead`, 403);
+    if (m.name === t.state.meta?.manager.member) throw new AfError("forbidden", "a team's router cannot be disconnected: stop the team instead", 403);
+    if (m.detached) return { member: name, dropped: 0 };
+    const out = pendingMessages(t.state, m.name).map((o) => o.id);
+    if (out.length) this.emit(t, { type: "message.dropped", at: this.now(), ids: out });
+    const items = t.state.queue.filter((q) => q.from === m.name && q.state !== "handled").map((q) => q.seq);
+    if (items.length) this.emit(t, { type: "queue.handled", at: this.now(), seqs: items });
+    for (const k of ticketList(t.state).filter((x) => x.assignee === m.name && x.status !== "closed")) this.emit(t, { type: "ticket.closed", at: this.now(), id: k.id, outcome: "cancelled", note: "the user disconnected it" });
+    this.emit(t, { type: "member.detached", at: this.now(), name });
+    return { member: name, dropped: out.length + items.length };
+  }
+
+  /** All teams, for the channel list (channels.ts). */
+  allTeams() {
+    return [...this.teams.values()].filter((t) => t.state.meta).map((t) => ({ id: t.id, state: t.state, manager: this.managerPane(t) }));
+  }
+
+  /** Drop one message waiting on a parent channel: one agent-flow will type into a member, or a queue item from it. */
+  dropMessage(teamId: string, ref: string) {
+    const t = this.teams.get(teamId);
+    if (!t) throw new AfError("no_team", `no team ${teamId}`, 404);
+    if (/^q\d+$/.test(ref)) {
+      const seq = Number(ref.slice(1));
+      if (!t.state.queue.some((q) => q.seq === seq && q.state !== "handled")) throw new AfError("gone", "that item is not waiting any more", 404);
+      this.emit(t, { type: "queue.handled", at: this.now(), seqs: [seq] });
+    } else {
+      if (!t.state.outbox.some((o) => o.id === ref && !o.delivered)) throw new AfError("gone", "that message is not waiting any more", 404);
+      this.emit(t, { type: "message.dropped", at: this.now(), ids: [ref] });
+    }
+    return { ok: true };
+  }
+
+  /** Send a message along a parent channel: to the member (as af tell would), or into its manager's queue. */
+  sendOnChannel(teamId: string, name: string, toChild: boolean, text: string) {
+    const t = this.teams.get(teamId);
+    const m = t?.state.members[name];
+    if (!t || !m || m.detached) throw new AfError("unknown_member", `no member ${name} in team ${teamId}`, 404);
+    if (!text.trim()) throw new AfError("empty", "nothing to send");
+    if (toChild) {
+      if (m.status === "exited") throw new AfError("member_exited", `${name} has exited`);
+      const k = currentTicket(t.state, m.name) ?? ticketList(t.state).filter((x) => x.assignee === m.name).at(-1);
+      this.queueMessage(t, { member: m.name, kind: "tell", ticket: k?.id, text: `[agent-flow] From the user: ${text.trim()}` });
+      return { to: name };
+    }
+    const k = currentTicket(t.state, m.name) ?? ticketList(t.state).filter((x) => x.assignee === m.name).at(-1);
+    this.enqueue(t, { kind: "report", ticket: k?.id, from: m.name, text: `(sent by the user on the channel with ${m.name}) ${text.trim()}` });
+    return { to: "its manager's queue" };
   }
 
   /** Close a member's session: marked first (a member whose pane closes is otherwise reported as exited). */

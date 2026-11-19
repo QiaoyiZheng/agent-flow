@@ -9,6 +9,7 @@ import { AfError } from "./errors.ts";
 import { isLocalOrigin } from "./origin.ts";
 import { Handoffs, loadHandoffSettings } from "./handoff.ts";
 import { closeIdle, idleSessions } from "./idle.ts";
+import { Channels } from "./channels.ts";
 import type { Teams, Who } from "./teams.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { MAX_ATTACHMENT, composePrompt, safeName } from "./attachments.ts";
@@ -36,7 +37,7 @@ const repoRootOf = (cwd: string) => {
 };
 const fail = (code: string, message: string, status = 400) => json({ error: { code, message } }, status);
 
-export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w), sleeper?: Sleeper, handoffs?: Handoffs) {
+export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, access: TranscriptAccess = makeTranscriptAccess(o, w), sleeper?: Sleeper, handoffs?: Handoffs, channels: Channels = new Channels(w, o, o.opts.home)) {
   const needSleeper = () => {
     if (!sleeper) throw new AfError("unavailable", "process management is not running", 503);
     return sleeper;
@@ -133,6 +134,33 @@ export function makeHandler(o: Teams, w: Workspaces, backend: TerminalBackend, a
           return json(await o.status(who, String(body.ref ?? "")));
         case "POST /team/report":
           return json(o.report(who, String(body.text ?? ""), !!body.done));
+        case "GET /channels":
+          return json({ channels: channels.list(body.workspace ? String(body.workspace) : undefined) });
+        case "POST /channels/connect":
+          return json(await channels.connect(String(body.a ?? ""), String(body.b ?? "")));
+        case "POST /channels/disconnect": {
+          // a parent channel: the child becomes an independent session; a peer channel: deleted
+          const id = String(body.id ?? "");
+          const parent = id.match(/^parent:([^:]+):(.+)$/);
+          return json(parent ? o.detach(parent[1]!, parent[2]!) : await channels.disconnect(id));
+        }
+        case "POST /channels/send": {
+          const id = String(body.id ?? "");
+          const parent = id.match(/^parent:([^:]+):(.+)$/);
+          if (parent) return json(o.sendOnChannel(parent[1]!, parent[2]!, body.toChild !== false, String(body.text ?? "")));
+          return json(await channels.send(id, String(body.text ?? ""), { to: body.to ? String(body.to) : undefined }));
+        }
+        case "POST /channels/drop": {
+          const id = String(body.id ?? "");
+          const parent = id.match(/^parent:([^:]+):(.+)$/);
+          return json(parent ? o.dropMessage(parent[1]!, String(body.ref ?? "")) : channels.drop(id, String(body.ref ?? "")));
+        }
+        case "POST /send": {
+          // af send <name> "<text>": from the agent in the caller's pane, along a peer channel
+          const pane = who.kind === "pane" || who.kind === "member" || who.kind === "router" ? who.pane : undefined;
+          if (!pane) throw new AfError("no_pane", "run af send inside an agent's session (it is known by its Herdr pane)");
+          return json(await channels.sendByName(pane, String(body.to ?? ""), String(body.text ?? "")));
+        }
         case "POST /pane/refresh":
           return json(await needHandoffs().refresh(String(body.pane ?? "")));
         case "GET /idle":
@@ -612,7 +640,9 @@ export function serve(o: Teams, w: Workspaces, opts: { sock: string; port: numbe
   // a main session whose context is nearly full hands off to a fresh one (handoff.ts); not from a second server
   const handoffs = new Handoffs(w, o, access, { home: opts.home, settings: loadHandoffSettings(opts.home), claudeSettings: o.opts.config.claudeSettings, notify: (level, key, text, detail) => opts.notices.add(level, key, text, detail) });
   if (opts.sleep !== false) handoffs.start();
-  const handler = makeHandler(o, w, opts.backend, access, sleeper, handoffs);
+  const channels = new Channels(w, o, opts.home);
+  w.onRemap((from, to) => channels.remap(from, to));
+  const handler = makeHandler(o, w, opts.backend, access, sleeper, handoffs, channels);
   // another route to a machine's Herdr found: documents handed over there keep their panes under that machine
   w.onRemap((from, to) => access.deliveries.remap(from, to));
   if (opts.watchDocs !== false) watchDocuments(w, access);

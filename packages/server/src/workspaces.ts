@@ -1065,6 +1065,14 @@ export class Workspaces {
     return { sent: text, ...r };
   }
 
+  /** Mark a queued message as sent on a channel between two agents (channels.ts). */
+  tagQueued(pane: string, id: string, tag: { channel: string; from: string }) {
+    const q = (this.queue[this.canonId(pane)] ?? []).find((x) => x.id === id);
+    if (!q) return;
+    Object.assign(q, tag);
+    this.saveQueue();
+  }
+
   /** Take a message out of the queue (to delete it, or to edit it in the composer). */
   unqueue(pane: string, id: string) {
     const list = this.queue[pane] ?? [];

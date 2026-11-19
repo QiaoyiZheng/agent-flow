@@ -32,6 +32,7 @@ af task claude "在 GPU 上跑 profile" --name profile --no-worktree --on allina
 - **上下文快满时交接（handoff）**：主 session（派过活的那个）每做完一轮，agent-flow 就从它的对话记录里看上下文用了多少（就是界面底部那个上下文条）。到 80% 时，agent-flow 往里打一条请求：用 `handoff` skill 把交接文档写到给定路径（`~/.agent-flow/handoffs/` 下），再运行 `af handoff ready <文档>`。这一轮结束后由 agent-flow 接手：先关掉它开过的、已经没事可做的子 session（结果已取走、没在干活）；还在干活的、结果还没取的、你正在跟它聊的、代表整个 team 的都留着；再关掉主 agent，在同一个 pane 里用同样的参数开一个新会话，第一条消息让它先读交接文档，并列出关掉了谁、谁还在跑。新会话仍是这些子 session 的主 session，它们的结果照常进它的队列。你随时也可以直接说"交接一下"。阈值在 `~/.agent-flow/config.json` 里改：`{"handoff": {"at": 0.7}}`；`{"handoff": false}` 关掉自动请求（手动交接还能用）。旧会话的记录还在，新会话需要时可以去里面查。
 - **Refresh 按钮**：agent 底栏里的"↻ Refresh"（点两下确认）。和上下文快满时一样：它写交接文档，agent-flow 关掉它开过的、已经没事的子 session，再在同一个 pane 里开一个新会话接着做；还在干活的子 session 留给新会话。正忙的话等这一轮结束再交接。`af task` 和 team 开的 session 没有这个按钮。
 - **close idle 按钮**（底部状态栏，在"running · asleep"旁边）：列出所有已连接机器上没事可做的 session，勾选后一键关掉。包括：为任务或 team 开的、活已经干完的 session（结果已取走、没有等着的工单或消息、没在干活），和单独占一个 tab、里面什么也没在跑的 shell。你直接聊过的 session 会列出来但默认不勾。不会关：你自己开的 session、预览 pane、持久 shell、一个 workspace 的最后一个 tab、输入框里有字的 session。对话记录都还在。
+- **通道（右栏的 Channels 页）**：列出这个 workspace 里 agent 之间互发消息的通道，每条都能展开看正在排队的消息。有两种：一种是 agent-flow 自己建的，连着派活的 session 和它派出去的 session（结果和提问往上进队列，`af tell` 往下）；另一种是你手动连的任意两个 agent，两边都会被告知对方的名字，用 `af send <名字> "<内容>"` 互发，消息排在 agent-flow 的队列里，等对方这一轮结束再送。你可以在通道上发一条消息、删掉还没送出的消息，也可以断开（点两下）：派活的那种断开后，子 session 变成独立 session，它的工单关掉，结果不再交给原来的主 session，排着的消息丢掉，它的 pane 和对话不动；你手动连的那种断开就是删掉这条通道，两边都会被告知。没有 team 的 workspace，右栏也会打开 Channels 页。
 - 结果交回以后，你可以直接去那个 session 跟它聊（问问题、讨论）。这些对话**不会**每轮都转给你的主 session；只有聊出了项目进展或口径（范围、表述、决定、数字）的变化，它才用 `af report "<变了什么>"` 告诉主 session（任务的第一条消息里写了这条规矩）。主 session 用 `af tell` 交给它的新活，结果照常回队列。
 - 队列里还会出现：某个 session 屏幕上在问和任务有关的问题（你的 session 用 `af answer T2 <选项号>` 回答）、可能卡住了、进程退出了、API 报错（agent-flow 已经自动让它"继续"过 3 次）。
 - **权限审批和"信任这个文件夹"永远只交给你**：出现在左栏"需要你"里，你的 session 碰不到。
@@ -96,6 +97,7 @@ af team new --playbook humanize-loop --goal "给登录页加验证码"
 | router 用 | `af ticket open/close` · `af reply <seq>` · `af report "…" [--done]` · `af thread max` · `af queue done <seq>` |
 | 成员用 | `af submit --status ready\|blocked\|failed\|dropped --note "…"` · `af progress` · `af ask` |
 | 停掉 team | `af team stop [<team>]`，或关掉它的 workspace |
+| 给你连上的另一个 agent 发消息 | `af send <名字> "<内容>"` |
 | 交接给新 session | `af handoff`（给出交接文档的路径）· `af handoff ready <文档>`（写好后运行；agent-flow 在这一轮结束后重开这个 session） |
 | 项目上下文 | `af context`（看要编辑的文件和当前内容）· `af context set "…"` / `--file <文件>` |
 | 交付文档 / 打开文件 | `af deliver <文件> --title "…"` · `af open <文件> [--app vscode\|obsidian\|default\|finder]` |

@@ -129,6 +129,7 @@ Mode 1 — hand out tasks from this session (it gets each session's final reply 
   af context                                the project context the sessions you start read (in their agent.md): its
                                             file, to edit; each change goes to them
   af context set "<text>" | --file F        replace it
+  af send <name> "<text>"                   to an agent the user connected you with (agent-flow's Channels tab)
   af handoff                                hand off to a fresh session in this pane: where to write the handoff
   af handoff ready <file>                   document; once it is written (agent-flow then restarts this session,
                                             closes the sessions you started that have finished, keeps the rest)
@@ -337,6 +338,11 @@ async function main() {
           "--- screen", r.screen,
         ].join("\n"),
       );
+    }
+    case "send": {
+      if (pos.length < 2) die('usage: af send <name> "<text>"   (to an agent the user connected you with)');
+      const r = await call("POST", "/send", { to: pos[0], text: pos.slice(1).join(" ") });
+      return console.log(`sent to ${r.to}${r.queued ? " (it gets it when its turn ends)" : ""}`);
     }
     case "handoff": {
       if (pos[0] === "ready") {

@@ -78,6 +78,7 @@ until it passes) or a team that keeps taking requests.
 ## Other commands
 
     ${af} tickets           ${af} ticket show <T>         ${af} read <name>        ${af} team stop <team>
+    ${af} send <name> "<text>"   to an agent the user connected you with (you are told its name when they do)
     ${af} open <path|url>   show a file, folder or web page in a pane next to yours (when the user asks to see it)
 `;
 }

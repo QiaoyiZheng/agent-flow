@@ -11,7 +11,7 @@ interface PlaybookInfo {
 }
 import { api, useStore, watch, failed } from "./store";
 import { Terminal } from "./Terminal";
-import { TeamPanel } from "./TeamPanel";
+import { RightPanel } from "./TeamPanel";
 import { FileBrowser } from "./Files";
 import { type Need, Sidebar } from "./Sidebar";
 import { LayoutView, type PaneCtx } from "./Layout";
@@ -191,7 +191,8 @@ export function App() {
     return a ? (runAgents.get(a.id)?.name ?? a.agentName ?? a.agent!) : (ps[0]?.cwd.split("/").at(-1) ?? t.label);
   };
   const tabKind = (t: { id: string }) => herdr?.panes.find((p) => p.tabId === t.id && p.agent)?.agent;
-  const showRight = !!team?.meta && !creating;
+  // the team's tickets, or (any workspace with agents) its channels
+  const showRight = !creating && (!!team?.meta || !!herdr?.panes.some((p) => p.agent && p.workspaceId === selectedWs));
 
   return (
     <div className="app" style={{ "--side-w": sideFolded ? "30px" : "232px", "--right-w": showRight ? (rightFolded ? "30px" : "420px") : "0px" } as React.CSSProperties}>
@@ -269,15 +270,16 @@ export function App() {
                 {team!.queue.filter((q) => q.state !== "handled").length}
               </button>
             )}
-            <span className="rail-label">{team?.meta?.mode === "router" ? team.meta.name : "Handed out"}</span>
+            <span className="rail-label">{team?.meta ? (team.meta.mode === "router" ? team.meta.name : "Handed out") : "Channels"}</span>
           </>
         )}
-        {showRight && !rightFolded && team?.meta && (
-          <TeamPanel
+        {showRight && !rightFolded && (
+          <RightPanel
+            workspace={selectedWs}
             onFold={() => foldRight(true)}
-            team={team}
+            team={team?.meta ? team : undefined}
             teams={teams}
-            siblings={wsTeams.some((x) => x.id === team.meta!.id) ? wsTeams : [teams.find((x) => x.id === team.meta!.id)!].filter(Boolean)}
+            siblings={team?.meta ? (wsTeams.some((x) => x.id === team.meta!.id) ? wsTeams : [teams.find((x) => x.id === team.meta!.id)!].filter(Boolean)) : []}
             panes={panesById}
             onPickTeam={(id) => {
               const t = teams.find((x) => x.id === id);

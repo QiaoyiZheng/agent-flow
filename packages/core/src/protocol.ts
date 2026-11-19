@@ -404,6 +404,45 @@ export interface QueuedMessage {
   /** Attachment paths, read before the message. */
   files: string[];
   at: string;
+  /** Sent on a channel between two agents (channels.ts): its id, and who sent it ("the user" or the other agent). */
+  channel?: string;
+  from?: string;
+}
+
+/** One end of a channel: an agent's pane, and the name the other end sends to it by (af send <name>). */
+export interface ChannelEnd {
+  pane: string;
+  name: string;
+  agent?: string;
+  workspace?: string;
+  /** Its agent is gone (pane closed, or a shell now). */
+  gone?: boolean;
+}
+
+/** A message on its way along a channel, not delivered yet. */
+export interface ChannelMessage {
+  /** What deletes it (POST /channels/drop): an outbox id, a queue seq, or a queued message id. */
+  ref: string;
+  text: string;
+  at: string;
+  from?: string;
+}
+
+/**
+ * A way two agents send each other messages. parent: a session and one it handed work to (its tickets; disconnect
+ * makes the child an independent session). peer: two agents the user connected (af send both ways).
+ */
+export interface Channel {
+  id: string;
+  kind: "parent" | "peer";
+  a: ChannelEnd;
+  b: ChannelEnd;
+  /** Waiting to reach each end. */
+  toA: ChannelMessage[];
+  toB: ChannelMessage[];
+  /** parent: the child's current ticket and its stage. */
+  ticket?: { id: string; title: string; stage: string };
+  createdAt?: string;
 }
 
 export type ServerPush =
