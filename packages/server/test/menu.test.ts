@@ -320,7 +320,10 @@ describe("panels and notices instead of the input box", () => {
     expect(screenOverlay(idle, "claude")).toBeUndefined();
     const working = ["⏺ Bash(sleep 8)", "  ⎿  Running…", "", "✢ Churning… (12s)", "", rule, "❯ 第二条消息", rule, "  ⏵⏵ auto mode on"].join("\n");
     expect(screenOverlay(working, "claude")).toBeUndefined();
-    const status = [rule, "  Anthropic base URL:", "  https://ai.soruxgpt.com", "", "  Model:", "  opus (claude-opus-5-5)", "  Auto mode server:", "  Disabled", "", "  Esc to cancel"].join("\n");
+    // a named session: the name is in the box's top edge (captured, claude 2.1.3xx); its status line is no notice
+    const named = ["  Running 1 shell command…", "", "✢ Baking… (6m 10s)", "", `${"─".repeat(96)} Agent-flow ticket T198 ─`, "❯", "─".repeat(121), "  ⏵⏵ auto mode on · ← 2 agents · 2 shells · ↓ to manage"].join("\n");
+    expect([parseMenu(named, "claude"), screenOverlay(named, "claude")]).toEqual([undefined, undefined]);
+    const status =[rule, "  Anthropic base URL:", "  https://ai.soruxgpt.com", "", "  Model:", "  opus (claude-opus-5-5)", "  Auto mode server:", "  Disabled", "", "  Esc to cancel"].join("\n");
     expect(screenOverlay(status, "claude")).toEqual({
       lines: ["Anthropic base URL:", "https://ai.soruxgpt.com", "", "Model:", "opus (claude-opus-5-5)", "Auto mode server:", "Disabled", ""],
       hint: "Esc to cancel",

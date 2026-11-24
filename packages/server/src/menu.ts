@@ -133,6 +133,9 @@ const HINT = /\b(enter|esc|escape|navigate|confirm|select|cancel)\b|↑|↓/i;
 const indentOf = (l: string) => l.length - l.replace(/^\s+/, "").length;
 const blank = (l: string) => !l.trim();
 const rule = (l?: string) => !!l && SEPARATOR.test(l);
+/** claude's input box shows the session's name in its top edge: "────────── Agent-flow ticket T198 ─". */
+const NAMED_RULE = /^\s*(?:─{8,} \S.*? ─+|─+ \S.*? ─{8,})\s*$/;
+const boxTop = (l?: string) => rule(l) || (!!l && NAMED_RULE.test(l));
 const AGENTS = new Set(["claude", "codex", "omp", "gemini"]);
 
 /** The screen's lines, without trailing spaces and without the blank rows below the last text. */
@@ -145,7 +148,7 @@ function screenLines(screen: string) {
 /**
  * Whether the agent's own input box is at the bottom of the screen. A dialog (a question, an approval, a notice)
  * takes its place: claude and codex draw it in the input box's area, omp swaps its editor for a selector.
- *   claude:  ──── / ❯ … / ──── / status lines        codex:  › … / model line / "? for shortcuts"
+ *   claude:  ──── (or "──── name ─") / ❯ … / ──── / status lines        codex:  › … / model line / "? for shortcuts"
  *   omp:     status line / ╰─ …   or   ╭─ status ─╮ / ╰─ … ─╯   (a dialog ends in a bare ╰────╯ instead);
  *            its other input shapes: a ❯ prompt, a filled field ▐ … ▌ or rail ▎ …, " text" between two bare rules
  *   gemini:  ▄▄▄▄ / " > …" / ▀▀▀▀ / footer   (see the header comment)
@@ -154,7 +157,7 @@ function inputBoxShown(lines: string[], agent: string | undefined) {
   if (!agent || !AGENTS.has(agent)) return false;
   if (agent === "gemini") return geminiInputRows(lines) !== undefined;
   const tail = lines.slice(-14);
-  if (agent === "claude") return tail.some((l, i) => /^\s*❯(\s|$)/.test(l) && (rule(tail[i - 1]) || rule(tail[i - 2])) && tail.slice(i + 1, i + 4).some((x) => rule(x)));
+  if (agent === "claude") return tail.some((l, i) => /^\s*❯(\s|$)/.test(l) && (boxTop(tail[i - 1]) || boxTop(tail[i - 2])) && tail.slice(i + 1, i + 4).some((x) => rule(x)));
   if (agent === "codex") return tail.slice(-8).some((l) => /^\s*›(\s|$)/.test(l) && !/^\s*›\s+\d+[.)]/.test(l));
   // (omp's dialog rows all start with a box edge, so a bare ❯ is the prompt.) The "box" shape with omp's IME-safe
   // cursor also ends in a bare ╰────╯, under a text row without its right edge.
