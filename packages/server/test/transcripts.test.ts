@@ -238,6 +238,19 @@ describe("finding and following transcripts", () => {
       expect(await resolveTranscript(fs, { pane: a, panes: [a, twin], argv: none, pids: async () => [4343] })).toMatchObject({ reason: expect.stringContaining("2 claude agents") });
       expect(await fs.claudeSessionOfPid(-1)).toBeUndefined();
 
+      // a pane that runs `claude attach <job>`: the agent is a background job of claude's daemon (no record for the
+      // pane's process), and it went on in a file of its own — not the session agent-flow started the pane with
+      const job = join(dir, "87146d58-c7ab-4c92-9d10-1782e82c2f44.jsonl");
+      writeFileSync(job, JSON.stringify({ type: "user", cwd: "/proj", message: { content: "the job" } }) + "\n");
+      writeFileSync(join(root, ".claude/sessions/99070.json"), JSON.stringify({ pid: 99070, sessionId: "87146d58-c7ab-4c92-9d10-1782e82c2f44", cwd: "/proj", kind: "bg", jobId: "87146d58", updatedAt: 2 }));
+      const attach = async () => [["claude", "attach", "87146d58"]];
+      expect(await resolveTranscript(fs, { pane: a, panes: [a, twin], knownSession: "22222222-2222-3333-4444-555555555555", argv: attach, pids: async () => [5112] })).toEqual({ source: { agent: "claude", path: job, how: "session" } });
+      // its file not written yet: locked to it; a job with no record: the other steps, as before
+      writeFileSync(join(root, ".claude/sessions/99071.json"), JSON.stringify({ pid: 99071, sessionId: "abcdef12-0000-0000-0000-000000000000", kind: "bg", jobId: "abcdef12", updatedAt: 1 }));
+      expect(await resolveTranscript(fs, { pane: a, panes: [a], argv: async () => [["claude", "attach", "abcdef12"]], pids: async () => [5112] })).toMatchObject({ source: { pending: true } });
+      expect(await resolveTranscript(fs, { pane: a, panes: [a], knownSession: "22222222-2222-3333-4444-555555555555", argv: async () => [["claude", "attach", "0badc0de"]], pids: async () => [5112] })).toEqual({ source: { agent: "claude", path: mine, how: "session" } });
+      expect(await fs.claudeSessionOfJob("x; rm -rf /")).toBeUndefined();
+
       // codex: the rollout its process holds open
       const lsof = Bun.spawnSync(["sh", "-c", "command -v lsof"]).exitCode === 0;
       if (!lsof) return;

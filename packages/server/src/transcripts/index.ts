@@ -2,6 +2,8 @@
 // Works for local panes (files on this machine) and remote panes (files read over SSH).
 //
 // Finding the file, most exact first:
+//   0. claude: the session its running process reports (<config>/sessions/<pid>.json), or, in a pane that runs
+//      `claude attach <job>`, the session of that background job (a process of claude's daemon, not of the pane);
 //   1. a session id agent-flow gave the agent at launch (claude --session-id), or recorded for a pane;
 //   2. what the agent's Herdr integration reported: a path (omp) or a session id (codex);
 //   3. claude only: a session id in the process's own argv (--resume/--session-id, also how Herdr restores);
@@ -147,6 +149,11 @@ export interface TranscriptFS {
   /** The session a running claude process is in: claude keeps <config>/sessions/<pid>.json up to date (also after /clear). */
   claudeSessionOfPid(pid: number): Promise<string | undefined>;
   /**
+   * The session of a claude background job. A pane that runs `claude attach <job>` only shows it: the agent is a
+   * process of claude's daemon, whose <config>/sessions/<pid>.json has that jobId.
+   */
+  claudeSessionOfJob(job: string): Promise<string | undefined>;
+  /**
    * The rollout file a running codex process (or its children) holds open, from lsof. null: checked, none open (a
    * codex that has not been sent anything yet); undefined: could not check.
    */
@@ -154,6 +161,26 @@ export interface TranscriptFS {
 }
 
 const validPids = (pids: number[]) => pids.filter((p) => Number.isInteger(p) && p > 1);
+/** claude's background job ids are short hex ("87146d58"): also safe in a shell command. */
+const JOB_ID = /^[0-9a-f]{6,36}$/i;
+/** The job's session among claude session records (JSON texts): the most recently updated one with that jobId. */
+export function sessionOfJob(records: string[], job: string): string | undefined {
+  let best: { id: string; at: number } | undefined;
+  for (const text of records) {
+    try {
+      const rec = JSON.parse(text);
+      if (rec?.jobId !== job || typeof rec.sessionId !== "string") continue;
+      const at = Number(rec.updatedAt) || 0;
+      if (!best || at > best.at) best = { id: rec.sessionId, at };
+    } catch {}
+  }
+  return best?.id;
+}
+/** The job a pane's `claude attach <job>` shows. */
+export function attachedJob(args: string[][]) {
+  for (const a of args) if (a[1] === "attach" && JOB_ID.test(a[2] ?? "")) return a[2]!;
+  return undefined;
+}
 /** A shell command printing the first codex rollout that these processes or their children hold open. */
 export const openRolloutCmd = (pids: number[]) =>
   String.raw`command -v lsof >/dev/null 2>&1 || exit 0; pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] || exit 0; lsof -Fn -p "$pids" 2>/dev/null | sed -n 's/^n\(.*\/sessions\/.*rollout-.*\.jsonl\)$/\1/p' | head -n 1; echo "#checked"`;
@@ -260,6 +287,26 @@ export class LocalFS implements TranscriptFS {
     } catch {
       return undefined;
     }
+  }
+
+  async claudeSessionOfJob(job: string) {
+    if (!JOB_ID.test(job)) return undefined;
+    const dir = join(dirname(this.roots.claude), "sessions");
+    let names: string[];
+    try {
+      names = readdirSync(dir).filter((f) => f.endsWith(".json"));
+    } catch {
+      return undefined;
+    }
+    const records = names.flatMap((f) => {
+      try {
+        const text = readFileSync(join(dir, f), "utf8");
+        return text.includes(job) ? [text] : [];
+      } catch {
+        return [];
+      }
+    });
+    return sessionOfJob(records, job);
   }
 
   async codexRolloutOfPids(pids: number[]) {
@@ -486,6 +533,13 @@ export class SshFS implements TranscriptFS {
     }
   }
 
+  async claudeSessionOfJob(job: string) {
+    if (!JOB_ID.test(job)) return undefined;
+    // one record per line (claude writes each on one line)
+    const r = await this.exec(`for f in "$HOME/.claude/sessions/"*.json; do grep -q '"jobId":"${job}"' "$f" 2>/dev/null && { cat "$f"; echo; }; done; true`);
+    return sessionOfJob(r.out.toString().split("\n").filter((l) => l.trim()), job);
+  }
+
   async codexRolloutOfPids(pids: number[]) {
     if (!validPids(pids).length) return undefined;
     const r = await this.exec(openRolloutCmd(pids));
@@ -701,6 +755,10 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
       // a fresh session (its file comes with the first message) — unless it resumes one, which has its own file
       if (!flat.some((a) => /^(--resume|-r|--continue|-c)(=|$)/.test(a))) return pending();
     }
+    // `claude attach <job>`: the conversation is a background job's (it went on in a new file of its own)
+    const job = attachedJob(args);
+    const id = job ? await fs.claudeSessionOfJob(job).catch(() => undefined) : undefined;
+    if (id) return found(await fs.claudeById(id), "session") ?? pending();
   }
   if (agent === "codex" && procs.length) {
     const open = await fs.codexRolloutOfPids(procs).catch(() => undefined);
