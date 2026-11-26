@@ -644,6 +644,33 @@ describe("menus: an agent's question answered from the UI", () => {
     expect(await w.menu(ws.paneId)).toBeUndefined();
     await expect(w.choose(ws.paneId, 0, "Markdown")).rejects.toThrow(/not showing a menu/);
   });
+
+  test("codex: 'No, and tell Codex what to do differently' turns the request down first, then the text goes into its input box", async () => {
+    const { backend, w, ws } = await setup();
+    await backend.startAgent("cx", "codex", ws.paneId, []);
+    await w.refresh();
+    // captured live (codex 0.172)
+    const approval = [
+      "• Running git add -- calc.py test_calc.py && git commit -m 'fix add'",
+      "  Would you like to run the following command?",
+      "  Environment: local",
+      "  $ git add -- calc.py test_calc.py && git commit -m 'fix add'",
+      "› 1. Yes, proceed (y)",
+      "  2. Yes, and don't ask again for commands that start with `git add` (p)",
+      "  3. No, and tell Codex what to do differently (esc)",
+      "  Press enter to confirm or esc to cancel",
+    ].join("\n");
+    backend.screens.set(ws.paneId, approval);
+    const back = ["■ Conversation interrupted - use /feedback if something went wrong", "", "› ", "  GPT-6.2-Sol xhigh fast · /tmp/x", "  ? for shortcuts"].join("\n");
+    backend.onKeys = (_t, keys) => keys.includes("enter") && backend.screens.set(ws.paneId, back);
+    expect((await w.menu(ws.paneId))!.options[2]!.freeText).toBe(true);
+    await w.choose(ws.paneId, 2, "No, and tell Codex what to do differently (esc)", "No need, the sandboxed\noutput is enough.");
+    expect(backend.keys).toEqual([
+      { target: ws.paneId, keys: ["down", "down", "enter"] },
+      { target: ws.paneId, keys: ["enter"] },
+    ]);
+    expect(backend.texts.at(-1)).toEqual({ pane: ws.paneId, text: "No need, the sandboxed output is enough." });
+  });
 });
 
 describe("choosing in claude's /model picker", () => {

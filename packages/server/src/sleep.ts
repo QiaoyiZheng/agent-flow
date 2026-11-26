@@ -18,6 +18,7 @@ import { basename, join } from "node:path";
 import type { ChatSource, HPane } from "@af/core";
 import type { TranscriptAccess } from "./access.ts";
 import { inputText } from "./controls.ts";
+import { codexHead } from "./transcripts/index.ts";
 import { AfError } from "./errors.ts";
 import { sq } from "./remote.ts";
 import type { Workspaces } from "./workspaces.ts";
@@ -163,7 +164,9 @@ export function sessionOf(agent: string, source: ChatSource | undefined, herdr: 
     case "claude":
       return fileId ? { id: fileId, path: source!.path } : undefined;
     case "codex": {
-      const id = herdr?.kind === "id" && UUID.test(herdr.value) ? herdr.value : fileId;
+      // the file shown first: codex 0.172 runs all its TUIs' conversations in one background service, and Herdr's
+      // hook reports each of them (auto-review's too) as the pane that started that service
+      const id = fileId ?? (herdr?.kind === "id" && UUID.test(herdr.value) ? herdr.value : undefined);
       return id ? { id, path: source?.path } : undefined;
     }
     case "omp": {
@@ -631,6 +634,8 @@ export class Sleeper {
     const source = "source" in r && !r.source.pending ? r.source : undefined;
     const fs = this.access.fsFor(p.id).fs;
     const head = p.agent === "gemini" && source ? (await fs.readFrom(source.path, 0, 64 * 1024).catch(() => undefined))?.data.toString("utf8") : undefined;
+    // a codex subagent's thread (auto-review's) is never resumed in a pane: it would run on that thread's model
+    if (p.agent === "codex" && source && (await codexHead(fs, source.path))?.subagent) return undefined;
     const session = sessionOf(p.agent!, source, p.session, head);
     const args = agentArgs(p.agent!, me.argv);
     if (!session || !resumeArgs(p.agent!, args, session)) return undefined;

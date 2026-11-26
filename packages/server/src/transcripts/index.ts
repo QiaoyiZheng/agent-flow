@@ -856,18 +856,37 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     if (r) return r;
   }
 
-  // 2. what agent-flow or Herdr was told
-  if (knownPath && (await fs.exists(knownPath))) return { source: { agent, path: knownPath, how: "session" } };
+  // 2. what agent-flow or Herdr was told. codex: never a subagent's thread (auto-review's: see CODEX_SUBAGENT).
+  // Herdr's report for codex only after the title, and only for a thread in the pane's folder: codex 0.172 runs the
+  // conversations of all its TUIs in one background service, whose hook reports every one of them (auto-review's
+  // too) as the pane that started that service
+  const codexMine = async (path: string | undefined, herdr = false) => {
+    if (!path || agent !== "codex") return !!path;
+    const h = await codexHead(fs, path);
+    return !!h && !h.subagent && (!herdr || !h.cwd || sameFolder(h.cwd, pane.cwd));
+  };
+  if (knownPath && (await fs.exists(knownPath)) && (await codexMine(knownPath))) return { source: { agent, path: knownPath, how: "session" } };
   if (knownSession) {
-    const r = found(await byId(knownSession), "session");
-    if (r) return r;
+    const path = await byId(knownSession);
+    if (await codexMine(path)) return found(path, "session")!;
   }
-  if (pane.session?.kind === "path") return (await fs.exists(pane.session.value)) ? { source: { agent, path: pane.session.value, how: "session" } } : pending(pane.session.value);
-  if (pane.session?.kind === "id") {
-    const r = found(await byId(pane.session.value), "session");
-    if (r) return r;
+  let recent: { path: string; mtime: number }[] = [];
+  if (agent === "codex") {
+    recent = await fs.codexForFolder(pane.cwd, 15).catch(() => []);
+    const titled = await codexByTitle(fs, recent, pane.title);
+    if (titled) return { source: { agent, path: titled, how: "title" } };
+    if (pane.session?.kind === "id") {
+      const path = await byId(pane.session.value);
+      if (await codexMine(path, true)) return found(path, "session")!;
+    }
+  } else {
+    if (pane.session?.kind === "path") return (await fs.exists(pane.session.value)) ? { source: { agent, path: pane.session.value, how: "session" } } : pending(pane.session.value);
+    if (pane.session?.kind === "id") {
+      const r = found(await byId(pane.session.value), "session");
+      if (r) return r;
+    }
   }
-  if (knownSession || pane.session) return pending(knownPath ?? "");
+  if (knownSession || (pane.session && agent !== "codex")) return pending(knownPath ?? "");
 
   // 3. guesses, for agents whose process cannot be asked
   if (agent === "claude") {
@@ -894,15 +913,6 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     return { reason: "no claude transcript for this folder yet" };
   }
   if (agent === "codex") {
-    const recent = await fs.codexForFolder(pane.cwd, 15).catch(() => [] as { path: string; mtime: number }[]);
-    // the terminal title is the thread's name once codex named it ("Fix and test addition | af-codex-test"); also
-    // right after `codex resume` from its list, before anything is written
-    const name = codexTitleName(pane.title);
-    if (name && recent.length) {
-      const ids = new Set(await fs.codexIdsNamed(name).catch(() => [] as string[]));
-      const hit = recent.find((r) => ids.has(codexIdOf(r.path) ?? ""));
-      if (hit) return { source: { agent, path: hit.path, how: "title" } };
-    }
     // a running codex: only what it wrote since it started can be its conversation. A fresh one has written nothing
     // yet: locked to its own, never shown an older one
     const start = procs.length ? await fs.codexStartOfPids(procs).catch(() => undefined) : undefined;
@@ -919,6 +929,37 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
   }
   return { reason: `${agent} has not reported its session to Herdr yet` };
 }
+
+/**
+ * The terminal title is the thread's name once codex named it ("Fix and test addition | af-codex-test"), drawn by the
+ * pane's own codex; also right after `codex resume` from its list, before anything is written. Among `recent` (the
+ * folder's conversations, subagents left out).
+ */
+async function codexByTitle(fs: TranscriptFS, recent: { path: string }[], title: string | undefined) {
+  const name = codexTitleName(title);
+  if (!name || !recent.length) return undefined;
+  const ids = new Set(await fs.codexIdsNamed(name).catch(() => [] as string[]));
+  return recent.find((r) => ids.has(codexIdOf(r.path) ?? ""))?.path;
+}
+
+/** A codex rollout's folder and whether it is a subagent's thread, from its first line; undefined if it is gone. */
+export async function codexHead(fs: TranscriptFS, path: string): Promise<{ cwd?: string; subagent: boolean } | undefined> {
+  const r = await fs.readFrom(path, 0, 8192).catch(() => undefined);
+  if (!r) return undefined;
+  const head = r.data.toString("utf8");
+  const m = head.match(/"cwd":"((?:[^"\\]|\\.)*)"/);
+  let cwd: string | undefined;
+  try {
+    cwd = m ? JSON.parse(`"${m[1]}"`) : undefined;
+  } catch {}
+  return { cwd, subagent: codexSubagentHead(head) };
+}
+
+/** The same folder, or one inside the other (macOS shows /tmp as /private/tmp). */
+const sameFolder = (a: string, b: string) => {
+  const t = (x: string) => x.replace(/\/+$/, "").replace(/^\/private\//, "/");
+  return t(a) === t(b) || t(a).startsWith(`${t(b)}/`) || t(b).startsWith(`${t(a)}/`);
+};
 
 /** ps gives a process's start in whole seconds, and a session file is written a moment after its process starts. */
 const START_SLACK = 3000;

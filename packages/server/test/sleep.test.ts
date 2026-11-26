@@ -62,6 +62,11 @@ describe("resuming an agent with the flags it was started with", () => {
     expect(sessionOf("claude", src("claude", `/p/${ID}.jsonl`), undefined)).toEqual({ id: ID, path: `/p/${ID}.jsonl` });
     expect(sessionOf("codex", src("codex", `/r/rollout-2026-11-05T10-00-00-${ID}.jsonl`), undefined)?.id).toBe(ID);
     expect(sessionOf("codex", undefined, { kind: "id", value: ID })?.id).toBe(ID);
+    // codex 0.172: Herdr's report can be another pane's thread or auto-review's; the file shown wins, and is resumed
+    const OTHER = "01a21772-82ec-7fe0-9b3b-6d6dc7c74630";
+    const shown = `/r/rollout-2026-11-24T18-30-21-${ID}.jsonl`;
+    expect(sessionOf("codex", src("codex", shown), { kind: "id", value: OTHER })).toEqual({ id: ID, path: shown });
+    expect(resumeArgs("codex", ["-s", "workspace-write"], sessionOf("codex", src("codex", shown), { kind: "id", value: OTHER })!)).toEqual(["resume", "-s", "workspace-write", ID]);
     expect(sessionOf("omp", src("omp", "/o/2026_abc.jsonl"), undefined)).toEqual({ path: "/o/2026_abc.jsonl" });
     expect(sessionOf("gemini", src("gemini", "/g/session-x.jsonl"), undefined, JSON.stringify({ sessionId: ID }) + "\n{}")?.id).toBe(ID);
     expect(sessionOf("claude", src("claude", "/p/not-a-session.jsonl"), undefined)).toBeUndefined();

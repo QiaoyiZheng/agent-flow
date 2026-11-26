@@ -1266,7 +1266,18 @@ export class Workspaces {
     }
     const keys = keysToChoose(menu, index);
     if (opts.key) keys.splice(keys.length - 1, 1, opts.key); // the arrows, then the dialog's own key instead of Enter
-    if (text?.trim() && opt.freeText) {
+    const agent = this.model.panes.find((p) => p.id === pane)?.agent;
+    if (text?.trim() && opt.freeText && agent === "codex") {
+      // codex's "No, and tell Codex what to do differently": Enter turns the request down and gives back its input
+      // box (no text field in the dialog; typed at once, the first letters were lost and the rest not sent)
+      await r.backend.sendKeys(r.raw, keys);
+      for (let i = 0; i < 40; i++) {
+        await Bun.sleep(150);
+        if (inputText(agent, await this.visible(pane, true).catch(() => "")) !== undefined) break;
+      }
+      await r.backend.sendText(r.raw, text.replace(/[\r\n]+/g, " ").trim());
+      await r.backend.sendKeys(r.raw, ["enter"]);
+    } else if (text?.trim() && opt.freeText) {
       if (keys.length > 1) await r.backend.sendKeys(r.raw, keys.slice(0, -1));
       await r.backend.sendText(r.raw, text.replace(/[\r\n]+/g, " ").trim());
       await r.backend.sendKeys(r.raw, ["enter"]);

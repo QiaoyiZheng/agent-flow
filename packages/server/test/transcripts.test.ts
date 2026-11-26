@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, HPane } from "@af/core";
 import { parseClaude, parseCodex, parseOmp } from "../src/transcripts/parse.ts";
-import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, chatImage, claudeTitle, codexIdOf, codexTitleName, idsNamed, matchByScreen, parseCodexStart, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
+import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, chatImage, claudeTitle, codexHead, codexIdOf, codexTitleName, idsNamed, matchByScreen, parseCodexStart, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -392,6 +392,45 @@ describe("finding and following transcripts", () => {
       } finally {
         sleeper.kill();
       }
+    });
+
+  for (const [name, make] of [
+    ["local files", (root: string) => new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, ".codex/sessions") }) as TranscriptFS],
+    ["files over SSH (shell commands)", shellFs],
+  ] as const)
+    test(`codex: what Herdr reports is checked (one background service reports every conversation, auto-review's too, as one pane) — ${name}`, async () => {
+      const root = home();
+      const day = join(root, ".codex/sessions/2026/11/26");
+      mkdirSync(day, { recursive: true });
+      const rollout = (id: string, cwd: string, source: unknown = "cli") => {
+        const f = join(day, `rollout-2026-11-26T18-41-50-${id}.jsonl`);
+        writeFileSync(f, JSON.stringify({ type: "session_meta", payload: { id, cwd, originator: "codex-tui", source } }) + "\n");
+        return f;
+      };
+      const mine = rollout("01a20d1b-4796-7da2-9c64-7b5a4e514b47", "/proj");
+      const review = rollout("01a2128d-0000-7000-8000-0000000guard", "/proj", { subagent: { other: "guardian" } });
+      const elsewhere = rollout("01a21772-82ec-7fe0-9b3b-6d6dc7c74630", "/private/tmp/af-codex-test");
+      writeFileSync(join(root, ".codex/session_index.jsonl"), JSON.stringify({ id: "01a20d1b-4796-7da2-9c64-7b5a4e514b47", thread_name: "接手 fbrt 项目主会话" }) + "\n");
+      const fs = Object.assign(Object.create(make(root)), { codexRolloutOfPids: async () => null, codexStartOfPids: async () => Date.now() - 3600_000 }) as TranscriptFS;
+      const none = async () => [] as string[][];
+      const pids = async () => [11641];
+      const reported = (value: string, title?: string) => pane({ agent: "codex", title, session: { kind: "id", value } });
+
+      // Herdr says auto-review's thread: never shown (it was the user's request over and over, {"outcome":"allow"})
+      expect(await resolveTranscript(fs, { pane: reported("01a2128d-0000-7000-8000-0000000guard"), panes: [], argv: none, pids })).toEqual({ source: { agent: "codex", path: mine, how: "folder" } });
+      // Herdr says a thread of another folder (another pane's): not this pane's
+      expect(await resolveTranscript(fs, { pane: reported("01a21772-82ec-7fe0-9b3b-6d6dc7c74630"), panes: [], argv: none, pids })).toEqual({ source: { agent: "codex", path: mine, how: "folder" } });
+      // Herdr's report of this folder's thread still counts
+      expect(await resolveTranscript(fs, { pane: reported("01a20d1b-4796-7da2-9c64-7b5a4e514b47"), panes: [], argv: none, pids })).toEqual({ source: { agent: "codex", path: mine, how: "session" } });
+      // the title (drawn by the pane's own codex) comes before Herdr's report
+      const other = rollout("01a20000-0000-7000-8000-000000000009", "/proj");
+      expect(await resolveTranscript(fs, { pane: reported("01a20000-0000-7000-8000-000000000009", "接手 fbrt 项目主会话 | proj"), panes: [], argv: none, pids })).toEqual({ source: { agent: "codex", path: mine, how: "title" } });
+      expect(await resolveTranscript(fs, { pane: reported("01a20000-0000-7000-8000-000000000009"), panes: [], argv: none, pids })).toEqual({ source: { agent: "codex", path: other, how: "session" } });
+      // agent-flow's own record of auto-review's thread is not taken either
+      expect(await resolveTranscript(fs, { pane: pane({ agent: "codex" }), panes: [], knownPath: review, argv: none, pids })).toMatchObject({ source: { how: "folder" } });
+      expect(await resolveTranscript(fs, { pane: pane({ agent: "codex" }), panes: [], knownPath: elsewhere, argv: none, pids })).toEqual({ source: { agent: "codex", path: elsewhere, how: "session" } });
+      expect(await codexHead(fs, review)).toEqual({ cwd: "/proj", subagent: true });
+      expect(await codexHead(fs, join(day, "gone.jsonl"))).toBeUndefined();
     });
 
   test("codex helpers: its start among ps lines, the thread of a file, the name in a title, renames", () => {
