@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatOp, HPane } from "@af/core";
 import { parseClaude, parseCodex, parseOmp } from "../src/transcripts/parse.ts";
-import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, chatImage, claudeTitle, matchByScreen, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
+import { LocalFS, SshFS, type TranscriptFS, TranscriptTail, chatImage, claudeTitle, codexIdOf, codexTitleName, idsNamed, matchByScreen, parseCodexStart, resolveTranscript, screenSnippets } from "../src/transcripts/index.ts";
 
 const dirs: string[] = [];
 afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -265,6 +265,34 @@ describe("finding and following transcripts", () => {
       } finally {
         holder.kill();
       }
+
+      // codex --approve-for-me: auto-review is a thread of its own in the same process and folder, held open first
+      // and written last. It is never the pane's conversation (shown, it was the user's request over and over, each
+      // answered {"outcome":"allow"})
+      const meta = (id: string, source: unknown) => JSON.stringify({ type: "session_meta", payload: { id, cwd: "/proj", originator: "codex-tui", cli_version: "0.172.0", source, base_instructions: { text: "x".repeat(2000) } } }) + "\n";
+      const main = join(root, ".codex/sessions/2026/11/02/rollout-2026-11-02T16-00-00-01a2128d-0000-7000-8000-00000000main.jsonl");
+      const guardian = join(root, ".codex/sessions/2026/11/02/rollout-2026-11-02T16-00-05-01a2128d-0000-7000-8000-0000guardian.jsonl");
+      writeFileSync(main, meta("01a2128d-0000-7000-8000-00000000main", "cli"));
+      writeFileSync(guardian, meta("01a2128d-0000-7000-8000-0000guardian", { subagent: { other: "guardian" } }));
+      utimesSync(main, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+      const both = Bun.spawn(["sh", "-c", `exec 3>>'${guardian}' 4>>'${main}'; sleep 20`]);
+      try {
+        await Bun.sleep(300);
+        const x = pane({ agent: "codex" });
+        expect(await resolveTranscript(fs, { pane: x, panes: [x], argv: none, pids: async () => [both.pid] })).toEqual({ source: { agent: "codex", path: main, how: "session" } });
+      } finally {
+        both.kill();
+      }
+      // only the review held open: checked, the conversation is not open
+      const reviewOnly = Bun.spawn(["sh", "-c", `exec 3>>'${guardian}'; sleep 20`]);
+      try {
+        await Bun.sleep(300);
+        expect(await fs.codexRolloutOfPids([reviewOnly.pid])).toBeNull();
+      } finally {
+        reviewOnly.kill();
+      }
+      // and the folder's newest rollout (the review) is not taken for the conversation
+      expect((await fs.codexForFolder("/proj", 15))[0]?.path).toBe(main);
     });
 
   test("a fresh agent is locked to its own conversation before writing anything, and never shown an older one", async () => {
@@ -306,6 +334,77 @@ describe("finding and following transcripts", () => {
     // lsof could not run: the old guesses
     writeFileSync(rollout, JSON.stringify({ type: "session_meta", payload: { cwd: "/proj" } }) + "\n");
     expect(await resolveTranscript(stub(undefined), { pane: x, panes: [x], argv: none, pids: async () => [7] })).toMatchObject({ source: { how: "folder" } });
+  });
+
+  for (const [name, make] of [
+    ["local files", (root: string) => new LocalFS({ claude: join(root, ".claude/projects"), codex: join(root, ".codex/sessions") }) as TranscriptFS],
+    ["files over SSH (shell commands)", shellFs],
+  ] as const)
+    test(`codex closes its rollout between turns: an idle codex is still shown its conversation, a fresh one is not shown an old one — ${name}`, async () => {
+      // captured live (codex 0.172): no rollout held open during the turn or after it, Herdr told nothing
+      const root = home();
+      const day = join(root, ".codex/sessions/2026/11/26");
+      mkdirSync(day, { recursive: true });
+      const rollout = (id: string, ageS: number, cwd = "/proj") => {
+        const f = join(day, `rollout-2026-11-26T18-41-50-${id}.jsonl`);
+        writeFileSync(f, JSON.stringify({ type: "session_meta", payload: { id, cwd, originator: "codex-tui", source: "cli", thread_source: "user" } }) + "\n");
+        utimesSync(f, new Date(Date.now() - ageS * 1000), new Date(Date.now() - ageS * 1000));
+        return f;
+      };
+      const older = rollout("01a20000-0000-7000-8000-000000000001", 3600);
+      const mine = rollout("01a21772-82ec-7fe0-9b3b-6d6dc7c74630", 60);
+      writeFileSync(join(root, ".codex/session_index.jsonl"), [
+        { id: "01a20000-0000-7000-8000-000000000001", thread_name: "Old work", updated_at: "2026-11-26T09:00:00Z" },
+        { id: "01a21772-82ec-7fe0-9b3b-6d6dc7c74630", thread_name: "Fix calc", updated_at: "2026-11-26T10:41:00Z" },
+        { id: "01a21772-82ec-7fe0-9b3b-6d6dc7c74630", thread_name: "Fix and test addition", updated_at: "2026-11-26T10:43:03Z" },
+      ].map((e) => JSON.stringify(e)).join("\n") + "\n");
+      const base = make(root);
+      const fs = (startedAgoS: number | undefined) => Object.assign(Object.create(base), { codexRolloutOfPids: async () => null, codexStartOfPids: async () => (startedAgoS === undefined ? undefined : Date.now() - startedAgoS * 1000) }) as TranscriptFS;
+      const none = async () => [] as string[][];
+      const x = pane({ agent: "codex", title: "af-codex-test" });
+      const pids = async () => [77108];
+
+      // started before its rollout was last written: that is its conversation (not the empty "new conversation")
+      expect(await resolveTranscript(fs(220), { pane: x, panes: [x], argv: none, pids })).toEqual({ source: { agent: "codex", path: mine, how: "folder" } });
+      // started after the folder's last write: a fresh codex, locked to its own conversation
+      expect(await resolveTranscript(fs(10), { pane: x, panes: [x], argv: none, pids })).toMatchObject({ source: { pending: true } });
+      // the title names the thread (its latest name): found even with other codex agents in the folder, and even when
+      // it wrote nothing since it started (`codex resume` from its list)
+      const titled = pane({ agent: "codex", title: "⠴ Fix and test addition | af-codex-test" });
+      const twin = pane({ id: "w1:p2", agent: "codex" });
+      expect(await resolveTranscript(fs(10), { pane: titled, panes: [titled, twin], argv: none, pids })).toEqual({ source: { agent: "codex", path: mine, how: "title" } });
+      expect(await resolveTranscript(fs(10), { pane: pane({ agent: "codex", title: "Old work | proj" }), panes: [], argv: none, pids })).toEqual({ source: { agent: "codex", path: older, how: "title" } });
+      // a name it no longer has does not count
+      expect(await resolveTranscript(fs(10), { pane: pane({ agent: "codex", title: "Fix calc | proj" }), panes: [], argv: none, pids })).toMatchObject({ source: { pending: true } });
+      // a session agent-flow knows still wins
+      expect(await resolveTranscript(fs(10), { pane: x, panes: [x], knownSession: "01a20000-0000-7000-8000-000000000001", argv: none, pids })).toEqual({ source: { agent: "codex", path: older, how: "session" } });
+      // the real lookups behind the stubs
+      expect((await base.codexForFolder("/proj", 15)).map((r) => r.path)).toEqual([mine, older]);
+      expect(Math.abs((await base.codexForFolder("/proj", 15))[0]!.mtime - (Date.now() - 60_000))).toBeLessThan(2000);
+      expect(await base.codexIdsNamed("Fix and test addition")).toEqual(["01a21772-82ec-7fe0-9b3b-6d6dc7c74630"]);
+      expect(await base.codexIdsNamed("Fix calc")).toEqual([]);
+      expect(await base.codexIdsNamed("it's \"quoted\"")).toEqual([]);
+      const sleeper = Bun.spawn(["sh", "-c", "exec -a codex sleep 20"]);
+      try {
+        await Bun.sleep(1200);
+        const t = await base.codexStartOfPids([sleeper.pid]);
+        expect(t !== undefined && Math.abs(t - (Date.now() - 1200)) < 2500).toBe(true);
+      } finally {
+        sleeper.kill();
+      }
+    });
+
+  test("codex helpers: its start among ps lines, the thread of a file, the name in a title, renames", () => {
+    const now = 1_795_700_000;
+    const ps = [" 77108 03:42 codex -s workspace-write -a on-request", " 77200 00:05 /opt/homebrew/bin/codex-exec-server", " 77300 00:02 /bin/zsh -c python3 test_calc.py", `#now ${now}`].join("\n");
+    expect(parseCodexStart(ps)).toBe((now - 222) * 1000);
+    expect(parseCodexStart(`#now ${now}`)).toBeUndefined();
+    expect(codexIdOf("/h/.codex/sessions/2026/11/26/rollout-2026-11-26T18-41-50-01a21772-82ec-7fe0-9b3b-6d6dc7c74630.jsonl")).toBe("01a21772-82ec-7fe0-9b3b-6d6dc7c74630");
+    expect(codexTitleName("接手 fbrt 项目主会话 | fbrt")).toBe("接手 fbrt 项目主会话");
+    expect(codexTitleName("⠴ Fix and test addition | af-codex-test")).toBe("Fix and test addition");
+    expect(codexTitleName("af-codex-test")).toBeUndefined();
+    expect(codexTitleName(undefined)).toBeUndefined();
+    expect(idsNamed(['{"id":"a","thread_name":"x"}', "not json", '{"id":"b","thread_name":"x"}', '{"id":"a","thread_name":"y"}'], "x")).toEqual(["b"]);
   });
 
   test("several claude agents in one folder: the conversation title (the terminal title) tells which is whose", async () => {

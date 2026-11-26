@@ -126,8 +126,15 @@ export interface TranscriptFS {
   codexById(id: string): Promise<string | undefined>;
   /** Claude transcripts (last two weeks) whose recorded cwd is `cwd`, newest first, at most `limit`. */
   claudeForFolder(cwd: string, limit: number): Promise<string[]>;
-  /** Codex rollout files (last two weeks) whose session_meta cwd is `cwd`, newest first, at most `limit`. */
-  codexForFolder(cwd: string, limit: number): Promise<string[]>;
+  /**
+   * Codex rollout files (last two weeks) whose session_meta cwd is `cwd`, newest first, at most `limit`, with when
+   * each was last written (ms, that machine's clock). Subagents' and auto-review's files are left out.
+   */
+  codexForFolder(cwd: string, limit: number): Promise<{ path: string; mtime: number }[]>;
+  /** The codex threads whose name (~/.codex/session_index.jsonl, the latest one per thread) is `name`. */
+  codexIdsNamed(name: string): Promise<string[]>;
+  /** When the oldest of these processes (or their children) that runs codex started, by that machine's clock. */
+  codexStartOfPids(pids: number[]): Promise<number | undefined>;
   /** Gemini CLI session files (last two weeks) of the project for `cwd`, last written first, at most `limit`. */
   geminiForFolder(cwd: string, limit: number): Promise<GeminiSession[]>;
   /** The Gemini CLI session file of a session id (chats/session-<time>-<first 8 of the id>.jsonl). */
@@ -161,6 +168,16 @@ export interface TranscriptFS {
 }
 
 const validPids = (pids: number[]) => pids.filter((p) => Number.isInteger(p) && p > 1);
+/**
+ * A codex rollout that is not a conversation of its own: its session_meta (the first line; "source" comes in its
+ * first few hundred bytes) names a subagent. That is a spawned subagent ({"subagent":{"thread_spawn":…}}) or codex's
+ * auto-review ({"subagent":{"other":"guardian"}}, `--approve-for-me`): one thread, in the same folder and process as
+ * the conversation, written at every approval (each review repeats the user's request and ends in
+ * {"outcome":"allow"}). Never a pane's conversation.
+ */
+const CODEX_SUBAGENT = String.raw`"source":\{"subagent"|"thread_source":"subagent"`;
+const CODEX_SUBAGENT_RE = new RegExp(CODEX_SUBAGENT);
+export const codexSubagentHead = (head: string) => CODEX_SUBAGENT_RE.test(head);
 /** claude's background job ids are short hex ("87146d58"): also safe in a shell command. */
 const JOB_ID = /^[0-9a-f]{6,36}$/i;
 /** The job's session among claude session records (JSON texts): the most recently updated one with that jobId. */
@@ -181,9 +198,9 @@ export function attachedJob(args: string[][]) {
   for (const a of args) if (a[1] === "attach" && JOB_ID.test(a[2] ?? "")) return a[2]!;
   return undefined;
 }
-/** A shell command printing the first codex rollout that these processes or their children hold open. */
+/** A shell command printing the first codex rollout that these processes or their children hold open (not a subagent's). */
 export const openRolloutCmd = (pids: number[]) =>
-  String.raw`command -v lsof >/dev/null 2>&1 || exit 0; pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] || exit 0; lsof -Fn -p "$pids" 2>/dev/null | sed -n 's/^n\(.*\/sessions\/.*rollout-.*\.jsonl\)$/\1/p' | head -n 1; echo "#checked"`;
+  String.raw`command -v lsof >/dev/null 2>&1 || exit 0; pids="$(for p in ${validPids(pids).join(" ")}; do echo $p; pgrep -P $p 2>/dev/null; done | paste -sd, -)"; [ -n "$pids" ] || exit 0; lsof -Fn -p "$pids" 2>/dev/null | sed -n 's/^n\(.*\/sessions\/.*rollout-.*\.jsonl\)$/\1/p' | while IFS= read -r f; do head -c 4096 "$f" 2>/dev/null | grep -qE '${CODEX_SUBAGENT}' || { echo "$f"; break; }; done; echo "#checked"`;
 /** The answer of openRolloutCmd: the open rollout, null when none is open, undefined when lsof could not run. */
 export const parseOpenRollout = (out: string) => {
   const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -208,21 +225,51 @@ const elapsed = (e: string) => {
   return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : undefined;
 };
 
-/** The answer of processStartCmd: when the youngest Gemini CLI process started (ms), or undefined. */
-export function parseGeminiStart(out: string): number | undefined {
+/** When the youngest (or oldest) process running `exe` started (ms), from processStartCmd's answer. */
+function parseStart(out: string, exe: RegExp, pick: "youngest" | "oldest"): number | undefined {
   const now = Number(out.match(/^#now (\d+)$/m)?.[1]);
   if (!Number.isFinite(now)) return undefined;
   let start: number | undefined;
   for (const line of out.split("\n")) {
     const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
-    // the gemini executable or its script (node …/gemini.js), not a command that merely mentions it
-    if (!m || !/(^|\/)gemini(\.js)?(\s|$)/.test(m[3]!)) continue;
+    if (!m || !exe.test(m[3]!)) continue;
     const e = elapsed(m[2]!);
     if (e === undefined) continue;
     const t = (now - e) * 1000;
-    if (start === undefined || t > start) start = t;
+    if (start === undefined || (pick === "youngest" ? t > start : t < start)) start = t;
   }
   return start;
+}
+
+/**
+ * The answer of processStartCmd: when the youngest Gemini CLI process started (ms), or undefined. (The gemini
+ * executable or its script, node …/gemini.js, not a command that merely mentions it; it restarts itself as a child.)
+ */
+export const parseGeminiStart = (out: string) => parseStart(out, /(^|\/)gemini(\.js)?(\s|$)/, "youngest");
+/** The same for codex: the oldest codex process, the pane's own (its tool commands are its children). */
+export const parseCodexStart = (out: string) => parseStart(out, /(^|\/)codex(\.js)?(\s|$)/, "oldest");
+
+/** The thread a codex rollout file belongs to: "rollout-<time>-<id>.jsonl" (a later page: "…_<id>.jsonl"). */
+export const codexIdOf = (path: string) => path.match(/[-_]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i)?.[1];
+/** The threads named `name` among session_index.jsonl lines ({id, thread_name, updated_at}; a rename adds a line). */
+export function idsNamed(lines: string[], name: string): string[] {
+  const latest = new Map<string, string>();
+  for (const l of lines) {
+    try {
+      const e = JSON.parse(l);
+      if (typeof e?.id === "string" && typeof e.thread_name === "string") latest.set(e.id, e.thread_name);
+    } catch {}
+  }
+  return [...latest].filter(([, n]) => n === name).map(([id]) => id);
+}
+/**
+ * The thread name in codex's terminal title: "<name> | <folder>", a spinner in front while it works. Before codex
+ * names the thread the title is the folder alone (or the start of the first message, with no " | ").
+ */
+export function codexTitleName(title: string | undefined) {
+  const t = title?.replace(/^[⠀-⣿]\s*/, "").trim();
+  const i = t ? t.lastIndexOf(" | ") : -1;
+  return i > 0 ? t!.slice(0, i).trim() : undefined;
 }
 
 /**
@@ -275,7 +322,7 @@ function readHead(path: string, bytes = 16384) {
 }
 
 export class LocalFS implements TranscriptFS {
-  private cwdCache = new Map<string, { mtime: number; cwd?: string }>();
+  private cwdCache = new Map<string, { mtime: number; cwd?: string; subagent?: boolean }>();
   private geminiStarts = new Map<string, number>();
   constructor(readonly roots: Roots = defaultRoots()) {}
 
@@ -464,14 +511,30 @@ export class LocalFS implements TranscriptFS {
             if (mtime < cutoff) continue;
             let c = this.cwdCache.get(path);
             if (!c || c.mtime !== mtime) {
-              const m2 = readHead(path, 8192).match(/"cwd":"((?:[^"\\]|\\.)*)"/);
-              c = { mtime, cwd: m2 ? JSON.parse(`"${m2[1]}"`) : undefined };
+              const head = readHead(path, 8192);
+              const m2 = head.match(/"cwd":"((?:[^"\\]|\\.)*)"/);
+              c = { mtime, cwd: m2 ? JSON.parse(`"${m2[1]}"`) : undefined, subagent: codexSubagentHead(head) };
               this.cwdCache.set(path, c);
             }
-            if (c.cwd === cwd) hits.push({ path, mtime });
+            if (c.cwd === cwd && !c.subagent) hits.push({ path, mtime });
           }
         }
-    return hits.sort((a, b) => b.mtime - a.mtime).slice(0, limit).map((h) => h.path);
+    return hits.sort((a, b) => b.mtime - a.mtime).slice(0, limit);
+  }
+
+  async codexIdsNamed(name: string) {
+    try {
+      const index = join(dirname(this.roots.codex), "session_index.jsonl");
+      return idsNamed(readFileSync(index, "utf8").split("\n"), name);
+    } catch {
+      return [];
+    }
+  }
+
+  async codexStartOfPids(pids: number[]) {
+    if (!validPids(pids).length) return undefined;
+    const p = Bun.spawn(["sh", "-c", processStartCmd(pids)], { stdout: "pipe", stderr: "ignore" });
+    return parseCodexStart(await new Response(p.stdout).text());
   }
 
   async exists(path: string) {
@@ -594,9 +657,29 @@ export class SshFS implements TranscriptFS {
   async codexForFolder(cwd: string, limit: number) {
     const needle = sq(`"cwd":${JSON.stringify(cwd)}`);
     const r = await this.exec(
-      `find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -mtime -${RECENT_DAYS} 2>/dev/null | xargs ls -t 2>/dev/null | head -n 120 | while IFS= read -r f; do head -c 8192 "$f" | grep -qF ${needle} && echo "$f"; done | head -n ${Math.max(1, Math.floor(limit))}`,
+      `find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -mtime -${RECENT_DAYS} 2>/dev/null | xargs ls -t 2>/dev/null | head -n 120 | while IFS= read -r f; do h="$(head -c 8192 "$f")"; printf '%s' "$h" | grep -qF ${needle} && ! printf '%s' "$h" | grep -qE '${CODEX_SUBAGENT}' && printf '%s\t%s\n' "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)" "$f"; done | head -n ${Math.max(1, Math.floor(limit))}`,
     );
-    return r.out.toString().split("\n").map((l) => l.trim()).filter(Boolean);
+    return r.out
+      .toString()
+      .split("\n")
+      .map((l) => l.trim().match(/^(\d+)\t(.+)$/))
+      .filter((m): m is RegExpMatchArray => !!m)
+      .map((m) => ({ path: m[2]!, mtime: Number(m[1]) * 1000 }));
+  }
+
+  async codexIdsNamed(name: string) {
+    // the lines naming it, then every line of those threads (a later rename wins)
+    const needle = sq(`"thread_name":${JSON.stringify(name)}`);
+    const r = await this.exec(
+      String.raw`f="$HOME/.codex/session_index.jsonl"; [ -f "$f" ] || exit 0; ids="$(grep -F ${needle} "$f" | sed -n 's/.*"id":"\([0-9a-fA-F-]*\)".*/\1/p' | sort -u)"; [ -n "$ids" ] && grep -F "$ids" "$f"; true`,
+    );
+    return idsNamed(r.out.toString().split("\n"), name);
+  }
+
+  async codexStartOfPids(pids: number[]) {
+    if (!validPids(pids).length) return undefined;
+    const r = await this.exec(processStartCmd(pids));
+    return parseCodexStart(r.out.toString());
   }
 
   async exists(path: string) {
@@ -760,16 +843,17 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     const id = job ? await fs.claudeSessionOfJob(job).catch(() => undefined) : undefined;
     if (id) return found(await fs.claudeById(id), "session") ?? pending();
   }
+  // codex (0.172) holds its rollout open only some of the time (not between turns, often not during one either), so
+  // "none open" does not mean a fresh codex: step 3 tells the two apart
+  let codexOpen: string | null | undefined;
   if (agent === "codex" && procs.length) {
-    const open = await fs.codexRolloutOfPids(procs).catch(() => undefined);
-    if (open) return { source: { agent, path: open, how: "session" } };
-    if (open === null) {
-      // codex resume/fork <id> shows that conversation before writing anything of its own
-      const i = flat.findIndex((a) => a === "resume" || a === "fork");
-      const id = i >= 0 ? flat.slice(i + 1).find((a) => /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(a)) : undefined;
-      const r = id ? found(await fs.codexById(id), "session") : undefined;
-      return r ?? pending();
-    }
+    codexOpen = await fs.codexRolloutOfPids(procs).catch(() => undefined);
+    if (codexOpen) return { source: { agent, path: codexOpen, how: "session" } };
+    // codex resume/fork <id> shows that conversation before writing anything of its own
+    const i = flat.findIndex((a) => a === "resume" || a === "fork");
+    const id = i >= 0 ? flat.slice(i + 1).find((a) => /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(a)) : undefined;
+    const r = id ? found(await fs.codexById(id), "session") : undefined;
+    if (r) return r;
   }
 
   // 2. what agent-flow or Herdr was told
@@ -810,7 +894,21 @@ export async function resolveTranscript(fs: TranscriptFS, { pane, panes, knownSe
     return { reason: "no claude transcript for this folder yet" };
   }
   if (agent === "codex") {
-    const candidates = await fs.codexForFolder(pane.cwd, 15);
+    const recent = await fs.codexForFolder(pane.cwd, 15).catch(() => [] as { path: string; mtime: number }[]);
+    // the terminal title is the thread's name once codex named it ("Fix and test addition | af-codex-test"); also
+    // right after `codex resume` from its list, before anything is written
+    const name = codexTitleName(pane.title);
+    if (name && recent.length) {
+      const ids = new Set(await fs.codexIdsNamed(name).catch(() => [] as string[]));
+      const hit = recent.find((r) => ids.has(codexIdOf(r.path) ?? ""));
+      if (hit) return { source: { agent, path: hit.path, how: "title" } };
+    }
+    // a running codex: only what it wrote since it started can be its conversation. A fresh one has written nothing
+    // yet: locked to its own, never shown an older one
+    const start = procs.length ? await fs.codexStartOfPids(procs).catch(() => undefined) : undefined;
+    const asked = procs.length > 0 && (start !== undefined || codexOpen === null);
+    const candidates = (start !== undefined ? recent.filter((r) => r.mtime >= start - START_SLACK) : asked ? [] : recent).map((r) => r.path);
+    if (asked && !candidates.length) return pending();
     const sharing = panes.filter((p) => p.agent === "codex" && p.cwd === pane.cwd && p.machine === pane.machine).length;
     if (candidates.length && sharing <= 1) return { source: { agent, path: candidates[0]!, how: "folder" } };
     if (candidates.length && screen) {
