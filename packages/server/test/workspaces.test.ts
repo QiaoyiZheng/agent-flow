@@ -664,12 +664,16 @@ describe("menus: an agent's question answered from the UI", () => {
     const back = ["■ Conversation interrupted - use /feedback if something went wrong", "", "› ", "  GPT-6.2-Sol xhigh fast · /tmp/x", "  ? for shortcuts"].join("\n");
     backend.onKeys = (_t, keys) => keys.includes("enter") && backend.screens.set(ws.paneId, back);
     expect((await w.menu(ws.paneId))!.options[2]!.freeText).toBe(true);
+    // Herdr still sees the dialog for a moment and refuses a prompt (checked live)
+    let refusals = 2;
+    const prompt = backend.prompt.bind(backend);
+    backend.prompt = async (name: string, text: string) => {
+      if (refusals-- > 0) throw new Error(`agent ${name} is blocked and requires interactive input`);
+      return prompt(name, text);
+    };
     await w.choose(ws.paneId, 2, "No, and tell Codex what to do differently (esc)", "No need, the sandboxed\noutput is enough.");
-    expect(backend.keys).toEqual([
-      { target: ws.paneId, keys: ["down", "down", "enter"] },
-      { target: ws.paneId, keys: ["enter"] },
-    ]);
-    expect(backend.texts.at(-1)).toEqual({ pane: ws.paneId, text: "No need, the sandboxed output is enough." });
+    expect(backend.keys).toEqual([{ target: ws.paneId, keys: ["down", "down", "enter"] }]);
+    expect(backend.prompts.at(-1)).toEqual({ name: ws.paneId, text: "No need, the sandboxed output is enough." });
   });
 });
 

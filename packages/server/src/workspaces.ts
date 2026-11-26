@@ -1269,14 +1269,25 @@ export class Workspaces {
     const agent = this.model.panes.find((p) => p.id === pane)?.agent;
     if (text?.trim() && opt.freeText && agent === "codex") {
       // codex's "No, and tell Codex what to do differently": Enter turns the request down and gives back its input
-      // box (no text field in the dialog; typed at once, the first letters were lost and the rest not sent)
+      // box (no text field in the dialog; typed at once, the first letters were lost and the rest not sent). Then the
+      // text is sent as any message is (an Enter right after typed text is not taken: checked live, codex 0.172)
       await r.backend.sendKeys(r.raw, keys);
       for (let i = 0; i < 40; i++) {
         await Bun.sleep(150);
         if (inputText(agent, await this.visible(pane, true).catch(() => "")) !== undefined) break;
       }
-      await r.backend.sendText(r.raw, text.replace(/[\r\n]+/g, " ").trim());
-      await r.backend.sendKeys(r.raw, ["enter"]);
+      // Herdr refuses a prompt while it still sees the dialog ("blocked and requires interactive input"), a moment more
+      const line = text.replace(/[\r\n]+/g, " ").trim();
+      for (let i = 0; ; i++) {
+        try {
+          await r.backend.prompt(r.raw, line);
+          break;
+        } catch (e) {
+          if (i >= 30 || !/blocked|interactive input/i.test((e as Error).message)) throw e;
+          await Bun.sleep(300);
+        }
+      }
+      this.promptedAt.set(pane, Date.now());
     } else if (text?.trim() && opt.freeText) {
       if (keys.length > 1) await r.backend.sendKeys(r.raw, keys.slice(0, -1));
       await r.backend.sendText(r.raw, text.replace(/[\r\n]+/g, " ").trim());
